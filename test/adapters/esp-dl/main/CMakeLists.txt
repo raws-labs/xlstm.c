@@ -1,0 +1,14 @@
+idf_component_register(
+    SRCS
+        "test_espdl.cpp"
+        "/workspace/adapters/esp-dl/slstm_espdl.cpp"
+        "/workspace/adapters/esp-dl/mlstm_espdl.cpp"
+        "/workspace/src/slstm.c"
+        "/workspace/src/mlstm.c"
+    INCLUDE_DIRS
+        "/workspace/include"
+        "/workspace/adapters/esp-dl"
+        "/workspace/test"
+    REQUIRES
+        esp-dl
+)

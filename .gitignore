@@ -1,0 +1,28 @@
+# Ignore all dotfiles and dotfolders
+.*
+
+# But keep .gitignore itself
+!.gitignore
+!.github/
+
+# Build artifacts
+build/
+*.o
+*.a
+*.so
+
+# Test binaries
+*_test
+
+# Generated model headers (TFLM integration test)
+test/adapters/tflm/slstm_model_data.h
+test/adapters/tflm/mlstm_model_data.h
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+*.md
+!README.md
+!CONTRIBUTING.md

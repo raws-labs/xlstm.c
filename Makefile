@@ -3,32 +3,58 @@ CXX     := g++
 CFLAGS  := -std=c99 -O2 -Wall -Wextra
 CXXFLAGS:= -std=c++17 -O2 -Wall -Wextra
 
+BUILD   := build
 VENV    := .venv/bin/python3
 
 .PHONY: all test reference clean \
         test-docker-ort test-docker-tvm test-docker-tflm test-docker-espdl
 
-all: slstm.o mlstm.o
+all: $(BUILD)/slstm.o $(BUILD)/mlstm.o \
+     $(BUILD)/xlstm_quant.o $(BUILD)/slstm_q8.o $(BUILD)/mlstm_q8.o
+
+$(BUILD):
+	@mkdir -p $@
 
 # --- Core objects ---
 
-slstm.o: src/slstm.c include/slstm.h include/xlstm_util.h
+$(BUILD)/slstm.o: src/slstm.c include/slstm.h include/xlstm_util.h | $(BUILD)
 	@$(CC) $(CFLAGS) -Iinclude -c $< -o $@
 
-mlstm.o: src/mlstm.c include/mlstm.h include/xlstm_util.h
+$(BUILD)/mlstm.o: src/mlstm.c include/mlstm.h include/xlstm_util.h | $(BUILD)
+	@$(CC) $(CFLAGS) -Iinclude -c $< -o $@
+
+# --- Quantized objects ---
+
+$(BUILD)/xlstm_quant.o: src/xlstm_quant.c include/xlstm_quant.h | $(BUILD)
+	@$(CC) $(CFLAGS) -Iinclude -c $< -o $@
+
+$(BUILD)/slstm_q8.o: src/slstm_q8.c include/slstm_q8.h include/xlstm_quant.h include/xlstm_util.h | $(BUILD)
+	@$(CC) $(CFLAGS) -Iinclude -c $< -o $@
+
+$(BUILD)/mlstm_q8.o: src/mlstm_q8.c include/mlstm_q8.h include/xlstm_quant.h include/xlstm_util.h | $(BUILD)
 	@$(CC) $(CFLAGS) -Iinclude -c $< -o $@
 
 # --- Core tests ---
 
-slstm_test: test/slstm_test.cc slstm.o include/slstm.h test/reference_data.h
-	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< slstm.o -lm
+$(BUILD)/slstm_test: test/slstm_test.cc $(BUILD)/slstm.o include/slstm.h test/reference_data.h | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/slstm.o -lm
 
-mlstm_test: test/mlstm_test.cc mlstm.o include/mlstm.h test/reference_data.h
-	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< mlstm.o -lm
+$(BUILD)/mlstm_test: test/mlstm_test.cc $(BUILD)/mlstm.o include/mlstm.h test/reference_data.h | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/mlstm.o -lm
 
-test: slstm_test mlstm_test
-	@./slstm_test
-	@./mlstm_test
+# --- Quantized tests ---
+
+$(BUILD)/slstm_q8_test: test/slstm_q8_test.cc $(BUILD)/slstm_q8.o $(BUILD)/xlstm_quant.o include/slstm_q8.h test/reference_data.h | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/slstm_q8.o $(BUILD)/xlstm_quant.o -lm
+
+$(BUILD)/mlstm_q8_test: test/mlstm_q8_test.cc $(BUILD)/mlstm_q8.o $(BUILD)/xlstm_quant.o include/mlstm_q8.h test/reference_data.h | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/mlstm_q8.o $(BUILD)/xlstm_quant.o -lm
+
+test: $(BUILD)/slstm_test $(BUILD)/mlstm_test $(BUILD)/slstm_q8_test $(BUILD)/mlstm_q8_test
+	@$(BUILD)/slstm_test
+	@$(BUILD)/mlstm_test
+	@$(BUILD)/slstm_q8_test
+	@$(BUILD)/mlstm_q8_test
 
 # --- Docker integration tests ---
 
@@ -59,4 +85,4 @@ reference: test/generate_reference.py
 # --- Cleanup ---
 
 clean:
-	@rm -f *.o slstm_test mlstm_test
+	@rm -rf $(BUILD)

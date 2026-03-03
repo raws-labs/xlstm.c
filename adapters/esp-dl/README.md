@@ -23,7 +23,7 @@ Add to your ESP-IDF component's `CMakeLists.txt`:
 
 ```cmake
 idf_component_register(
-    SRCS "slstm_espdl.cpp" "mlstm_espdl.cpp" "slstm.c" "mlstm.c"
+    SRCS "slstm_espdl.cpp" "mlstm_espdl.cpp" "slstm.c" "mlstm.c" "xlstm_simd_esp.c"
     INCLUDE_DIRS "include" "adapters/esp-dl"
     REQUIRES esp-dl
 )

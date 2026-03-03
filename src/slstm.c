@@ -1,4 +1,4 @@
-/* Copyright 2026 RAWS labs
+/* Copyright 2026 RAWS Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
  * ===========================================================================*/
 
 #include "slstm.h"
+#include "xlstm_simd.h"
 #include "xlstm_util.h"
 
 #include <math.h>
@@ -40,23 +41,14 @@ void slstm_step_f32(
 {
     int H = hidden_size;
     int I = input_size;
-    int i, j;
+    int i;
 
     /* Gate pre-activations: scratch = W*x + R*y + b
      * scratch layout: [i_raw, f_raw, z_raw, o_raw] each of size H */
-    for (i = 0; i < 4 * H; ++i) {
+    for (i = 0; i < 4 * H; ++i)
         scratch[i] = b[i];
-
-        /* W*x contribution */
-        for (j = 0; j < I; ++j) {
-            scratch[i] += W[i * I + j] * x[j];
-        }
-
-        /* R*y contribution */
-        for (j = 0; j < H; ++j) {
-            scratch[i] += R[i * H + j] * y[j];
-        }
-    }
+    xlstm_matvec_f32(W, x, scratch, 4 * H, I);
+    xlstm_matvec_f32(R, y, scratch, 4 * H, H);
 
     /* Apply sLSTM gating with log-space stabilization */
     for (i = 0; i < H; ++i) {

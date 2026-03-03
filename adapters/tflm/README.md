@@ -26,7 +26,7 @@ Compile the adapter alongside your TFLM project:
 # Add to your TFLM build:
 #   adapters/tflm/slstm_tflm.cc
 #   adapters/tflm/mlstm_tflm.cc
-#   src/slstm.c  src/mlstm.c
+#   src/slstm.c  src/mlstm.c  src/xlstm_simd_ref.c
 # Include paths: -Iinclude -Iadapters/tflm
 ```
 

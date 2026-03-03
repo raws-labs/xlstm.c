@@ -1,4 +1,4 @@
-/* Copyright 2026 RAWS labs
+/* Copyright 2026 RAWS Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@
  * ===========================================================================*/
 
 #include "slstm_q8.h"
+#include "xlstm_simd.h"
 #include "xlstm_util.h"
 
 #include <math.h>
@@ -43,7 +44,7 @@ void slstm_step_s8(
 {
     int H = hidden_size;
     int I = input_size;
-    int i, j;
+    int i;
 
     float wx_scale = params->W_scale * params->x_quant.scale;
     float ry_scale = params->R_scale * params->y_quant.scale;
@@ -54,20 +55,15 @@ void slstm_step_s8(
 
     /* 1+2. INT8×INT8 matmul → INT32, then dequantize to float pre-activations.
      *       Scratch is reused as float* (sizeof(int32_t) == sizeof(float)). */
+    int32_t acc_wx[4 * XLSTM_MAX_HIDDEN];
+    int32_t acc_ry[4 * XLSTM_MAX_HIDDEN];
+    xlstm_matvec_s8(W_q, x, acc_wx, 4 * H, I, x_zp);
+    xlstm_matvec_s8(R_q, y, acc_ry, 4 * H, H, y_zp);
+
     float* preact = (float*)scratch;
     for (i = 0; i < 4 * H; ++i) {
-        int32_t acc_wx = 0;
-        for (j = 0; j < I; ++j) {
-            acc_wx += (int32_t)W_q[i * I + j] * ((int32_t)x[j] - x_zp);
-        }
-
-        int32_t acc_ry = 0;
-        for (j = 0; j < H; ++j) {
-            acc_ry += (int32_t)R_q[i * H + j] * ((int32_t)y[j] - y_zp);
-        }
-
-        preact[i] = (float)acc_wx * wx_scale
-                   + (float)acc_ry * ry_scale
+        preact[i] = (float)acc_wx[i] * wx_scale
+                   + (float)acc_ry[i] * ry_scale
                    + (float)b_q[i] * b_scale;
     }
 

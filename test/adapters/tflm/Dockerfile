@@ -54,7 +54,7 @@ RUN TFLM=/opt/tflm && \
         test/adapters/tflm/test_tflm.cc \
         adapters/tflm/slstm_tflm.cc \
         adapters/tflm/mlstm_tflm.cc \
-        src/slstm.c src/mlstm.c \
+        src/slstm.c src/mlstm.c src/xlstm_simd_ref.c \
         $TFLM_LIB \
         -lm -o tflm_integration_test
 

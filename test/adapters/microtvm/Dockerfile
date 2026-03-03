@@ -59,7 +59,7 @@ RUN g++ -std=c++17 -shared -fPIC -O2 \
         test/adapters/microtvm/tvm_register_wrapper.cc \
         adapters/microtvm/slstm_tvm.c \
         adapters/microtvm/mlstm_tvm.c \
-        src/slstm.c src/mlstm.c \
+        src/slstm.c src/mlstm.c src/xlstm_simd_ref.c \
         -lm \
         -o libxlstm_tvm.so
 

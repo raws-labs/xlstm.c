@@ -1,4 +1,4 @@
-/* Copyright 2026 RAWS labs
+/* Copyright 2026 RAWS Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@
  * ===========================================================================*/
 
 #include "mlstm_q8.h"
+#include "xlstm_simd.h"
 #include "xlstm_util.h"
 
 #include <math.h>
@@ -50,13 +51,12 @@ void mlstm_step_s8(
 
     /* 1+2. INT8×INT8 matmul → float pre-activations.
      *       scratch layout: [q(H), k(H), v(H), i_raw(1), f_raw(1), o_raw(H)] */
+    int32_t acc[4 * XLSTM_MAX_HIDDEN + 2];
+    xlstm_matvec_s8(W_q, x, acc, total, I, x_zp);
+
     float* preact = (float*)scratch;
     for (i = 0; i < total; ++i) {
-        int32_t acc = 0;
-        for (j = 0; j < I; ++j) {
-            acc += (int32_t)W_q[i * I + j] * ((int32_t)x[j] - x_zp);
-        }
-        preact[i] = (float)acc * wx_scale + (float)b_q[i] * wx_scale;
+        preact[i] = (float)acc[i] * wx_scale + (float)b_q[i] * wx_scale;
     }
 
     /* Extract projections from pre-activations */

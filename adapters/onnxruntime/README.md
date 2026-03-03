@@ -12,7 +12,7 @@ g++ -std=c++17 -shared -fPIC -O2 \
     adapters/onnxruntime/slstm_ort.cc \
     adapters/onnxruntime/mlstm_ort.cc \
     adapters/onnxruntime/xlstm_ort_register.cc \
-    src/slstm.c src/mlstm.c \
+    src/slstm.c src/mlstm.c src/xlstm_simd_ref.c \
     -lm -o libxlstm_ort.so
 ```
 

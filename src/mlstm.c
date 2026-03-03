@@ -1,4 +1,4 @@
-/* Copyright 2026 RAWS labs
+/* Copyright 2026 RAWS Labs
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,9 +16,11 @@
  * ===========================================================================*/
 
 #include "mlstm.h"
+#include "xlstm_simd.h"
 #include "xlstm_util.h"
 
 #include <math.h>
+#include <string.h>
 
 /* ========================================================================== */
 /* Core mLSTM computation                                                     */
@@ -40,16 +42,13 @@ void mlstm_step_f32(
     int H = hidden_size;
     int I = input_size;
     int total = 4 * H + 2;
-    int i, j, r, c;
+    int i, j;
 
     /* 1. Compute pre-activations: scratch = W*x + b
      *    scratch layout: [q(H), k(H), v(H), i_raw(1), f_raw(1), o_raw(H)] */
-    for (i = 0; i < total; ++i) {
+    for (i = 0; i < total; ++i)
         scratch[i] = b[i];
-        for (j = 0; j < I; ++j) {
-            scratch[i] += W[i * I + j] * x[j];
-        }
-    }
+    xlstm_matvec_f32(W, x, scratch, total, I);
 
     /* 2. Extract projections from scratch */
     float* q     = scratch;              /* [H] */
@@ -74,17 +73,13 @@ void mlstm_step_f32(
     float i_gate = expf(i_raw - m_new);
 
     /* 5. Update C: C[r][c] = f_gate * C[r][c] + i_gate * k[r] * v[c] */
-    for (r = 0; r < H; ++r) {
-        for (c = 0; c < H; ++c) {
-            C[r * H + c] = f_gate * C[r * H + c] + i_gate * k[r] * v[c];
-        }
-    }
+    xlstm_rank1_update_f32(C, f_gate, i_gate, k, v, H);
 
     /* Optional cell clipping */
     if (params && params->cell_clip > 0.0f) {
         float clip = params->cell_clip;
-        for (r = 0; r < H * H; ++r) {
-            C[r] = fmaxf(-clip, fminf(clip, C[r]));
+        for (i = 0; i < H * H; ++i) {
+            C[i] = fmaxf(-clip, fminf(clip, C[i]));
         }
     }
 
@@ -106,12 +101,12 @@ void mlstm_step_f32(
     }
     float denom = fmaxf(fabsf(qn), expf(-m_new)) + 1e-6f;
 
+    /* q^T * C via vecmat (scatter-accumulate with contiguous row access) */
+    float qC[XLSTM_MAX_HIDDEN];
+    memset(qC, 0, (size_t)H * sizeof(float));
+    xlstm_vecmat_f32(q, C, qC, H, H);
     for (j = 0; j < H; ++j) {
-        float qC_j = 0.0f;
-        for (i = 0; i < H; ++i) {
-            qC_j += q[i] * C[i * H + j];
-        }
-        y[j] = sigmoid_f32(o_raw[j]) * (qC_j / denom);
+        y[j] = sigmoid_f32(o_raw[j]) * (qC[j] / denom);
     }
 }
 

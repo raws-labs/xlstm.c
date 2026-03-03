@@ -12,26 +12,29 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * Shared utilities for xLSTM kernels (sLSTM, mLSTM) — pure inline C99.
+ * xlstm.h — single-include umbrella header for the xlstm.c library.
+ *
+ * Pulls in all public kernel APIs (f32 + INT8) and exposes library version
+ * and active SIMD backend for introspection.
+ *
+ * Reference: https://arxiv.org/abs/2405.04517
  * ===========================================================================*/
 
-#ifndef XLSTM_UTIL_H_
-#define XLSTM_UTIL_H_
+#ifndef XLSTM_H_
+#define XLSTM_H_
 
-#include <math.h>
+#define XLSTM_VERSION_MAJOR 0
+#define XLSTM_VERSION_MINOR 2
+#define XLSTM_VERSION_PATCH 0
+#define XLSTM_VERSION "0.2.0"
 
-static inline float sigmoid_f32(float x) {
-    return 1.0f / (1.0f + expf(-x));
-}
+/* Kernel APIs */
+#include "slstm.h"
+#include "mlstm.h"
+#include "slstm_q8.h"
+#include "mlstm_q8.h"
 
-static inline float log_sigmoid_f32(float x) {
-    /* log(sigmoid(x)) = -softplus(-x)
-     * Split for numerical stability. */
-    if (x >= 0.0f) {
-        return -logf(1.0f + expf(-x));
-    } else {
-        return x - logf(1.0f + expf(x));
-    }
-}
+/* SIMD backend introspection */
+#include "xlstm_simd.h"
 
-#endif /* XLSTM_UTIL_H_ */
+#endif /* XLSTM_H_ */

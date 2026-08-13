@@ -167,6 +167,55 @@ def fmt(tensor):
     return ", ".join(f"{v:.8f}f" for v in tensor.flatten().tolist())
 
 
+# Hidden sizes for the correctness sweep. 17 is deliberately not a multiple
+# of 4: it exercises SIMD loop-tail handling, which is where vectorised
+# backends realistically break. See .docs/SCOPE.md section 7.
+SWEEP_SIZES = [1, 8, 16, 17, 64]
+
+
+def slstm_sized_case(H, seed):
+    """sLSTM case at hidden size H, 3 timesteps, I = H.
+
+    T=3 matters: a multi-step sequence forces the recurrent path and makes
+    state errors observable in the per-timestep output.
+    """
+    torch.manual_seed(seed)
+    I = H
+    W = torch.randn(4 * H, I) * 0.5
+    R = torch.randn(4 * H, H) * 0.5
+    b = torch.randn(4 * H) * 0.1
+    x = torch.randn(1, 3, I)
+    output, y, c, n, m = run_slstm(W, R, b, x)
+    return dict(
+        name=f"SweepS{H}", comment=f"Size sweep H={H}, 3 timesteps",
+        B=1, T=3, I=I, H=H,
+        W=W, R=R, b=b, input=x,
+        y=y, c=c, n=n, m=m, output=output,
+        tol_f32=1e-5, tol_s8=0.10)
+
+
+def mlstm_sized_case(H, seed):
+    """mLSTM case at hidden size H, 3 timesteps, I = H.
+
+    The full C matrix is stored only up to H=17. At H=64 it is 4096 floats
+    per case, and y over T=3 already makes C errors observable because each
+    output is read out of C via the vecmat path.
+    """
+    torch.manual_seed(seed)
+    I = H
+    W = torch.randn(4 * H + 2, I) * 0.5
+    b = torch.randn(4 * H + 2) * 0.1
+    x = torch.randn(1, 3, I)
+    output, y, C, n, m = run_mlstm(W, b, x)
+    return dict(
+        name=f"SweepM{H}", comment=f"Size sweep H={H}, 3 timesteps",
+        B=1, T=3, I=I, H=H,
+        W=W, b=b, input=x,
+        y=y, c=C, n=n, m=m, output=output,
+        store_state=(H <= 17),
+        tol_f32=1e-5, tol_s8=0.10)
+
+
 def build_cases():
     """Build every reference case once. Both emitters consume this.
 
@@ -274,6 +323,10 @@ def build_cases():
         W=mW3, b=mb3, input=mx3,
         y=y, c=C, n=n, m=m, output=None))
 
+    for idx, H in enumerate(SWEEP_SIZES):
+        slstm_cases.append(slstm_sized_case(H, seed=1000 + idx))
+        mlstm_cases.append(mlstm_sized_case(H, seed=2000 + idx))
+
     return slstm_cases, mlstm_cases
 
 
@@ -306,7 +359,8 @@ def _emit_case(f, tc, state_key, has_R):
         f.write(f"const float k{n}_b[] = {{{fmt(tc['b'])}}};\n")
     f.write(f"const float k{n}_input[] = {{{fmt(tc['input'])}}};\n")
     f.write(f"const float k{n}_expected_y[] = {{{fmt(tc['y'])}}};\n")
-    f.write(f"const float k{n}_expected_{state_key}[] = {{{fmt(tc['c'])}}};\n")
+    if tc.get("store_state", True):
+        f.write(f"const float k{n}_expected_{state_key}[] = {{{fmt(tc['c'])}}};\n")
     f.write(f"const float k{n}_expected_n[] = {{{fmt(tc['n'])}}};\n")
     f.write(f"const float k{n}_expected_m[] = {{{fmt(tc['m'])}}};\n")
     if tc["output"] is not None:

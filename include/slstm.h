@@ -32,6 +32,34 @@ typedef struct {
     float cell_clip; /* 0 = no clipping */
 } SlstmParams;
 
+/* NOTE ON HIDDEN SIZE AND HEADS
+ *
+ * hidden_size is the PER-HEAD width (DH in the NX-AI reference), not the
+ * model width. This kernel implements one head.
+ *
+ * For a multi-head cell, slice the weights per head and call this function
+ * once per head, then concatenate the outputs. State buffers (y, c, n, m)
+ * are per head and must not be shared between heads.
+ *
+ * The slicing is not the obvious one. The reference's fused weight rows run
+ * gate-major over the fused width Hf = num_heads * hidden_size, so a head's
+ * four gate blocks are strided across the matrix rather than contiguous.
+ * With g in 0..3 the gate index (i, f, z, o), h the head, and j in
+ * 0..hidden_size-1:
+ *
+ *     W_h[g*hidden_size + j][:] = W_fused[g*Hf + h*hidden_size + j][:]
+ *     b_h[g*hidden_size + j]    = b_fused[g*Hf + h*hidden_size + j]
+ *     R_h                       = R_stack[h]  (no cross-head recurrence, so
+ *                                              each head's [4*DH, DH] block
+ *                                              is already contiguous)
+ *     y_h[j]                    = y_fused[h*hidden_size + j]  (c, n, m too)
+ *
+ * Slicing rows [h*4*hidden_size, (h+1)*4*hidden_size) instead - the obvious
+ * guess - yields a silently different model. See test/slstm_test.cc
+ * TestHeadComposition for a worked example, and
+ * test/derive_multihead_layout.py for how the rule was established.
+ */
+
 /* Single timestep of sLSTM.
  *
  * All state pointers (y, c, n, m) are updated in-place.

@@ -50,6 +50,69 @@ static bool RunSlstmCase(const XlstmRefCase* tc) {
     return ok;
 }
 
+/* Multi-head contract: hidden_size is the PER-HEAD width, and multi-head is
+ * the caller's outer loop over head-sliced weights (.docs/SCOPE.md section 6).
+ *
+ * This is the only test that is not vacuous on that point - every other case
+ * is num_heads=1, where per-head width and model width coincide.
+ *
+ * The reference tensors here are the FUSED ones from a real num_heads=2 cell,
+ * and the reference outputs are that cell's own. The slicing happens below,
+ * in C, deliberately: it is the thing under test. The reference packs the
+ * fused weight rows GATE-major, so head h's four gate blocks are strided
+ * across the matrix rather than contiguous - slicing rows
+ * [h*4*DH, (h+1)*4*DH) instead, which is the obvious guess, silently yields a
+ * different model. The rule was established empirically (not read off the
+ * reference source, whose declared parameter shapes are rewritten at
+ * construction) by test/derive_multihead_layout.py.
+ *
+ * Head2/Head2b in the table above are these same weights pre-sliced in
+ * Python; this test does not use them, so that a wrong slicing here cannot be
+ * masked by a matching wrong slicing in the generator. */
+static bool TestHeadComposition() {
+    const int B = 1, T = kHead2_T, I = kHead2_I;
+    const int DH = kHead2_DH, NH = kHead2_NH, Hf = kHead2_Hf;
+
+    float joined_y[kHead2_Hf] = {0};
+    float joined_output[kHead2_NH * kHead2_T * kHead2_DH] = {0};
+
+    for (int h = 0; h < NH; ++h) {
+        /* Per-head weight slice, in this library's flat [4*DH, I] packing. */
+        float Wh[4 * kHead2_DH * kHead2_I];
+        float bh[4 * kHead2_DH];
+        for (int g = 0; g < 4; ++g) {
+            for (int j = 0; j < DH; ++j) {
+                const int src = g * Hf + h * DH + j;  /* fused row */
+                const int dst = g * DH + j;           /* per-head row */
+                for (int k = 0; k < I; ++k)
+                    Wh[dst * I + k] = kHead2Fused_W[src * I + k];
+                bh[dst] = kHead2Fused_b[src];
+            }
+        }
+        /* The reference carries no cross-head recurrence, so head h's
+         * recurrent matrix is already a contiguous [4*DH, DH] block. */
+        const float* Rh = kHead2Fused_R + h * (4 * DH * DH);
+
+        float y[kHead2_DH] = {0}, c[kHead2_DH] = {0};
+        float n[kHead2_DH] = {0}, m[kHead2_DH] = {0};
+        float out[kHead2_T * kHead2_DH] = {0};
+        float scratch[4 * kHead2_DH] = {0};
+        SlstmParams params = {0.0f};
+
+        slstm_eval_f32(kHead2_input, Wh, Rh, bh,
+                       y, c, n, m, out, scratch, B, T, I, DH, &params);
+
+        for (int j = 0; j < DH; ++j) joined_y[h * DH + j] = y[j];
+        for (int j = 0; j < T * DH; ++j) joined_output[h * T * DH + j] = out[j];
+    }
+
+    bool ok = ExpectFinite("joined_y", joined_y, Hf);
+    ok &= ExpectNear("joined_y", kHead2_expected_y_joined, joined_y, Hf, 1e-5f);
+    ok &= ExpectNear("joined_output", kHead2_expected_output_joined,
+                     joined_output, NH * T * DH, 1e-5f);
+    return ok;
+}
+
 int main() {
     std::printf("[==========] Running sLSTM kernel tests\n");
 
@@ -64,6 +127,8 @@ int main() {
             std::printf("[  FAILED  ] sLSTM %s\n", tc->name);
         }
     }
+
+    RUN_TEST(TestHeadComposition);
 
     std::printf("[==========] %d/%d tests passed\n", g_tests_passed, g_tests_run);
     return g_tests_passed == g_tests_run ? 0 : 1;

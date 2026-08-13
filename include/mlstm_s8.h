@@ -42,6 +42,25 @@ typedef struct {
     XlstmQuantParam n_quant;   /* normalizer (INT16) */
 } MlstmS8Params;
 
+/* NOTE ON HIDDEN SIZE AND HEADS
+ *
+ * hidden_size is the PER-HEAD width (DH in the NX-AI reference), not the
+ * model width. This kernel implements one head.
+ *
+ * For a multi-head cell, slice the weights per head and call this function
+ * once per head, then concatenate the outputs. State buffers (y, C, n, m)
+ * are per head and must not be shared between heads.
+ *
+ * The cell matrix C is [hidden_size x hidden_size] PER HEAD. Total state
+ * therefore grows as num_heads * DH * DH, not as (num_heads * DH)^2 - which
+ * is the whole memory argument for running xLSTM on an MCU.
+ *
+ * See the note above mlstm_step_f32 in mlstm.h on why the sLSTM gate-major
+ * slicing rule does not automatically carry over to mLSTM. Quantization is
+ * per call: MlstmS8Params carries one set of scales, so each head may be
+ * calibrated separately.
+ */
+
 /* Single timestep of mLSTM (INT8 quantized).
  *
  * State pointers (y, C, n, m) are updated in-place.

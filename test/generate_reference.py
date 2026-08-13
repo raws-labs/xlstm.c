@@ -26,11 +26,17 @@ from xlstm.blocks.mlstm.backends import (  # type: ignore[import-untyped]
 # sLSTM helpers
 # ============================================================================
 
-def make_slstm_cell(hidden_size):
-    """Create a vanilla sLSTM cell (num_heads=1, float32)."""
+def make_slstm_cell(hidden_size, num_heads=1):
+    """Create a vanilla sLSTM cell (float32).
+
+    hidden_size here is the reference's FUSED width, i.e. num_heads *
+    head_dim. Every case but the head-composition case below uses
+    num_heads=1, where fused width and this library's per-head hidden_size
+    coincide. See build_head2_composition().
+    """
     config = sLSTMCellConfig(
         hidden_size=hidden_size,
-        num_heads=1,
+        num_heads=num_heads,
         backend="vanilla",
         function="slstm",
         bias_init="zeros",
@@ -70,6 +76,50 @@ def run_slstm(W, R, b, x_seq):
         output, final_state = cell(Wx, state=state)
 
     output = output.squeeze(1)
+    y, c, n, m = final_state[0], final_state[1], final_state[2], final_state[3]
+    return output, y, c, n, m
+
+
+def run_slstm_multihead(W_fused, R_stack, b_fused, x_seq, num_heads):
+    """Run a genuine multi-head sLSTM cell through the same vanilla path.
+
+    This is the oracle the caller-side head composition is checked against.
+    The layouts below are not the ones sLSTMCellBase declares: the vanilla
+    cell rewrites both parameters through _recurrent_kernel_ext2int /
+    _bias_ext2int at construction, and assigning `.data` (as run_slstm
+    already does) bypasses the ParameterProxy, so what is written must
+    already be in the INTERNAL layout. Established empirically, not read
+    off the source - see test/derive_multihead_layout.py.
+
+    Args:
+        W_fused: [4*NH*DH, I] input projection, rows gate-major:
+                 row (g*NH*DH + h*DH + j) is gate g, head h, unit j
+        R_stack: [NH, 4*DH, DH] per-head recurrent matrices, each in
+                 exactly this library's [4*DH, DH] packing (no cross-head
+                 recurrence exists in the reference)
+        b_fused: [4*NH*DH] bias, same gate-major row order as W_fused
+        x_seq:   [B, T, I]
+
+    Returns:
+        output: [B, NH, T, DH] per-head outputs
+        y, c, n, m: [B, NH*DH] final states, ordered [head][unit]
+    """
+    NH, DH = R_stack.shape[0], R_stack.shape[2]
+    assert NH == num_heads, (
+        f"R_stack has {NH} head slices but num_heads={num_heads}")
+    H = NH * DH
+    B = x_seq.shape[0]
+
+    cell = make_slstm_cell(H, num_heads=num_heads)
+
+    with torch.no_grad():
+        cell._recurrent_kernel_.data = R_stack
+        cell._bias_.data = b_fused
+
+        Wx = torch.matmul(x_seq, W_fused.T)
+        state = torch.zeros(4, B, H, dtype=torch.float32)
+        output, final_state = cell(Wx, state=state)
+
     y, c, n, m = final_state[0], final_state[1], final_state[2], final_state[3]
     return output, y, c, n, m
 
@@ -557,12 +607,127 @@ def mlstm_sized_case(H, seed):
         tol_f32=1e-5)
 
 
+# ============================================================================
+# Head composition
+#
+# .docs/SCOPE.md section 6: hidden_size is the PER-HEAD width (DH in the
+# NX-AI reference) and multi-head is the caller's outer loop over head-sliced
+# weights. Everything else in this file is num_heads=1, where that contract is
+# vacuous. This is the only case that is not.
+#
+# The slicing rule below was established empirically by
+# test/derive_multihead_layout.py, which runs one num_heads=2 cell against two
+# independent num_heads=1 cells and searches the plausible orderings. Measured
+# result: gate-major row packing with per-head R stacked as-is and states
+# ordered [head][unit] reproduces the 2-head cell EXACTLY (max abs diff
+# 0.000e+00 over y, c, n, m and every output timestep); the seven other
+# candidates are wrong by 1.0e-1 to 8.4e-1. Do not change this packing without
+# re-running that script.
+#
+#   Fused width Hf = NH*DH, gate g in 0..3, head h, unit j in 0..DH-1:
+#     W_h[g*DH + j][:] = W_fused[g*Hf + h*DH + j][:]
+#     b_h[g*DH + j]    = b_fused[g*Hf + h*DH + j]
+#     R_h              = R_stack[h]              (already [4*DH, DH])
+#     y_h[j]           = y_fused[h*DH + j]       (same for c, n, m)
+#
+# Note what the gate-major packing means in practice: a head's four gate
+# blocks are NOT contiguous in the fused weight matrix. A caller who slices
+# rows [h*4*DH, (h+1)*4*DH) - the obvious guess - gets a silently wrong model,
+# which is exactly why this vector exists.
+# ============================================================================
+
+HEAD2_NH = 2   # heads
+HEAD2_DH = 4   # per-head width == this library's hidden_size
+HEAD2_I = 3
+HEAD2_T = 2
+
+
+def _pack_gate_major(parts, NH, DH):
+    """Interleave per-head [4*DH, ...] tensors into a fused [4*NH*DH, ...]
+    one, gate-major: gate block g of the result is the concatenation over
+    heads of each head's gate-g block."""
+    return torch.cat(
+        [torch.cat([p[g * DH:(g + 1) * DH] for p in parts], dim=0)
+         for g in range(4)], dim=0)
+
+
+def build_head2_composition():
+    """Build the 2-head composition vector.
+
+    Returns (case_head0, case_head1, fused), where the two cases are ordinary
+    single-head sLSTM case dicts holding the per-head SLICES (so they flow
+    through the f32 and INT8 table runners like any other case), and `fused`
+    holds the unsliced 2-head tensors plus the 2-head cell's own outputs.
+
+    The C test (TestHeadComposition in test/slstm_test.cc) works from `fused`
+    only: it does the slicing itself, in C, and checks the concatenation of
+    two per-head slstm_eval_f32 calls against the 2-head cell's output. That
+    matters - had the C test consumed the pre-sliced per-head arrays instead,
+    it would assert nothing about the slicing rule, since Python would have
+    done the interesting part.
+    """
+    NH, DH, I, T = HEAD2_NH, HEAD2_DH, HEAD2_I, HEAD2_T
+    Hf = NH * DH
+
+    torch.manual_seed(7)
+    W_parts = [torch.randn(4 * DH, I) * 0.5 for _ in range(NH)]
+    R_parts = [torch.randn(4 * DH, DH) * 0.5 for _ in range(NH)]
+    b_parts = [torch.randn(4 * DH) * 0.1 for _ in range(NH)]
+    x = torch.randn(1, T, I)
+
+    W_fused = _pack_gate_major(W_parts, NH, DH)      # [4*Hf, I]
+    b_fused = _pack_gate_major(b_parts, NH, DH)      # [4*Hf]
+    R_stack = torch.stack(R_parts, dim=0)            # [NH, 4*DH, DH]
+
+    # The oracle: one real 2-head cell.
+    out2, y2, c2, n2, m2 = run_slstm_multihead(W_fused, R_stack, b_fused, x, NH)
+
+    cases = []
+    for h in range(NH):
+        output, y, c, n, m = run_slstm(W_parts[h], R_parts[h], b_parts[h], x)
+        # Guard the whole construction: if the packing above ever stops
+        # agreeing with the 2-head cell, fail here rather than emitting a
+        # header that asserts a false contract.
+        sl = slice(h * DH, (h + 1) * DH)
+        for label, mine, oracle in (("y", y, y2[:, sl]), ("c", c, c2[:, sl]),
+                                    ("n", n, n2[:, sl]), ("m", m, m2[:, sl]),
+                                    ("output", output, out2[:, h])):
+            err = (mine - oracle).abs().max().item()
+            assert err < 1e-6, (
+                f"head {h} {label}: 2-head cell and single-head cell differ by "
+                f"{err:.3e}; the packing in _pack_gate_major no longer matches "
+                f"the reference. Re-run test/derive_multihead_layout.py.")
+        cases.append(dict(
+            name=f"Head2{'' if h == 0 else 'b'}",
+            comment=f"2-head composition, head {h} of {NH} (DH={DH})",
+            note=(f"sliced from the fused 2-head weights by "
+                  f"W_h[g*{DH}+j] = W_fused[g*{Hf}+{h}*{DH}+j]; see "
+                  f"test/derive_multihead_layout.py"),
+            B=1, T=T, I=I, H=DH,
+            W=W_parts[h], R=R_parts[h], b=b_parts[h], input=x,
+            y=y, c=c, n=n, m=m, output=output,
+            tol_f32=1e-5))
+
+    fused = dict(
+        NH=NH, DH=DH, Hf=Hf, I=I, T=T,
+        W=W_fused, R=R_stack, b=b_fused, input=x,
+        # [Hf], ordered [head][unit]
+        y_joined=y2,
+        # [NH, T, DH] -> flattened head-major, which is what the C test builds
+        output_joined=out2.squeeze(0),
+    )
+    return cases[0], cases[1], fused
+
+
 def build_cases():
     """Build every reference case once. Both emitters consume this.
 
-    Returns (slstm_cases, mlstm_cases). Each case is a dict of torch tensors
-    plus its dimensions. Keeping this as the single source of truth is what
-    lets the .h and .json emitters stay in sync.
+    Returns (slstm_cases, mlstm_cases, extras). The two case lists hold dicts
+    of torch tensors plus their dimensions; `extras` holds data that is not a
+    case - today only the fused 2-head tensors from build_head2_composition(),
+    which are emitted as loose arrays because they are the INPUT to a
+    caller-side slicing test, not something a table runner can drive. Keeping
+    all three here is what lets the .h and .json emitters stay in sync.
 
     Required keys: name, B, T, I, H, W, b, input, y, c, n, m, output
     (output may be None). sLSTM cases also need R.
@@ -675,6 +840,14 @@ def build_cases():
         slstm_cases.append(slstm_sized_case(H, seed=1000 + idx))
         mlstm_cases.append(mlstm_sized_case(H, seed=2000 + idx))
 
+    # The two per-head slices go into the ordinary sLSTM table (they are
+    # ordinary single-head cases, and running them through the f32 and INT8
+    # runners is free coverage); the fused tensors the C composition test
+    # slices from go into extras. See build_head2_composition().
+    head0, head1, head2_fused = build_head2_composition()
+    slstm_cases.append(head0)
+    slstm_cases.append(head1)
+
     # tol_s8 is computed here, per channel, for every case (both cells) -
     # not hand-picked per case as earlier versions of this file did. A
     # single case-wide constant is unsound in general: the invariant that
@@ -716,7 +889,7 @@ def build_cases():
             compute_tol_s8_per_channel(tc, "m")
         tc["tol_s8"] = max(tc["tol_s8_per_channel"])
 
-    return slstm_cases, mlstm_cases
+    return slstm_cases, mlstm_cases, {"head2": head2_fused}
 
 
 def _emit_case(f, tc, state_key, has_R):
@@ -825,9 +998,52 @@ def _emit_table(f, cases, table_name, state_key, has_R):
             f"(int)(sizeof({table_name}) / sizeof({table_name}[0]));\n\n")
 
 
+def _emit_head2_fused(f, fused):
+    """Emit the unsliced 2-head tensors, plus the 2-head cell's own outputs.
+
+    These are deliberately NOT an XlstmRefCase: the table runners drive one
+    single-head kernel call per case, and the point here is the caller-side
+    slicing loop, which no table entry can express. The per-head slices are
+    in the table as the Head2/Head2b cases; these arrays are what
+    TestHeadComposition in test/slstm_test.cc slices for itself.
+    """
+    NH, DH, Hf = fused["NH"], fused["DH"], fused["Hf"]
+    f.write("// " + "=" * 72 + "\n")
+    f.write(f"// Head composition: one NH={NH} cell of head width DH={DH}\n")
+    f.write("//\n")
+    f.write("// hidden_size in this library is the PER-HEAD width; multi-head is the\n")
+    f.write("// caller's outer loop over head-sliced weights (.docs/SCOPE.md section 6).\n")
+    f.write("// The reference's fused weight rows are GATE-major, so head h's four gate\n")
+    f.write("// blocks are NOT contiguous:\n")
+    f.write("//\n")
+    f.write(f"//   W_h[g*{DH} + j][:] = kHead2Fused_W[(g*{Hf} + h*{DH} + j)*I ..]\n")
+    f.write(f"//   b_h[g*{DH} + j]    = kHead2Fused_b[g*{Hf} + h*{DH} + j]\n")
+    f.write(f"//   R_h                = kHead2Fused_R + h*{4 * DH * DH}"
+            f"   (already [4*DH, DH])\n")
+    f.write(f"//   y_h[j]             = y_fused[h*{DH} + j]\n")
+    f.write("//\n")
+    f.write("// Established empirically, not read off the reference source, by\n")
+    f.write("// test/derive_multihead_layout.py. Head2/Head2b in the table above are\n")
+    f.write("// these same weights already sliced.\n")
+    f.write("// " + "=" * 72 + "\n\n")
+    f.write(f"#define kHead2_NH {NH}\n")
+    f.write(f"#define kHead2_DH {DH}\n")
+    f.write(f"#define kHead2_Hf {Hf}\n")
+    f.write(f"#define kHead2_I {fused['I']}\n")
+    f.write(f"#define kHead2_T {fused['T']}\n")
+    f.write(f"const float kHead2Fused_W[] = {{{fmt(fused['W'])}}};\n")
+    f.write(f"const float kHead2Fused_R[] = {{{fmt(fused['R'])}}};\n")
+    f.write(f"const float kHead2Fused_b[] = {{{fmt(fused['b'])}}};\n")
+    f.write("// Final y of the NH=2 cell, [Hf], ordered [head][unit].\n")
+    f.write(f"const float kHead2_expected_y_joined[] = {{{fmt(fused['y_joined'])}}};\n")
+    f.write("// Per-timestep output of the NH=2 cell, [NH][T][DH].\n")
+    f.write(f"const float kHead2_expected_output_joined[] = "
+            f"{{{fmt(fused['output_joined'])}}};\n\n")
+
+
 def generate(f):
     """Generate all reference data into file handle f."""
-    slstm_cases, mlstm_cases = build_cases()
+    slstm_cases, mlstm_cases, extras = build_cases()
 
     f.write(
         "/* Auto-generated - do not edit.\n"
@@ -852,6 +1068,8 @@ def generate(f):
         _emit_case(f, tc, state_key="c", has_R=True)
     _emit_table(f, slstm_cases, "kSlstmCases", "c", True)
 
+    _emit_head2_fused(f, extras["head2"])
+
     f.write("// " + "=" * 72 + "\n")
     f.write("// mLSTM reference data\n")
     f.write("// " + "=" * 72 + "\n\n")
@@ -869,7 +1087,7 @@ def to_list(tensor):
 
 def generate_json(path):
     """Generate reference_data.json with the same values as the C header."""
-    slstm_cases, mlstm_cases = build_cases()
+    slstm_cases, mlstm_cases, extras = build_cases()
     data = {"slstm": {}, "mlstm": {}}
 
     for i, tc in enumerate(slstm_cases, start=1):
@@ -895,6 +1113,20 @@ def generate_json(path):
         if tc["output"] is not None:
             entry["expected_output"] = to_list(tc["output"])
         data["mlstm"][f"test{i}"] = entry
+
+    # The fused 2-head tensors are not a case (see _emit_head2_fused): they
+    # live in their own top-level key so the framework adapters, which loop
+    # over data["slstm"], keep seeing single-head cases only. An adapter that
+    # wants to check the composition contract reads this key explicitly.
+    h2 = extras["head2"]
+    data["slstm_head2"] = {
+        "NH": h2["NH"], "DH": h2["DH"], "Hf": h2["Hf"],
+        "I": h2["I"], "T": h2["T"], "B": 1,
+        "W_fused": to_list(h2["W"]), "R_stack": to_list(h2["R"]),
+        "b_fused": to_list(h2["b"]), "input": to_list(h2["input"]),
+        "expected_y_joined": to_list(h2["y_joined"]),
+        "expected_output_joined": to_list(h2["output_joined"]),
+    }
 
     with open(path, "w") as f:
         json.dump(data, f, indent=2)

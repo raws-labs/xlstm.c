@@ -45,6 +45,24 @@ typedef struct {
     /* m stays float - no param needed */
 } SlstmS8Params;
 
+/* NOTE ON HIDDEN SIZE AND HEADS
+ *
+ * hidden_size is the PER-HEAD width (DH in the NX-AI reference), not the
+ * model width. This kernel implements one head.
+ *
+ * For a multi-head cell, slice the weights per head and call this function
+ * once per head, then concatenate the outputs. State buffers (y, c, n, m)
+ * are per head and must not be shared between heads. The slicing is
+ * gate-major over the fused width and is NOT contiguous per head - see the
+ * note above slstm_step_f32 in slstm.h for the exact expressions, and
+ * test/slstm_test.cc TestHeadComposition for a worked example.
+ *
+ * Quantization is per call, not per model: SlstmS8Params carries one set of
+ * scales, so each head may be calibrated separately. Quantizing the fused
+ * matrix once and then slicing it is also valid but makes every head share a
+ * single W_scale/R_scale.
+ */
+
 /* Single timestep of sLSTM (INT8 quantized).
  *
  * All state pointers (y, c, n, m) are updated in-place.

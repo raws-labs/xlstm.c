@@ -41,6 +41,27 @@ typedef struct {
     float cell_clip; /* 0 = no clipping */
 } MlstmParams;
 
+/* NOTE ON HIDDEN SIZE AND HEADS
+ *
+ * hidden_size is the PER-HEAD width (DH in the NX-AI reference), not the
+ * model width. This kernel implements one head.
+ *
+ * For a multi-head cell, slice the weights per head and call this function
+ * once per head, then concatenate the outputs. State buffers (y, C, n, m)
+ * are per head and must not be shared between heads.
+ *
+ * The cell matrix C is [hidden_size x hidden_size] PER HEAD. Total state
+ * therefore grows as num_heads * DH * DH, not as (num_heads * DH)^2.
+ *
+ * The reference carries mLSTM heads as a leading batched dimension
+ * (B, NH, S, DH), with per-head state c(B,NH,DH,DH), n(B,NH,DH,1),
+ * m(B,NH,1,1), and never entangles them - so the per-head calls really are
+ * independent. How the q/k/v/i/f/o rows above map onto a given exporter's
+ * fused projection matrix is that exporter's convention and is not fixed by
+ * this header: the gate-major head slicing rule in slstm.h is proven for
+ * sLSTM only and does not automatically carry over.
+ */
+
 /* Single timestep of mLSTM.
  *
  * State pointers (y, C, n, m) are updated in-place.

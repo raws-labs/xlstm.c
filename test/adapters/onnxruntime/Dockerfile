@@ -18,7 +18,7 @@ RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --no-cache-dir onnxruntime onnx numpy
 
-# ORT pip package doesn't ship C++ headers — download from official release.
+# ORT pip package doesn't ship C++ headers - download from official release.
 # Version must match the pip onnxruntime version.
 RUN ORT_VERSION=$(python3 -c "import onnxruntime; print(onnxruntime.__version__)") && \
     echo "Downloading ORT $ORT_VERSION headers..." && \

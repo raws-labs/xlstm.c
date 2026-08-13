@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * ESP32-S3 backend — uses ESP-DSP dot product and PIE int8 MAC.
+ * ESP32-S3 backend - uses ESP-DSP dot product and PIE int8 MAC.
  * Only compiles under ESP-IDF toolchain.
  * ===========================================================================*/
 

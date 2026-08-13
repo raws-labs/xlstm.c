@@ -1,4 +1,4 @@
-/* sLSTM kernel unit tests — standalone (no TFLM dependency)
+/* sLSTM kernel unit tests - standalone (no TFLM dependency)
  *
  * Tests the core sLSTM cell computation against reference values
  * generated from the NX-AI/xlstm PyTorch reference (vanilla backend).
@@ -11,7 +11,7 @@
 #include "test_util.h"
 
 // ============================================================================
-// Reference test data — generated from NX-AI/xlstm reference (vanilla backend)
+// Reference test data - generated from NX-AI/xlstm reference (vanilla backend)
 // Regenerate: make reference
 // ============================================================================
 

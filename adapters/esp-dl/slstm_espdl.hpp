@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * sLSTM ESP-DL module — wraps core as an ESP-DL Module subclass.
+ * sLSTM ESP-DL module - wraps core as an ESP-DL Module subclass.
  *
  * Input tensors (via forward() vector):
  *   [0] X[B,T,I]  [1] W[4H,I]  [2] R[4H,H]  [3] b[4H]  [4] output[B,T,H]

@@ -1,4 +1,4 @@
-/* ESP-DL integration test — exercises sLSTM/mLSTM Module subclasses.
+/* ESP-DL integration test - exercises sLSTM/mLSTM Module subclasses.
  *
  * Tests constructor, get_output_shape(), and init_states()/free_states()
  * lifecycle against the real ESP-DL framework on emulated hardware (QEMU).
@@ -6,7 +6,7 @@
  * Note: Full forward() test requires constructing ModelContext + TensorBase
  * objects, which are tightly coupled to ESP-DL internals. Instead we verify
  * that the classes instantiate correctly, compute output shapes, and survive
- * init/destroy cycles — proving the adapter links and runs against real
+ * init/destroy cycles - proving the adapter links and runs against real
  * ESP-DL on real (emulated) hardware.
  *
  * Build: see Dockerfile (ESP-IDF project built for esp32s3, run via QEMU)
@@ -89,7 +89,7 @@ bool TestMLstmConstruction() {
 }
 
 // ---------------------------------------------------------------------------
-// sLSTM: lifecycle test — repeated init/destroy cycles
+// sLSTM: lifecycle test - repeated init/destroy cycles
 // ---------------------------------------------------------------------------
 bool TestSLstmLifecycle() {
     for (int i = 0; i < 3; i++) {
@@ -100,7 +100,7 @@ bool TestSLstmLifecycle() {
 }
 
 // ---------------------------------------------------------------------------
-// mLSTM: lifecycle test — repeated init/destroy cycles
+// mLSTM: lifecycle test - repeated init/destroy cycles
 // ---------------------------------------------------------------------------
 bool TestMLstmLifecycle() {
     for (int i = 0; i < 3; i++) {

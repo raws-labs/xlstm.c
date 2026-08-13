@@ -12,17 +12,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * sLSTM INT8 quantized kernel — pure C99.
+ * sLSTM INT8 quantized kernel - pure C99.
  *
  * Storage: INT8 weights/activations, INT16 states, float m-stabilizer.
- * Compute: INT8×INT8 → INT32 matmul, dequantize to float for gating,
+ * Compute: INT8xINT8 -> INT32 matmul, dequantize to float for gating,
  *          requantize states/output back to integer.
  *
  * Reference: https://arxiv.org/abs/2405.04517
  * ===========================================================================*/
 
-#ifndef SLSTM_Q8_H_
-#define SLSTM_Q8_H_
+#ifndef SLSTM_S8_H_
+#define SLSTM_S8_H_
 
 #include "xlstm_quant.h"
 
@@ -42,7 +42,7 @@ typedef struct {
     XlstmQuantParam y_quant;     /* hidden state / output */
     XlstmQuantParam c_quant;     /* cell state (INT16) */
     XlstmQuantParam n_quant;     /* normalizer (INT16) */
-    /* m stays float — no param needed */
+    /* m stays float - no param needed */
 } SlstmS8Params;
 
 /* Single timestep of sLSTM (INT8 quantized).
@@ -89,4 +89,4 @@ void slstm_eval_s8(
 }
 #endif
 
-#endif /* SLSTM_Q8_H_ */
+#endif /* SLSTM_S8_H_ */

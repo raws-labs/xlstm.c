@@ -12,12 +12,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * Portable mLSTM core library — pure C99, no framework dependencies.
+ * Portable mLSTM core library - pure C99, no framework dependencies.
  *
- * mLSTM is a variant of LSTM from the xLSTM paper (Hochreiter et al., 2024)
+ * mLSTM is a variant of LSTM from the xLSTM paper (Beck et al., 2024)
  * with a matrix-valued cell state and covariance-based memory retrieval.
  *
- * Weight layout — single packed W matrix [(4*H+2) rows × I cols]:
+ * Weight layout - single packed W matrix [(4*H+2) rows x I cols]:
  *   Rows 0..H-1:       W_q (query projection)
  *   Rows H..2H-1:      W_k (key projection)
  *   Rows 2H..3H-1:     W_v (value projection)
@@ -44,7 +44,7 @@ typedef struct {
 /* Single timestep of mLSTM.
  *
  * State pointers (y, C, n, m) are updated in-place.
- * C is a flattened H×H matrix (row-major).
+ * C is a flattened HxH matrix (row-major).
  * m is a scalar (single float).
  * Caller must provide a scratch buffer of at least (4*H+2) floats. */
 void mlstm_step_f32(

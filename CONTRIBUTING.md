@@ -1,6 +1,6 @@
 # Contributing
 
-Contributions are welcome. This project is Apache-2.0 licensed — by submitting
+Contributions are welcome. This project is Apache-2.0 licensed; by submitting
 a pull request you agree that your contribution will be licensed under the same
 terms.
 
@@ -15,13 +15,14 @@ make test-docker-espdl # ESP-DL integration test (QEMU)
 ```
 
 `make test` is fast (seconds). Docker integration tests are slower and require
-Docker. CI runs all of them on every PR.
+Docker. CI runs `make test` under both gcc and clang on every PR; the Docker
+integration tests are run locally, not in CI.
 
 ## Workflow
 
 1. Fork and create a feature branch
 2. Make your changes
-3. Run `make test` locally — all core tests must pass
+3. Run `make test` locally; all core tests must pass
 4. Run the relevant `make test-docker-*` if you touched an adapter
 5. Open a PR against `main`
 
@@ -30,7 +31,7 @@ Docker. CI runs all of them on every PR.
 - Core library: **C99**, no dependencies beyond `math.h`
 - Adapters: match the target framework's conventions (C++ for TFLM/ORT/ESP-DL,
   C for microTVM)
-- No dynamic allocation in the core — callers provide scratch buffers
+- No dynamic allocation in the core; callers provide scratch buffers
 - Keep adapters thin: unpack tensors, call core, return
 
 ## Regenerating reference data

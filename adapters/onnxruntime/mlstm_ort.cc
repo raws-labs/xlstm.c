@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * mLSTM ONNX Runtime custom op — unpacks ORT tensors and calls core.
+ * mLSTM ONNX Runtime custom op - unpacks ORT tensors and calls core.
  * ===========================================================================*/
 
 #include "mlstm_ort.h"

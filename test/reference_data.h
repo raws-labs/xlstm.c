@@ -1,4 +1,4 @@
-/* Auto-generated — do not edit.
+/* Auto-generated - do not edit.
  * Source: NX-AI/xlstm reference (vanilla backend)
  * Regenerate: make reference
  */
@@ -31,7 +31,7 @@ const float kTest2_expected_output[] = {0.01359604f, -0.22511525f, -0.05999865f,
 
 // Test 3: Large inputs, overflow prevention
 // B=1, T=1, I=2, H=2
-// i_raw = 100 — would overflow without m-stabilizer
+// i_raw = 100 - would overflow without m-stabilizer
 const float kTest3_W[] = {5.00000000f, 5.00000000f, 5.00000000f, 5.00000000f, 5.00000000f, 5.00000000f, 5.00000000f, 5.00000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f};
 const float kTest3_R[] = {0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f};
 const float kTest3_b[] = {0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f};
@@ -65,7 +65,7 @@ const float kMTest2_expected_output[] = {0.00081466f, -0.00190351f, -0.01144831f
 
 // mLSTM Test 3: Large values, overflow prevention
 // B=1, T=1, I=3, H=2
-// i_raw = 150 — would overflow without m-stabilizer
+// i_raw = 150 - would overflow without m-stabilizer
 const float kMTest3_W[] = {0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 5.00000000f, 5.00000000f, 5.00000000f, 5.00000000f, 5.00000000f, 5.00000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f, 0.50000000f};
 const float kMTest3_b[] = {0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f};
 const float kMTest3_input[] = {10.00000000f, 10.00000000f, 10.00000000f};

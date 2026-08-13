@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * Shared utilities for xLSTM kernels (sLSTM, mLSTM) — pure inline C99.
+ * Shared utilities for xLSTM kernels (sLSTM, mLSTM) - pure inline C99.
  * ===========================================================================*/
 
 #ifndef XLSTM_UTIL_H_

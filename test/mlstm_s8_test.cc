@@ -1,21 +1,21 @@
 /* mLSTM INT8 kernel unit tests
  *
  * Tests the quantized mLSTM cell against reference values from the
- * f32 kernel. Quantization introduces small errors — tests use relaxed
+ * f32 kernel. Quantization introduces small errors - tests use relaxed
  * tolerance compared to f32 tests.
  *
  * Build:
  *   make test
  * =========================================================================*/
 
-#include "mlstm_q8.h"
+#include "mlstm_s8.h"
 #include "xlstm_quant.h"
 #include "test_util.h"
 
 #include <cstring>
 
 // ============================================================================
-// Reference test data — same golden values as f32 tests
+// Reference test data - same golden values as f32 tests
 // ============================================================================
 
 #include "reference_data.h"
@@ -162,7 +162,7 @@ bool TestMlstmS8OverflowPrevention() {
 }
 
 bool TestMlstmS8QuantizationBound() {
-    /* Run q8 kernel on test cases 1 and 2, verify max error is bounded. */
+    /* Run s8 kernel on test cases 1 and 2, verify max error is bounded. */
     const int I = 3, H = 2;
     float max_err = 0.0f;
 

@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * ARM NEON backend — testable via qemu-aarch64.
+ * ARM NEON backend - testable via qemu-aarch64.
  * ===========================================================================*/
 
 #include "xlstm_simd.h"

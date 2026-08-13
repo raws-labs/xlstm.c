@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * mLSTM microTVM adapter — unpacks DLTensors and calls core.
+ * mLSTM microTVM adapter - unpacks DLTensors and calls core.
  * ===========================================================================*/
 
 #include "mlstm_tvm.h"

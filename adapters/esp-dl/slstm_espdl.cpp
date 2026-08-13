@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * sLSTM ESP-DL module — unpacks ESP-DL tensors and calls core.
+ * sLSTM ESP-DL module - unpacks ESP-DL tensors and calls core.
  * ===========================================================================*/
 
 #include "slstm_espdl.hpp"

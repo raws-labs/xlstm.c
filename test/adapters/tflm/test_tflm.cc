@@ -1,4 +1,4 @@
-/* TFLM integration test — runs sLSTM and mLSTM custom ops through a real
+/* TFLM integration test - runs sLSTM and mLSTM custom ops through a real
  * MicroInterpreter with generated .tflite FlatBuffer models.
  *
  * Build: see Dockerfile (compiled against tflite-micro source tree)
@@ -87,7 +87,7 @@ bool TestSLstmSingleTimestep() {
         return false;
     }
 
-    // Output: [B, T, H] — last timestep hidden state should match expected_y
+    // Output: [B, T, H] - last timestep hidden state should match expected_y
     const float* output = interpreter.output(0)->data.f;
 
     // For T=1 the output is the same as y

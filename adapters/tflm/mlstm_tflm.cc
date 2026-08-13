@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * mLSTM TFLM adapter — thin wrapper that unpacks tensors and calls core.
+ * mLSTM TFLM adapter - thin wrapper that unpacks tensors and calls core.
  * ===========================================================================*/
 
 #include "mlstm_tflm.h"

@@ -36,7 +36,7 @@ endif
         bench bench-ref bench-sse2
 
 all: $(BUILD)/slstm.o $(BUILD)/mlstm.o \
-     $(BUILD)/xlstm_quant.o $(BUILD)/slstm_q8.o $(BUILD)/mlstm_q8.o \
+     $(BUILD)/xlstm_quant.o $(BUILD)/slstm_s8.o $(BUILD)/mlstm_s8.o \
      $(BUILD)/xlstm_simd.o
 
 $(BUILD):
@@ -60,10 +60,10 @@ $(BUILD)/mlstm.o: src/mlstm.c include/mlstm.h include/xlstm_util.h include/xlstm
 $(BUILD)/xlstm_quant.o: src/xlstm_quant.c include/xlstm_quant.h | $(BUILD)
 	@$(CC) $(CFLAGS) -Iinclude -c $< -o $@
 
-$(BUILD)/slstm_q8.o: src/slstm_q8.c include/slstm_q8.h include/xlstm_quant.h include/xlstm_util.h include/xlstm_simd.h | $(BUILD)
+$(BUILD)/slstm_s8.o: src/slstm_s8.c include/slstm_s8.h include/xlstm_quant.h include/xlstm_util.h include/xlstm_simd.h | $(BUILD)
 	@$(CC) $(CFLAGS) -Iinclude -c $< -o $@
 
-$(BUILD)/mlstm_q8.o: src/mlstm_q8.c include/mlstm_q8.h include/xlstm_quant.h include/xlstm_util.h include/xlstm_simd.h | $(BUILD)
+$(BUILD)/mlstm_s8.o: src/mlstm_s8.c include/mlstm_s8.h include/xlstm_quant.h include/xlstm_util.h include/xlstm_simd.h | $(BUILD)
 	@$(CC) $(CFLAGS) -Iinclude -c $< -o $@
 
 # --- Core tests ---
@@ -76,17 +76,17 @@ $(BUILD)/mlstm_test: test/mlstm_test.cc $(BUILD)/mlstm.o $(BUILD)/xlstm_simd.o i
 
 # --- Quantized tests ---
 
-$(BUILD)/slstm_q8_test: test/slstm_q8_test.cc $(BUILD)/slstm_q8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o include/slstm_q8.h test/reference_data.h | $(BUILD)
-	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/slstm_q8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o -lm
+$(BUILD)/slstm_s8_test: test/slstm_s8_test.cc $(BUILD)/slstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o include/slstm_s8.h test/reference_data.h | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/slstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o -lm
 
-$(BUILD)/mlstm_q8_test: test/mlstm_q8_test.cc $(BUILD)/mlstm_q8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o include/mlstm_q8.h test/reference_data.h | $(BUILD)
-	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/mlstm_q8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o -lm
+$(BUILD)/mlstm_s8_test: test/mlstm_s8_test.cc $(BUILD)/mlstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o include/mlstm_s8.h test/reference_data.h | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/mlstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o -lm
 
-test: $(BUILD)/slstm_test $(BUILD)/mlstm_test $(BUILD)/slstm_q8_test $(BUILD)/mlstm_q8_test
+test: $(BUILD)/slstm_test $(BUILD)/mlstm_test $(BUILD)/slstm_s8_test $(BUILD)/mlstm_s8_test
 	@$(BUILD)/slstm_test
 	@$(BUILD)/mlstm_test
-	@$(BUILD)/slstm_q8_test
-	@$(BUILD)/mlstm_q8_test
+	@$(BUILD)/slstm_s8_test
+	@$(BUILD)/mlstm_s8_test
 
 # --- SIMD convenience targets ---
 
@@ -109,8 +109,8 @@ test-neon:
 		CXXFLAGS="-std=c++17 -O2 -Wall -Wextra -static"
 	@qemu-aarch64 $(BUILD)/slstm_test
 	@qemu-aarch64 $(BUILD)/mlstm_test
-	@qemu-aarch64 $(BUILD)/slstm_q8_test
-	@qemu-aarch64 $(BUILD)/mlstm_q8_test
+	@qemu-aarch64 $(BUILD)/slstm_s8_test
+	@qemu-aarch64 $(BUILD)/mlstm_s8_test
 
 # --- Docker integration tests ---
 
@@ -133,11 +133,11 @@ test-docker-espdl:
 # --- Benchmark ---
 
 $(BUILD)/xlstm_bench: test/xlstm_bench.cc $(BUILD)/slstm.o $(BUILD)/mlstm.o \
-    $(BUILD)/slstm_q8.o $(BUILD)/mlstm_q8.o \
+    $(BUILD)/slstm_s8.o $(BUILD)/mlstm_s8.o \
     $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o | $(BUILD)
 	@$(CXX) $(CXXFLAGS) -Iinclude -o $@ $< \
 		$(BUILD)/slstm.o $(BUILD)/mlstm.o \
-		$(BUILD)/slstm_q8.o $(BUILD)/mlstm_q8.o \
+		$(BUILD)/slstm_s8.o $(BUILD)/mlstm_s8.o \
 		$(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o -lm
 
 bench: $(BUILD)/xlstm_bench

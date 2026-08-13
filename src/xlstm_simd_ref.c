@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * Scalar C99 reference backend — portable fallback for all platforms.
+ * Scalar C99 reference backend - portable fallback for all platforms.
  * ===========================================================================*/
 
 #include "xlstm_simd.h"

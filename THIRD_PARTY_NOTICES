@@ -8,7 +8,7 @@ License: Apache-2.0
 Used by: test/generate_reference.py (golden value generation)
 
 The sLSTM and mLSTM algorithms are based on the xLSTM paper by
-Sepp Hochreiter et al. (arXiv:2405.04517). Reference test data is generated
+Maximilian Beck et al. (arXiv:2405.04517). Reference test data is generated
 from the NX-AI/xlstm PyTorch implementation.
 
 ================================================================================

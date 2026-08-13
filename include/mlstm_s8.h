@@ -12,18 +12,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * mLSTM INT8 quantized kernel — pure C99.
+ * mLSTM INT8 quantized kernel - pure C99.
  *
  * Storage: INT8 weights/activations, INT16 cell matrix + normalizer,
  *          float m-stabilizer (scalar per batch element).
- * Compute: INT8×INT8 → INT32 matmul, dequantize to float for gating,
+ * Compute: INT8xINT8 -> INT32 matmul, dequantize to float for gating,
  *          requantize states/output back to integer.
  *
  * Reference: https://arxiv.org/abs/2405.04517
  * ===========================================================================*/
 
-#ifndef MLSTM_Q8_H_
-#define MLSTM_Q8_H_
+#ifndef MLSTM_S8_H_
+#define MLSTM_S8_H_
 
 #include "xlstm_quant.h"
 
@@ -38,14 +38,14 @@ typedef struct {
     float W_scale;             /* no R for mLSTM */
     XlstmQuantParam x_quant;
     XlstmQuantParam y_quant;
-    XlstmQuantParam C_quant;   /* cell matrix (INT16) — H×H */
+    XlstmQuantParam C_quant;   /* cell matrix (INT16) - HxH */
     XlstmQuantParam n_quant;   /* normalizer (INT16) */
 } MlstmS8Params;
 
 /* Single timestep of mLSTM (INT8 quantized).
  *
  * State pointers (y, C, n, m) are updated in-place.
- * C is a flattened H×H matrix (row-major, INT16).
+ * C is a flattened HxH matrix (row-major, INT16).
  * m is a scalar (single float).
  * Caller must provide a scratch buffer of at least (4*H+2) int32_t. */
 void mlstm_step_s8(
@@ -86,4 +86,4 @@ void mlstm_eval_s8(
 }
 #endif
 
-#endif /* MLSTM_Q8_H_ */
+#endif /* MLSTM_S8_H_ */

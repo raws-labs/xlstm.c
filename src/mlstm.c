@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * mLSTM core implementation — pure C99, only depends on math.h
+ * mLSTM core implementation - pure C99, only depends on math.h
  * ===========================================================================*/
 
 #include "mlstm.h"

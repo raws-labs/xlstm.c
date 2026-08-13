@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * sLSTM TFLM adapter — tensor indices, OpData, and registration.
+ * sLSTM TFLM adapter - tensor indices, OpData, and registration.
  * ===========================================================================*/
 
 #ifndef SLSTM_TFLM_H_

@@ -4,7 +4,7 @@
 Outputs C header files with model byte arrays, matching the pattern used by
 tflite-micro upstream tests.
 
-These models contain no weights — all tensors are inputs/outputs. The custom
+These models contain no weights - all tensors are inputs/outputs. The custom
 op registration in the test binary provides the kernel implementation.
 
 Usage: python3 generate_model.py
@@ -157,7 +157,7 @@ def build_tflite_model(op_name, tensor_specs, input_indices, output_indices):
     builder.PrependUOffsetTRelative(subgraph_off)
     subgraphs_vec = builder.EndVector()
 
-    # --- Buffers (empty — all data provided at runtime) ---
+    # --- Buffers (empty - all data provided at runtime) ---
     buffer_offs = []
     # Buffer 0: sentinel empty buffer
     for _ in range(len(tensor_specs) + 1):
@@ -190,7 +190,7 @@ def build_tflite_model(op_name, tensor_specs, input_indices, output_indices):
 def model_to_c_header(model_bytes, var_name, header_guard):
     """Convert model bytes to a C header with an aligned byte array."""
     lines = []
-    lines.append(f"/* Auto-generated — do not edit. */\n")
+    lines.append(f"/* Auto-generated - do not edit. */\n")
     lines.append(f"#ifndef {header_guard}")
     lines.append(f"#define {header_guard}\n")
     lines.append(f"alignas(16) const unsigned char {var_name}[] = {{")

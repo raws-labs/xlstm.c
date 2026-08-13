@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * mLSTM ONNX Runtime custom op — lite API.
+ * mLSTM ONNX Runtime custom op - lite API.
  *
  * Inputs:  X[B,T,I], W[4H+2,I], b[4H+2],
  *          y_init[B,H], C_init[B,H*H], n_init[B,H], m_init[B,1]

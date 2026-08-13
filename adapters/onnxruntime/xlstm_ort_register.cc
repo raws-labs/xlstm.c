@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * ONNX Runtime shared library entry point — registers sLSTM + mLSTM ops.
+ * ONNX Runtime shared library entry point - registers sLSTM + mLSTM ops.
  *
  * Build as shared library:
  *   g++ -std=c++17 -shared -fPIC -o libxlstm_ort.so \

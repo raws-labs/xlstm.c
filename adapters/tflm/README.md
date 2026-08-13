@@ -32,11 +32,11 @@ Compile the adapter alongside your TFLM project:
 
 ## Tensor layout
 
-**sLSTM** — 8 inputs, 1 output:
+**sLSTM** - 8 inputs, 1 output:
 - Inputs: `X[B,T,I]`, `W[4H,I]`, `R[4H,H]`, `b[4H]`, `y[B,H]`, `c[B,H]`, `n[B,H]`, `m[B,H]`
 - Output: `output[B,T,H]`
 
-**mLSTM** — 7 inputs, 1 output:
+**mLSTM** - 7 inputs, 1 output:
 - Inputs: `X[B,T,I]`, `W[4H+2,I]`, `b[4H+2]`, `y[B,H]`, `C[B,H*H]`, `n[B,H]`, `m[B,1]`
 - Output: `output[B,T,H]`
 

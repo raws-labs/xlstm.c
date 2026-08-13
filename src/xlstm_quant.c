@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * Quantization/dequantization helpers — pure C99
+ * Quantization/dequantization helpers - pure C99
  * ===========================================================================*/
 
 #include "xlstm_quant.h"

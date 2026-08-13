@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * mLSTM microTVM adapter — DLTensor-based packed function.
+ * mLSTM microTVM adapter - DLTensor-based packed function.
  *
  * Args (DLTensor*):
  *   [0] X[B,T,I]    [1] W[4H+2,I]  [2] b[4H+2]

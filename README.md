@@ -1,6 +1,6 @@
 # xlstm.c
 
-Portable xLSTM kernels in C99. Implements sLSTM and mLSTM — the two custom cell types from the [xLSTM paper](https://arxiv.org/abs/2405.04517) (Hochreiter et al., 2024). No framework, no allocator, no OS — runs anywhere a C99 compiler does.
+Portable xLSTM kernels in C99. Implements sLSTM and mLSTM, the two custom cell types from the [xLSTM paper](https://arxiv.org/abs/2405.04517) (Beck et al., 2024). No framework, no allocator, no OS. Runs anywhere a C99 compiler does.
 
 ```c
 #include "xlstm.h"  // single header, everything included
@@ -17,7 +17,7 @@ Tested against the NX-AI/xlstm PyTorch reference implementation.
 | `slstm_f32` / `mlstm_f32` | float32 | float32 | float32 | float32 |
 | `slstm_s8` / `mlstm_s8` | int8 | int8 | int16 | float32 |
 
-The INT8 kernels use INT8 x INT8 -> INT32 matmul, dequantize to float for gating, and requantize states/output back to integer. The `m` stabilizer stays float32 — it prevents exponential overflow via log-space arithmetic and doesn't benefit from quantization.
+The INT8 kernels use INT8 x INT8 -> INT32 matmul, dequantize to float for gating, and requantize states/output back to integer. The `m` stabilizer stays float32: it prevents exponential overflow via log-space arithmetic and doesn't benefit from quantization.
 
 ### SIMD backends
 
@@ -60,7 +60,7 @@ Requires `gcc` (C99) and `g++` (C++17 for tests/bench). `make reference` require
 
 ## Adapters
 
-Thin wrappers that register custom ops in each framework. No math lives in the adapter — they unpack framework tensors and call the core C99 functions.
+Thin wrappers that register custom ops in each framework. No math lives in the adapter; they unpack framework tensors and call the core C99 functions.
 
 | Adapter | Framework | README |
 |---------|-----------|--------|
@@ -80,5 +80,5 @@ make test-docker-espdl     # ESP-DL (ESP32-S3 cross-compilation)
 
 ## References
 
-- [xLSTM: Extended Long Short-Term Memory](https://arxiv.org/abs/2405.04517) (Hochreiter et al., 2024)
-- [NX-AI/xlstm](https://github.com/NX-AI/xlstm) — PyTorch reference (Apache-2.0)
+- [xLSTM: Extended Long Short-Term Memory](https://arxiv.org/abs/2405.04517) (Beck et al., 2024)
+- [NX-AI/xlstm](https://github.com/NX-AI/xlstm) - PyTorch reference (Apache-2.0)

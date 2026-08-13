@@ -12,7 +12,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * xlstm.h — single-include umbrella header for the xlstm.c library.
+ * xlstm.h - single-include umbrella header for the xlstm.c library.
  *
  * Pulls in all public kernel APIs (f32 + INT8) and exposes library version
  * and active SIMD backend for introspection.
@@ -31,8 +31,8 @@
 /* Kernel APIs */
 #include "slstm.h"
 #include "mlstm.h"
-#include "slstm_q8.h"
-#include "mlstm_q8.h"
+#include "slstm_s8.h"
+#include "mlstm_s8.h"
 
 /* SIMD backend introspection */
 #include "xlstm_simd.h"

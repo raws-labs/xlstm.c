@@ -12,17 +12,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * mLSTM INT8 quantized implementation — pure C99
+ * mLSTM INT8 quantized implementation - pure C99
  *
  * Compute flow:
- *   1. INT8×INT8 matmul → INT32 accumulator (SIMD-ready)
+ *   1. INT8xINT8 matmul -> INT32 accumulator (SIMD-ready)
  *   2. Dequantize pre-activations to float
  *   3. Key scaling, stabilized gating in float
  *   4. Dequantize INT16 states, update in float, requantize to INT16
  *   5. Compute output via q^T C / normalizer, requantize to INT8
  * ===========================================================================*/
 
-#include "mlstm_q8.h"
+#include "mlstm_s8.h"
 #include "xlstm_simd.h"
 #include "xlstm_util.h"
 
@@ -49,7 +49,7 @@ void mlstm_step_s8(
     float wx_scale = params->W_scale * params->x_quant.scale;
     int32_t x_zp = params->x_quant.zero_point;
 
-    /* 1+2. INT8×INT8 matmul → float pre-activations.
+    /* 1+2. INT8xINT8 matmul -> float pre-activations.
      *       scratch layout: [q(H), k(H), v(H), i_raw(1), f_raw(1), o_raw(H)] */
     int32_t acc[4 * XLSTM_MAX_HIDDEN + 2];
     xlstm_matvec_s8(W_q, x, acc, total, I, x_zp);
@@ -81,7 +81,7 @@ void mlstm_step_s8(
     float f_gate = expf(log_f_plus_m - m_new);
     float i_gate = expf(i_raw - m_new);
 
-    /* 5. Update C: dequant → float update → requant */
+    /* 5. Update C: dequant -> float update -> requant */
     for (r = 0; r < H; ++r) {
         for (c = 0; c < H; ++c) {
             float C_prev = (float)C[r * H + c] * params->C_quant.scale;
@@ -96,7 +96,7 @@ void mlstm_step_s8(
         }
     }
 
-    /* 6. Update n: dequant → float update → requant */
+    /* 6. Update n: dequant -> float update -> requant */
     for (i = 0; i < H; ++i) {
         float n_prev = (float)n[i] * params->n_quant.scale;
         float n_new = f_gate * n_prev + i_gate * k[i];

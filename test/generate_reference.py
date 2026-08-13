@@ -170,7 +170,7 @@ def fmt(tensor):
 def generate(f):
     """Generate all reference data into file handle f."""
     f.write(
-        "/* Auto-generated — do not edit.\n"
+        "/* Auto-generated - do not edit.\n"
         " * Source: NX-AI/xlstm reference (vanilla backend)\n"
         " * Regenerate: make reference\n"
         " */\n\n"
@@ -232,7 +232,7 @@ def generate(f):
 
     f.write("// Test 3: Large inputs, overflow prevention\n")
     f.write("// B=1, T=1, I=2, H=2\n")
-    f.write("// i_raw = 100 — would overflow without m-stabilizer\n")
+    f.write("// i_raw = 100 - would overflow without m-stabilizer\n")
     f.write(f"const float kTest3_W[] = {{{fmt(W3)}}};\n")
     f.write(f"const float kTest3_R[] = {{{fmt(R3)}}};\n")
     f.write(f"const float kTest3_b[] = {{{fmt(b3)}}};\n")
@@ -281,7 +281,7 @@ def generate(f):
     f.write(f"const float kMTest2_expected_output[] = {{{fmt(output)}}};\n\n")
 
     # --- mLSTM Test 3: Large values, overflow prevention (B=1, T=1, I=3, H=2)
-    # W: [10, 3] — large weights to produce large gate pre-activations
+    # W: [10, 3] - large weights to produce large gate pre-activations
     mW3 = torch.tensor([
         [0.5, 0.5, 0.5], [0.5, 0.5, 0.5],   # W_q
         [0.5, 0.5, 0.5], [0.5, 0.5, 0.5],   # W_k
@@ -297,7 +297,7 @@ def generate(f):
 
     f.write("// mLSTM Test 3: Large values, overflow prevention\n")
     f.write("// B=1, T=1, I=3, H=2\n")
-    f.write("// i_raw = 150 — would overflow without m-stabilizer\n")
+    f.write("// i_raw = 150 - would overflow without m-stabilizer\n")
     f.write(f"const float kMTest3_W[] = {{{fmt(mW3)}}};\n")
     f.write(f"const float kMTest3_b[] = {{{fmt(mb3)}}};\n")
     f.write(f"const float kMTest3_input[] = {{{fmt(mx3)}}};\n")

@@ -1,4 +1,4 @@
-/* mLSTM kernel unit tests — standalone (no TFLM dependency)
+/* mLSTM kernel unit tests - standalone (no TFLM dependency)
  *
  * Tests the core mLSTM cell computation against reference values
  * generated from the NX-AI/xlstm reference (recurrent_step_stabilized_simple).
@@ -11,7 +11,7 @@
 #include "test_util.h"
 
 // ============================================================================
-// Reference test data — generated from NX-AI/xlstm reference
+// Reference test data - generated from NX-AI/xlstm reference
 // Regenerate: make reference
 // ============================================================================
 

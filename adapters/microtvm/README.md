@@ -35,11 +35,11 @@ f(x, W, R, b, y, c, n, m, output)  # all tvm.nd.array
 
 ## Packed function signatures
 
-**`xlstm.slstm_eval`** — 9 DLTensor args:
+**`xlstm.slstm_eval`** - 9 DLTensor args:
 
 `X[B,T,I]`, `W[4H,I]`, `R[4H,H]`, `b[4H]`, `y[B,H]`, `c[B,H]`, `n[B,H]`, `m[B,H]`, `output[B,T,H]`
 
-**`xlstm.mlstm_eval`** — 8 DLTensor args:
+**`xlstm.mlstm_eval`** - 8 DLTensor args:
 
 `X[B,T,I]`, `W[4H+2,I]`, `b[4H+2]`, `y[B,H]`, `C[B,H*H]`, `n[B,H]`, `m[B,1]`, `output[B,T,H]`
 

@@ -12,9 +12,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * Portable sLSTM core library — pure C99, no framework dependencies.
+ * Portable sLSTM core library - pure C99, no framework dependencies.
  *
- * sLSTM is a variant of LSTM from the xLSTM paper (Hochreiter et al., 2024)
+ * sLSTM is a variant of LSTM from the xLSTM paper (Beck et al., 2024)
  * with exponential gating and normalizer state for improved gradient flow
  * and numerical stability.
  *

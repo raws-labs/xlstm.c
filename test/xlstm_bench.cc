@@ -1,4 +1,4 @@
-/* xlstm.c benchmark — measures throughput of all 4 kernels across sizes.
+/* xlstm.c benchmark - measures throughput of all 4 kernels across sizes.
  *
  * Build & run:
  *   make bench          # auto-detect SIMD backend

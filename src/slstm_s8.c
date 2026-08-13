@@ -12,17 +12,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * sLSTM INT8 quantized implementation — pure C99
+ * sLSTM INT8 quantized implementation - pure C99
  *
  * Compute flow:
- *   1. INT8×INT8 matmul → INT32 accumulator (SIMD-ready)
+ *   1. INT8xINT8 matmul -> INT32 accumulator (SIMD-ready)
  *   2. Dequantize pre-activations to float
  *   3. Gating + m-stabilization in float
  *   4. Dequantize INT16 states, update in float, requantize to INT16
  *   5. Requantize hidden output to INT8
  * ===========================================================================*/
 
-#include "slstm_q8.h"
+#include "slstm_s8.h"
 #include "xlstm_simd.h"
 #include "xlstm_util.h"
 
@@ -53,7 +53,7 @@ void slstm_step_s8(
     int32_t x_zp = params->x_quant.zero_point;
     int32_t y_zp = params->y_quant.zero_point;
 
-    /* 1+2. INT8×INT8 matmul → INT32, then dequantize to float pre-activations.
+    /* 1+2. INT8xINT8 matmul -> INT32, then dequantize to float pre-activations.
      *       Scratch is reused as float* (sizeof(int32_t) == sizeof(float)). */
     int32_t acc_wx[4 * XLSTM_MAX_HIDDEN];
     int32_t acc_ry[4 * XLSTM_MAX_HIDDEN];

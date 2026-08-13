@@ -9,103 +9,58 @@
 
 #include "mlstm.h"
 #include "test_util.h"
-
-// ============================================================================
-// Reference test data - generated from NX-AI/xlstm reference
-// Regenerate: make reference
-// ============================================================================
-
 #include "reference_data.h"
 
-// ============================================================================
-// Test cases
-// ============================================================================
+#include <cstdio>
 
-constexpr float kTolerance = 1e-5f;
+/* Static buffers sized for the largest case. XLSTM_MAX_HIDDEN is 256. */
+static float g_y[256], g_n[256], g_m[256];
+static float g_C[256 * 256];
+static float g_output[3 * 256];
+static float g_scratch[4 * 256 + 2];
 
-bool TestMlstmSingleTimestepZeroState() {
-    const int B = 1, T = 1, I = 3, H = 2;
+static bool RunMlstmCase(const XlstmRefCase* tc) {
+    const int H = tc->H, T = tc->T;
 
-    float y[H] = {0};
-    float C[H * H] = {0};
-    float n[H] = {0};
-    float m_state[1] = {0};
-    float output[T * H] = {0};
-    float scratch[4 * H + 2] = {0};
+    for (int i = 0; i < H; ++i) { g_y[i] = 0; g_n[i] = 0; g_m[i] = 0; }
+    for (int i = 0; i < H * H; ++i) g_C[i] = 0;
+    for (int i = 0; i < T * H; ++i) g_output[i] = 0;
+    for (int i = 0; i < 4 * H + 2; ++i) g_scratch[i] = 0;
+
     MlstmParams params = {0.0f};
-
-    mlstm_eval_f32(kMTest1_input, kMTest1_W, kMTest1_b,
-                   y, C, n, m_state, output, scratch, B, T, I, H, &params);
+    mlstm_eval_f32(tc->input, tc->W, tc->b,
+                   g_y, g_C, g_n, g_m, g_output, g_scratch,
+                   tc->B, T, tc->I, H, &params);
 
     bool ok = true;
-    ok &= ExpectNear("y", kMTest1_expected_y, y, H, kTolerance);
-    ok &= ExpectNear("C", kMTest1_expected_C, C, H * H, kTolerance);
-    ok &= ExpectNear("n", kMTest1_expected_n, n, H, kTolerance);
-    ok &= ExpectNear("m", kMTest1_expected_m, m_state, 1, kTolerance);
-    ok &= ExpectNear("output", kMTest1_expected_y, output, H, kTolerance);
+    ok &= ExpectFinite("y", g_y, H);
+    ok &= ExpectFinite("C", g_C, H * H);
+    ok &= ExpectFinite("n", g_n, H);
+    ok &= ExpectFinite("m", g_m, 1);
+    ok &= ExpectNear("y", tc->expected_y, g_y, H, tc->tol_f32);
+    if (tc->expected_state)
+        ok &= ExpectNear("C", tc->expected_state, g_C, H * H, tc->tol_f32);
+    ok &= ExpectNear("n", tc->expected_n, g_n, H, tc->tol_f32);
+    ok &= ExpectNear("m", tc->expected_m, g_m, 1, tc->tol_f32);
+    if (tc->expected_output)
+        ok &= ExpectNear("output", tc->expected_output, g_output, T * H, tc->tol_f32);
     return ok;
 }
-
-bool TestMlstmMultipleTimesteps() {
-    const int B = 1, T = 3, I = 3, H = 2;
-
-    float y[H] = {0};
-    float C[H * H] = {0};
-    float n[H] = {0};
-    float m_state[1] = {0};
-    float output[T * H] = {0};
-    float scratch[4 * H + 2] = {0};
-    MlstmParams params = {0.0f};
-
-    mlstm_eval_f32(kMTest2_input, kMTest1_W, kMTest1_b,
-                   y, C, n, m_state, output, scratch, B, T, I, H, &params);
-
-    bool ok = true;
-    ok &= ExpectNear("y_final", kMTest2_expected_y, y, H, kTolerance);
-    ok &= ExpectNear("C_final", kMTest2_expected_C, C, H * H, kTolerance);
-    ok &= ExpectNear("n_final", kMTest2_expected_n, n, H, kTolerance);
-    ok &= ExpectNear("m_final", kMTest2_expected_m, m_state, 1, kTolerance);
-    ok &= ExpectNear("output_all", kMTest2_expected_output, output, T * H, kTolerance);
-    return ok;
-}
-
-bool TestMlstmOverflowPrevention() {
-    const int B = 1, T = 1, I = 3, H = 2;
-
-    float y[H] = {0};
-    float C[H * H] = {0};
-    float n[H] = {0};
-    float m_state[1] = {0};
-    float output[T * H] = {0};
-    float scratch[4 * H + 2] = {0};
-    MlstmParams params = {0.0f};
-
-    mlstm_eval_f32(kMTest3_input, kMTest3_W, kMTest3_b,
-                   y, C, n, m_state, output, scratch, B, T, I, H, &params);
-
-    bool ok = true;
-    ok &= ExpectFinite("y", y, H);
-    ok &= ExpectFinite("C", C, H * H);
-    ok &= ExpectFinite("n", n, H);
-    ok &= ExpectFinite("m", m_state, 1);
-
-    ok &= ExpectNear("y", kMTest3_expected_y, y, H, kTolerance);
-    ok &= ExpectNear("C", kMTest3_expected_C, C, H * H, kTolerance);
-    ok &= ExpectNear("n", kMTest3_expected_n, n, H, kTolerance);
-    ok &= ExpectNear("m", kMTest3_expected_m, m_state, 1, kTolerance);
-    return ok;
-}
-
-// ============================================================================
-// Main
-// ============================================================================
 
 int main() {
     std::printf("[==========] Running mLSTM kernel tests\n");
 
-    RUN_TEST(TestMlstmSingleTimestepZeroState);
-    RUN_TEST(TestMlstmMultipleTimesteps);
-    RUN_TEST(TestMlstmOverflowPrevention);
+    for (int i = 0; i < kMlstmCasesCount; ++i) {
+        const XlstmRefCase* tc = &kMlstmCases[i];
+        g_tests_run++;
+        std::printf("[ RUN      ] mLSTM %s (H=%d, T=%d)\n", tc->name, tc->H, tc->T);
+        if (RunMlstmCase(tc)) {
+            g_tests_passed++;
+            std::printf("[       OK ] mLSTM %s\n", tc->name);
+        } else {
+            std::printf("[  FAILED  ] mLSTM %s\n", tc->name);
+        }
+    }
 
     std::printf("[==========] %d/%d tests passed\n", g_tests_passed, g_tests_run);
     return g_tests_passed == g_tests_run ? 0 : 1;

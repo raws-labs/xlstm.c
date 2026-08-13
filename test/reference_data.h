@@ -6,6 +6,24 @@
 #ifndef REFERENCE_DATA_H_
 #define REFERENCE_DATA_H_
 
+#include <stddef.h>
+
+typedef struct {
+    const char* name;
+    int B, T, I, H;
+    const float* W;
+    const float* R;               /* NULL for mLSTM */
+    const float* b;
+    const float* input;
+    const float* expected_y;
+    const float* expected_state;  /* sLSTM c, or mLSTM C; NULL if not stored */
+    const float* expected_n;
+    const float* expected_m;
+    const float* expected_output; /* [T*H], NULL if not stored */
+    float tol_f32;
+    float tol_s8;
+} XlstmRefCase;
+
 // ========================================================================
 // sLSTM reference data
 // ========================================================================
@@ -41,6 +59,13 @@ const float kTest3_expected_c[] = {1.00000000f, 1.00000000f};
 const float kTest3_expected_n[] = {1.00000000f, 1.00000000f};
 const float kTest3_expected_m[] = {100.00000000f, 100.00000000f};
 
+static const XlstmRefCase kSlstmCases[] = {
+    {"Test1", 1, 1, 2, 2, kTest1_W, kTest1_R, kTest1_b, kTest1_input, kTest1_expected_y, kTest1_expected_c, kTest1_expected_n, kTest1_expected_m, NULL, 1e-05f, 0.1f},
+    {"Test2", 1, 3, 2, 2, kTest1_W, kTest1_R, kTest1_b, kTest2_input, kTest2_expected_y, kTest2_expected_c, kTest2_expected_n, kTest2_expected_m, kTest2_expected_output, 1e-05f, 0.1f},
+    {"Test3", 1, 1, 2, 2, kTest3_W, kTest3_R, kTest3_b, kTest3_input, kTest3_expected_y, kTest3_expected_c, kTest3_expected_n, kTest3_expected_m, NULL, 1e-05f, 0.1f},
+};
+static const int kSlstmCasesCount = (int)(sizeof(kSlstmCases) / sizeof(kSlstmCases[0]));
+
 // ========================================================================
 // mLSTM reference data
 // ========================================================================
@@ -73,5 +98,12 @@ const float kMTest3_expected_y[] = {14.99999332f, 14.99999332f};
 const float kMTest3_expected_C[] = {159.09902954f, 159.09902954f, 159.09902954f, 159.09902954f};
 const float kMTest3_expected_n[] = {10.60660172f, 10.60660172f};
 const float kMTest3_expected_m[] = {150.00000000f};
+
+static const XlstmRefCase kMlstmCases[] = {
+    {"MTest1", 1, 1, 3, 2, kMTest1_W, NULL, kMTest1_b, kMTest1_input, kMTest1_expected_y, kMTest1_expected_C, kMTest1_expected_n, kMTest1_expected_m, NULL, 1e-05f, 0.1f},
+    {"MTest2", 1, 3, 3, 2, kMTest1_W, NULL, kMTest1_b, kMTest2_input, kMTest2_expected_y, kMTest2_expected_C, kMTest2_expected_n, kMTest2_expected_m, kMTest2_expected_output, 1e-05f, 0.1f},
+    {"MTest3", 1, 1, 3, 2, kMTest3_W, NULL, kMTest3_b, kMTest3_input, kMTest3_expected_y, kMTest3_expected_C, kMTest3_expected_n, kMTest3_expected_m, NULL, 1e-05f, 0.1f},
+};
+static const int kMlstmCasesCount = (int)(sizeof(kMlstmCases) / sizeof(kMlstmCases[0]));
 
 #endif /* REFERENCE_DATA_H_ */

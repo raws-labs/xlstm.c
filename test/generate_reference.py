@@ -314,6 +314,53 @@ def _emit_case(f, tc, state_key, has_R):
     f.write("\n")
 
 
+CASE_STRUCT = """typedef struct {
+    const char* name;
+    int B, T, I, H;
+    const float* W;
+    const float* R;               /* NULL for mLSTM */
+    const float* b;
+    const float* input;
+    const float* expected_y;
+    const float* expected_state;  /* sLSTM c, or mLSTM C; NULL if not stored */
+    const float* expected_n;
+    const float* expected_m;
+    const float* expected_output; /* [T*H], NULL if not stored */
+    float tol_f32;
+    float tol_s8;
+} XlstmRefCase;
+
+"""
+
+
+def _emit_table(f, cases, table_name, state_key, has_R):
+    """Emit a static array of XlstmRefCase referencing the per-case arrays.
+
+    combined=True cases (see build_cases' docstring) did not get their own
+    k<name>_W/R/b arrays from _emit_case - they reuse whichever preceding
+    case last emitted them. `src` tracks that source case's name so the
+    table points at the arrays that actually exist.
+    """
+    f.write(f"static const XlstmRefCase {table_name}[] = {{\n")
+    src = None
+    for tc in cases:
+        n = tc["name"]
+        if not tc.get("combined"):
+            src = n
+        R = f"k{src}_R" if has_R else "NULL"
+        out = f"k{n}_expected_output" if tc["output"] is not None else "NULL"
+        state = f"k{n}_expected_{state_key}" if tc.get("store_state", True) else "NULL"
+        f.write(
+            f'    {{"{n}", {tc["B"]}, {tc["T"]}, {tc["I"]}, {tc["H"]}, '
+            f'k{src}_W, {R}, k{src}_b, k{n}_input, k{n}_expected_y, {state}, '
+            f'k{n}_expected_n, k{n}_expected_m, {out}, '
+            f'{tc.get("tol_f32", 1e-5):.8g}f, {tc.get("tol_s8", 0.10):.8g}f}},\n'
+        )
+    f.write("};\n")
+    f.write(f"static const int {table_name}Count = "
+            f"(int)(sizeof({table_name}) / sizeof({table_name}[0]));\n\n")
+
+
 def generate(f):
     """Generate all reference data into file handle f."""
     slstm_cases, mlstm_cases = build_cases()
@@ -325,19 +372,24 @@ def generate(f):
         " */\n\n"
         "#ifndef REFERENCE_DATA_H_\n"
         "#define REFERENCE_DATA_H_\n\n"
+        "#include <stddef.h>\n\n"
     )
+
+    f.write(CASE_STRUCT)
 
     f.write("// " + "=" * 72 + "\n")
     f.write("// sLSTM reference data\n")
     f.write("// " + "=" * 72 + "\n\n")
     for tc in slstm_cases:
         _emit_case(f, tc, state_key="c", has_R=True)
+    _emit_table(f, slstm_cases, "kSlstmCases", "c", True)
 
     f.write("// " + "=" * 72 + "\n")
     f.write("// mLSTM reference data\n")
     f.write("// " + "=" * 72 + "\n\n")
     for tc in mlstm_cases:
         _emit_case(f, tc, state_key="C", has_R=False)
+    _emit_table(f, mlstm_cases, "kMlstmCases", "C", False)
 
     f.write("#endif /* REFERENCE_DATA_H_ */\n")
 

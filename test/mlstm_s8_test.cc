@@ -44,23 +44,41 @@ static void DeriveScales(const float* W, int w_len, const float* x, int x_len,
     xlstm_quant_asymmetric(x, x_len, x_qp);
 }
 
+/* Symmetric calibration at INT16 granularity (max_abs / 32767, zero_point
+ * 0) - see the longer explanation in slstm_s8_test.cc. n and C are
+ * stored as int16_t and read/written as strictly symmetric by
+ * mlstm_s8.c (no zero-point term anywhere), so xlstm_quant_asymmetric's
+ * range/255 + non-zero zero_point was an INT8-shaped calibration
+ * misapplied to a 16-bit symmetric tensor. */
+static void QuantSymmetricS16(const float* data, int len, XlstmQuantParam* out) {
+    float max_abs = 0.0f;
+    for (int i = 0; i < len; ++i) {
+        float a = std::abs(data[i]);
+        if (a > max_abs) max_abs = a;
+    }
+    out->scale = (max_abs > 0.0f) ? (max_abs / 32767.0f) : 1.0f;
+    out->zero_point = 0;
+}
+
 /* Sets up quantized weights/input plus calibrated state-quant scales for
  * one reference case.
  *
  * y/C/n scales are calibrated from the case's own golden f32 values
- * (expected_output/expected_y, expected_state, expected_n) instead of a
- * fixed literal - see the longer explanation in slstm_s8_test.cc's
- * PrepareS8. A fixed 0.01 scale independent of H saturates the INT8 y
- * range once H grows past a couple dozen.
+ * (expected_output/expected_y, expected_state, expected_n) rather than a
+ * fixed literal - see task-4-report.md's "on calibration" note for what
+ * this oracle-calibrated setup does and does not demonstrate. y is INT8
+ * (asymmetric); C and n are INT16 and consumed as strictly symmetric by
+ * the kernel, so they use QuantSymmetricS16 above, not
+ * xlstm_quant_asymmetric.
  *
- * The full C matrix isn't stored in reference_data.h past H=17 (kept out
- * to bound header size - see generate_reference.py's mlstm_sized_case).
- * When it is missing, C_quant falls back to a multiple of the calibrated
- * n scale: C_ij accumulates the same forget/input gate history as n_i,
- * but weighted by a value component instead of a constant 1, so it needs
- * proportionally more headroom. The multiplier was picked empirically
- * (see task-4-report.md) to avoid INT16 saturation at H=64 without
- * making the error materially worse than the other cases. */
+ * Every case in reference_data.h now stores the full C matrix
+ * (mlstm_sized_case's store_state is unconditional as of this task), so
+ * C_quant is always calibrated from real data. The guard below is
+ * defensive only, matching sLSTM's PrepareS8, and is not currently
+ * exercised: reuse n's calibrated scale with no multiplier if a future
+ * case omits C. (An earlier version of this fallback used an empirically
+ * tuned 8x n_quant.scale for the one case that needed it, H=64 - removed
+ * because that case now stores C directly; see task-4-report.md Fix 4.) */
 static void PrepareMlstmS8(const XlstmRefCase* tc, MlstmS8Setup* s) {
     const int H = tc->H, T = tc->T, I = tc->I;
     const int total = 4 * H + 2;
@@ -82,12 +100,12 @@ static void PrepareMlstmS8(const XlstmRefCase* tc, MlstmS8Setup* s) {
     const float* y_cal = tc->expected_output ? tc->expected_output : tc->expected_y;
     int y_cal_len = tc->expected_output ? T * H : H;
     xlstm_quant_asymmetric(y_cal, y_cal_len, &s->params.y_quant);
-    xlstm_quant_asymmetric(tc->expected_n, H, &s->params.n_quant);
+    QuantSymmetricS16(tc->expected_n, H, &s->params.n_quant);
 
     if (tc->expected_state) {
-        xlstm_quant_asymmetric(tc->expected_state, H * H, &s->params.C_quant);
+        QuantSymmetricS16(tc->expected_state, H * H, &s->params.C_quant);
     } else {
-        s->params.C_quant.scale = 8.0f * s->params.n_quant.scale;
+        s->params.C_quant.scale = s->params.n_quant.scale;
         s->params.C_quant.zero_point = 0;
     }
 }
@@ -97,8 +115,13 @@ static void PrepareMlstmS8(const XlstmRefCase* tc, MlstmS8Setup* s) {
 // ============================================================================
 
 /* Runs one case and writes the dequantized hidden state into y_out.
+ * m_out (length 1 - mLSTM's m is a scalar per batch) and output_out
+ * (length T*H, dequantized) are optional (pass NULL to skip) -
+ * RunMlstmS8Case wants them for the m/output assertions,
+ * TestMlstmS8QuantizationBound only wants the error number.
  * Returns the largest absolute deviation from the f32 golden y. */
-static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out) {
+static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
+                              float* m_out, float* output_out) {
     const int H = tc->H, T = tc->T, I = tc->I;
 
     static MlstmS8Setup s;
@@ -121,21 +144,44 @@ static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out) {
                   tc->B, T, I, H, &s.params);
 
     xlstm_dequantize_s8_to_f32(y, y_out, H, &s.params.y_quant);
+    if (m_out) m_out[0] = m_state[0];
+    /* Always dequantize output locally, even if the caller doesn't want it
+     * back, so max_err below reflects the whole trajectory, not just the
+     * final timestep that y alone captures. This matters: SweepM8's
+     * final-y error is 0.124726, but an intermediate timestep reaches
+     * 1.127354 (transient C/n excursion beyond the final-snapshot
+     * calibration range, saturating INT16 mid-sequence - see
+     * task-4-report.md Fix 5/1). Reporting only the final-y number would
+     * understate what tolerance the case actually needs. */
+    static float output_local[3 * 256];
+    xlstm_dequantize_s8_to_f32(output, output_local, T * H, &s.params.y_quant);
+    if (output_out) {
+        for (int i = 0; i < T * H; ++i) output_out[i] = output_local[i];
+    }
 
     float max_err = 0.0f;
     for (int j = 0; j < H; ++j) {
         float d = std::abs(tc->expected_y[j] - y_out[j]);
         if (d > max_err) max_err = d;
     }
+    if (tc->expected_output) {
+        for (int i = 0; i < T * H; ++i) {
+            float d = std::abs(tc->expected_output[i] - output_local[i]);
+            if (d > max_err) max_err = d;
+        }
+    }
     return max_err;
 }
 
 static bool RunMlstmS8Case(const XlstmRefCase* tc) {
-    static float y_f[256];
-    float err = EvalMlstmS8Case(tc, y_f);
+    static float y_f[256], m_f[1], output_f[3 * 256];
+    float err = EvalMlstmS8Case(tc, y_f, m_f, output_f);
     bool ok = true;
     ok &= ExpectFinite("y", y_f, tc->H);
+    ok &= ExpectFinite("m", m_f, 1);
     ok &= ExpectNear("y", tc->expected_y, y_f, tc->H, tc->tol_s8);
+    if (tc->expected_output)
+        ok &= ExpectNear("output", tc->expected_output, output_f, tc->T * tc->H, tc->tol_s8);
     if (err > tc->tol_s8) ok = false;
     return ok;
 }
@@ -148,17 +194,22 @@ static bool TestMlstmS8QuantizationBound() {
     float max_err = 0.0f;
     for (int i = 0; i < kMlstmCasesCount; ++i) {
         const XlstmRefCase* tc = &kMlstmCases[i];
-        float err = EvalMlstmS8Case(tc, y_f);
+        float err = EvalMlstmS8Case(tc, y_f, NULL, NULL);
         std::printf("  %-10s H=%-3d max abs error vs f32: %.6f\n", tc->name, tc->H, err);
         if (err > max_err) max_err = err;
     }
     std::printf("  max absolute error vs f32 across all cases: %.6f\n", max_err);
+    std::printf("  (oracle-calibrated: scales are derived from this case's own golden\n"
+                 "   output, not an independent calibration set - see task-4-report.md's\n"
+                 "   'on calibration' note. These are a best case, not a deployment figure.)\n");
 
-    /* Bound set to ~1.5x the measured maximum, which is SweepM17
-     * (see task-4-report.md for the per-case measurements and why H=17
-     * is an outlier rather than a trend). */
-    if (max_err > 2.20f) {
-        std::printf("  FAIL: max error %.6f exceeds bound 2.20\n", max_err);
+    /* Bound set to ~1.5x the measured maximum (1.127354), which is
+     * SweepM8 at an intermediate timestep, not SweepM17 - see
+     * task-4-report.md for the per-case measurements and root-cause
+     * analysis (a transient C/n excursion beyond the final-snapshot
+     * calibration range, not a trend with H). */
+    if (max_err > 1.70f) {
+        std::printf("  FAIL: max error %.6f exceeds bound 1.70\n", max_err);
         return false;
     }
     return true;

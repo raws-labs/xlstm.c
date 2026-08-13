@@ -17,7 +17,11 @@ static int g_tests_passed = 0;
  * which the Python adapter tests already rely on. */
 static const float kRelTol = 2e-6f;
 
-static bool ExpectNear(const char* name, const float* expected,
+/* [[maybe_unused]]: used by the f32 test runners (slstm_test.cc,
+ * mlstm_test.cc); the INT8 runners check per-channel bounds instead (see
+ * tc->tol_s8_per_channel in slstm_s8_test.cc/mlstm_s8_test.cc), so this
+ * is unused in those two translation units specifically. */
+[[maybe_unused]] static bool ExpectNear(const char* name, const float* expected,
                        const float* actual, int len, float tol) {
     for (int i = 0; i < len; ++i) {
         float diff = std::abs(expected[i] - actual[i]);

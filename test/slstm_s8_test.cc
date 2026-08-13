@@ -16,8 +16,6 @@
 #include "xlstm_quant.h"
 #include "test_util.h"
 
-#include <cstring>
-
 // ============================================================================
 // Reference test data - same golden values as f32 tests
 // ============================================================================
@@ -211,106 +209,22 @@ static float EvalSlstmS8Case(const XlstmRefCase* tc, float* y_out,
     return max_err;
 }
 
-/* SweepS17 (H=17) has three channels whose own measured error does not
- * fit under the case's default tol_s8 (0.10), checked across the full
- * output trajectory (all 3 timesteps), not just the final y. Each gets
- * its own bound sized to ~1.5x *that channel's own* measured error - not
- * a value borrowed from another channel or the case-wide default, since
- * the invariant that matters is per-channel: tol_channel /
- * max|golden value for that channel across all asserted elements|, not
- * tol_channel / the case-wide max (a case-wide denominator hides a
- * narrow-but-small-valued channel behind the case's larger-valued ones).
+/* Every INT8 assertion is checked one channel at a time, so the bound
+ * that channel is held to has to come from tc->tol_s8_per_channel[j] -
+ * computed at generation time in generate_reference.py
+ * (compute_tol_s8_per_channel; see that function's module docstring for
+ * the full derivation and task-4-report.md for the measured data) from
+ * that channel's own error and its own dynamic range, not from
+ * tc->tol_s8 (the case-wide max, kept only for coarse reporting) or from
+ * any other channel's value. A case-wide denominator or a borrowed bound
+ * both hide a small-valued channel behind the case's larger-valued ones.
  *
- * With this random weight draw, channels 6 and 16's output-gate
- * pre-activation (o_raw) lands close to sigmoid's zero-crossing (true
- * o_raw = -0.033 for channel 6, +0.099 for channel 16, both at t=0),
- * where accumulated INT8xINT8 matmul rounding noise (summed over I=17
- * terms) is amplified by the activation's steep local slope rather than
- * absorbed by saturation:
- *   - channel 6:  worst error 0.127800 (t=0 only). own range 0.250923.
- *                 bound 0.19 (1.5x) -> ratio 0.757, safely resolved.
- *   - channel 16: worst error 0.231354 (t=1). own range 0.404341.
- *                 bound 0.35 (1.5x) -> ratio 0.858, safely resolved.
- *   - channel 5:  worst error 0.050906 (t=1). own range 0.059057 - this
- *                 channel's true value is itself small, so even its own
- *                 1.5x-measured bound (0.076, rounded to 0.08) gives
- *                 ratio 1.354, still over 1. This is NOT a margin-choice
- *                 problem: at a bare 1.0x margin (bound = measured error
- *                 exactly) the ratio is already 0.862, leaving no room
- *                 for the usual safety margin without going vacuous. No
- *                 tolerance choice fixes this - it is reported, not
- *                 hidden, in task-4-report.md's per-channel audit. The
- *                 0.08 bound here is still a real improvement over the
- *                 0.10 default it replaces (ratio 1.69 -> 1.354) and
- *                 remains larger than the measured error, so it does not
- *                 cause false failures on correct kernel output.
- * Verified against a from-scratch numpy replica of the quantized math
- * (matches this test's measured errors, and its unquantized-float
- * version matches the f32 golden output to 2e-8 at every t) and
- * reproduces identically under both the sse2 and ref backends. No other
- * channel, at any timestep, exceeds the default 0.10.
- *
- * This carve-out is deliberately narrow (3 of 17 channels) rather than a
- * blanket looser tol_s8 for the whole case: H=17 (cols=17) is the only
- * sLSTM sweep size with cols % 8 != 0 and cols > 8, i.e. the only one
- * that exercises xlstm_matvec_s8's scalar SIMD tail. A blanket loosened
- * bound on this case would also hide a defect in that tail path across
- * the other 14 channels.
- *
- * SweepS64 (H=64) has 7 channels whose own measured error is far enough
- * below the 0.13 blanket that the blanket is vacuous for them
- * specifically - a direct consequence of the blanket being sized for
- * the case's single worst channel while H=64 spans a wide range of
- * per-channel magnitudes (0.003 to 1.0 in this draw). Each gets a bound
- * from its own measured error (all comfortably resolved, ratio <= 0.34,
- * except channel 15 below):
- *   ch 6: err 0.005815, range 0.041232, bound 0.009  -> ratio 0.218
- *   ch13: err 0.001731, range 0.040332, bound 0.003  -> ratio 0.074
- *   ch22: err 0.004505, range 0.052414, bound 0.007  -> ratio 0.134
- *   ch29: err 0.005195, range 0.088899, bound 0.008  -> ratio 0.090
- *   ch33: err 0.004638, range 0.080301, bound 0.007  -> ratio 0.087
- *   ch44: err 0.005616, range 0.038400, bound 0.009  -> ratio 0.234
- * Channel 15 is a different, stronger case: its own measured error
- * (0.002917) and its own range (0.002917) are equal, not approximately
- * equal - this channel's true value quantizes to exactly the y_quant
- * zero-point under this case's calibrated scale, so the error against a
- * correctly-computed value IS the value itself. No tolerance choice can
- * distinguish this channel's correct output from an all-zero corruption
- * of it - a representability limit of per-tensor INT8 quantization when
- * one channel's true value is far smaller than the tensor's overall
- * range (this case's max|golden| is 0.9999), not a margin-tuning
- * problem. bound 0.0044 (1.5x, rounded) still shrinks the undetectable
- * window by ~30x versus the 0.13 blanket it replaces, and remains larger
- * than the measured error so it causes no false failures, but the ratio
- * (1.5) stays above 1 - reported, not hidden, in task-4-report.md.
- * Every other channel (57 of 64) is comfortably covered by the 0.13
- * blanket - see task-4-report.md's per-channel audit for the full table,
- * including the small number of channels between ratio 0.5 and 0.9 that
- * are not vacuous (ratio < 1) and so are not overridden here.
- *
- * Test1 (H=2) channel 0 has the same class of problem as SweepS64
- * channel 15 (own error 0.050105 vs own range 0.013596, ratio 3.68 even
- * at a bare 1.0x margin) but is not special-cased here: its case-wide
- * tol_s8 (0.08) is already within a few percent of the honest
- * per-channel value, so a dedicated override would not meaningfully
- * narrow anything - see task-4-report.md. */
-static float PerChannelTolS8(const XlstmRefCase* tc, int channel, float default_tol) {
-    if (std::strcmp(tc->name, "SweepS17") == 0) {
-        if (channel == 6) return 0.19f;
-        if (channel == 16) return 0.35f;
-        if (channel == 5) return 0.08f;
-    } else if (std::strcmp(tc->name, "SweepS64") == 0) {
-        if (channel == 15) return 0.0044f;
-        if (channel == 6) return 0.009f;
-        if (channel == 13) return 0.003f;
-        if (channel == 22) return 0.007f;
-        if (channel == 29) return 0.008f;
-        if (channel == 33) return 0.007f;
-        if (channel == 44) return 0.009f;
-    }
-    return default_tol;
-}
-
+ * No per-case name-matching lives here on purpose: an earlier version of
+ * this file hardcoded a short list of "cases with a carve-out" that had
+ * to be kept in sync by hand with the tolerance-selection function, and
+ * silently did nothing for a case someone forgot to add to the list.
+ * Every case, including the ones with no unusually-small channels, goes
+ * through the same per-channel loop below. */
 static bool RunSlstmS8Case(const XlstmRefCase* tc) {
     static float y_f[256], m_f[256], output_f[3 * 256];
     EvalSlstmS8Case(tc, y_f, m_f, output_f);
@@ -318,25 +232,8 @@ static bool RunSlstmS8Case(const XlstmRefCase* tc) {
     ok &= ExpectFinite("y", y_f, tc->H);
     ok &= ExpectFinite("m", m_f, tc->H);
 
-    /* Every case except SweepS17/SweepS64 goes through the plain
-     * blanket-tolerance path (PerChannelTolS8 would return the same
-     * tc->tol_s8 for all of these anyway - this branch just keeps the
-     * common case as simple as the other test runners). SweepS17's and
-     * SweepS64's carve-outs are present at every timestep for the
-     * diagnosed channels (traced in task-4-report.md), not just the
-     * final one that y captures, so both y and output need the
-     * per-channel loop for those two cases. */
-    bool has_carveout = std::strcmp(tc->name, "SweepS17") == 0 ||
-                         std::strcmp(tc->name, "SweepS64") == 0;
-    if (!has_carveout) {
-        ok &= ExpectNear("y", tc->expected_y, y_f, tc->H, tc->tol_s8);
-        if (tc->expected_output)
-            ok &= ExpectNear("output", tc->expected_output, output_f, tc->T * tc->H, tc->tol_s8);
-        return ok;
-    }
-
     for (int j = 0; j < tc->H; ++j) {
-        float tol = PerChannelTolS8(tc, j, tc->tol_s8);
+        float tol = tc->tol_s8_per_channel[j];
         float diff = std::abs(tc->expected_y[j] - y_f[j]);
         if (diff > tol + kRelTol * std::abs(tc->expected_y[j])) {
             std::printf("  FAIL y[%d]: expected %.8f, got %.8f (diff %.2e, tol %.4f)\n",
@@ -348,7 +245,7 @@ static bool RunSlstmS8Case(const XlstmRefCase* tc) {
         for (int t = 0; t < tc->T; ++t) {
             for (int j = 0; j < tc->H; ++j) {
                 int idx = t * tc->H + j;
-                float tol = PerChannelTolS8(tc, j, tc->tol_s8);
+                float tol = tc->tol_s8_per_channel[j];
                 float diff = std::abs(tc->expected_output[idx] - output_f[idx]);
                 if (diff > tol + kRelTol * std::abs(tc->expected_output[idx])) {
                     std::printf("  FAIL output[%d]: expected %.8f, got %.8f (diff %.2e, tol %.4f)\n",
@@ -382,9 +279,10 @@ static bool TestS8QuantizationBound() {
      * SweepS17's channel 16 at an intermediate timestep - see
      * task-4-report.md for the per-case measurements and why H=17 is an
      * outlier rather than a trend. This aggregate bound covers the whole
-     * table with one number; the per-case/per-channel gates in
-     * RunSlstmS8Case are what actually keep this from masking an
-     * unrelated regression (see PerChannelTolS8 above). */
+     * table with one number, purely for a quick human-readable summary;
+     * it is not what keeps this test suite sensitive to a real
+     * regression on a specific channel - RunSlstmS8Case's per-channel
+     * loop against tc->tol_s8_per_channel is. */
     if (max_err > 0.35f) {
         std::printf("  FAIL: max error %.6f exceeds bound 0.35\n", max_err);
         return false;

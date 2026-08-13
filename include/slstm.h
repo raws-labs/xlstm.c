@@ -44,8 +44,11 @@ typedef struct {
  * The slicing is not the obvious one. The reference's fused weight rows run
  * gate-major over the fused width Hf = num_heads * hidden_size, so a head's
  * four gate blocks are strided across the matrix rather than contiguous.
- * With g in 0..3 the gate index (i, f, z, o), h the head, and j in
- * 0..hidden_size-1:
+ * With g in 0..3 the gate index (i, f, z, o), h the head, j in
+ * 0..hidden_size-1, and R_stack the reference's recurrent parameter
+ * (sLSTMCell_vanilla's _recurrent_kernel_, shape
+ * (num_heads, 4*hidden_size, hidden_size) - one [4*DH, DH] matrix per head,
+ * already in this library's packing):
  *
  *     W_h[g*hidden_size + j][:] = W_fused[g*Hf + h*hidden_size + j][:]
  *     b_h[g*hidden_size + j]    = b_fused[g*Hf + h*hidden_size + j]

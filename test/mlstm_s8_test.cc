@@ -141,13 +141,21 @@ static void PrepareMlstmS8(const XlstmRefCase* tc, MlstmS8Setup* s) {
 // ============================================================================
 
 /* Runs one case and writes the dequantized hidden state into y_out.
- * m_out (length 1 - mLSTM's m is a scalar per batch) and output_out
- * (length T*H, dequantized) are optional (pass NULL to skip) -
- * RunMlstmS8Case wants them for the m/output assertions,
- * TestMlstmS8QuantizationBound only wants the error number.
- * Returns the largest absolute deviation from the f32 golden y. */
+ * m_out (length 1 - mLSTM's m is a scalar per batch), C_out (length H*H)
+ * and n_out (length H), both dequantized with the same scales the kernel
+ * was handed, and output_out (length T*H, dequantized) are optional (pass
+ * NULL to skip) - RunMlstmS8Case wants them for the m/C/n/output
+ * assertions, TestMlstmS8QuantizationBound only wants the error number.
+ * Returns the largest absolute deviation from the f32 golden y.
+ *
+ * C and n are read back on purpose. The kernel contract is caller-owned
+ * state updated in place across calls (streaming inference), so a wrong
+ * exit state silently corrupts every subsequent call; and the INT16
+ * requantize-and-saturate path in mlstm_s8.c is reached by nothing else in
+ * this repo - the f32 suite does not execute it at all. */
 static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
-                              float* m_out, float* output_out) {
+                              float* m_out, float* C_out, float* n_out,
+                              float* output_out) {
     const int H = tc->H, T = tc->T, I = tc->I;
 
     static MlstmS8Setup s;
@@ -171,6 +179,16 @@ static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
 
     xlstm_dequantize_s8_to_f32(y, y_out, H, &s.params.y_quant);
     if (m_out) m_out[0] = m_state[0];
+    /* C and n are INT16 and strictly symmetric (zero_point is never read
+     * by mlstm_s8.c), so dequantizing is a plain scale multiply with the
+     * very scales PrepareMlstmS8 handed the kernel - no xlstm_dequantize
+     * helper exists for int16_t. */
+    if (C_out) {
+        for (int i = 0; i < H * H; ++i) C_out[i] = (float)C[i] * s.params.C_quant.scale;
+    }
+    if (n_out) {
+        for (int i = 0; i < H; ++i) n_out[i] = (float)n_state[i] * s.params.n_quant.scale;
+    }
     /* Always dequantize output locally, even if the caller doesn't want it
      * back, so max_err below reflects the whole trajectory, not just the
      * final timestep that y alone captures. This matters: SweepM8's
@@ -199,6 +217,39 @@ static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
     return max_err;
 }
 
+/* Fraction of a state tensor's own dynamic range used as that tensor's
+ * absolute bound (ExpectStateNear in test_util.h). 0.5 is the same target
+ * compute_tol_s8_per_channel in generate_reference.py uses for the output
+ * bounds ("target a bound at HALF of a channel's own range"), applied here
+ * at tensor granularity because no per-channel state data is generated.
+ *
+ * Measured worst deviation/range over every case in reference_data.h,
+ * identical on ref, sse2 and neon: m 0.0354 (SweepM17), C 0.0478
+ * (MTest3). 0.5 clears both by >10x and stays below 1.0, which is what
+ * keeps it non-vacuous. Do not re-tighten toward the measured numbers -
+ * the margin exists for backends whose activation functions are not
+ * bit-identical to this one. */
+static constexpr float kStateTolFrac = 0.5f;
+
+/* n needs its own, looser fraction: SweepM1 measures deviation/range of
+ * 0.747, far above the 0.0354/0.0478 that m and C manage. That case is
+ * H=1, so its n tensor is a single element and the ratio is a plain
+ * relative error - INT8 n really is ~75% off there. The cause is known and
+ * documented (.docs/SCOPE.md section 8): SweepM1's true mid-sequence n
+ * peak is 6.2x its final value, n_quant is calibrated from the final
+ * snapshot with kStateHeadroom = 4.0, so n saturates INT16 mid-sequence.
+ *
+ * 0.875 is generate_reference.py's own documented fallback for exactly
+ * this situation ("if the floor already exceeds 0.5x the range, fall back
+ * to the midpoint of (floor, range)") applied to a floor of 0.75. It stays
+ * below 1.0, so the assertion is still non-vacuous and still fails a
+ * kernel that returns n = 0. The honest caveat: it clears SweepM1's
+ * measurement by only 1.17x, so a backend materially less accurate than
+ * this one on that single case would trip it. Every other case clears it
+ * by more than 20x. Raising kStateHeadroom would be the real fix, but it
+ * would invalidate every tol_s8_per_channel bound in reference_data.h. */
+static constexpr float kNStateTolFrac = 0.875f;
+
 /* Every INT8 assertion is checked one channel at a time, so the bound
  * that channel is held to has to come from tc->tol_s8_per_channel[j] -
  * computed at generation time in generate_reference.py
@@ -216,11 +267,41 @@ static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
  * Every case, including the ones with no unusually-small channels, goes
  * through the same per-channel loop below. */
 static bool RunMlstmS8Case(const XlstmRefCase* tc) {
-    static float y_f[256], m_f[1], output_f[3 * 256];
-    EvalMlstmS8Case(tc, y_f, m_f, output_f);
+    /* Buffers below hold one batch (T*H for output, H*H for C), and the
+     * assertions read batch 0's slice only, so a B>1 case would both
+     * overflow output_f at H=256 and check a third of what it ran. Every
+     * case in reference_data.h is B=1; fail loudly rather than silently if
+     * that ever changes. */
+    if (tc->B != 1) {
+        std::printf("  FAIL %s: B=%d, but this runner is written for B=1 only\n",
+                    tc->name, tc->B);
+        return false;
+    }
+
+    static float y_f[256], m_f[1], n_f[256], output_f[3 * 256];
+    static float C_f[256 * 256];
+    /* The return value is the case-wide max error, which only
+     * TestMlstmS8QuantizationBound's summary uses; the per-channel and
+     * per-tensor assertions below are what decide this case. */
+    (void)EvalMlstmS8Case(tc, y_f, m_f, C_f, n_f, output_f);
     bool ok = true;
     ok &= ExpectFinite("y", y_f, tc->H);
     ok &= ExpectFinite("m", m_f, 1);
+    ok &= ExpectFinite("C", C_f, tc->H * tc->H);
+    ok &= ExpectFinite("n", n_f, tc->H);
+
+    /* Value assertions on the exit state. Without these the suite is
+     * finiteness-only on C/n/m: a kernel that zeroes all three after the
+     * timestep loop passed 9/9 before they were added, even though the
+     * same mutation fails the f32 suite on the first case. m is the
+     * project's headline claim (it stays float32 in INT8 precisely because
+     * it matters) and MTest3 pins it at 150.0, which no INT8 y assertion
+     * can see. See ExpectStateNear in test_util.h for how the bound is
+     * built and what it cannot catch. */
+    ok &= ExpectStateNear("m", tc->expected_m, m_f, 1, kStateTolFrac);
+    if (tc->expected_state)
+        ok &= ExpectStateNear("C", tc->expected_state, C_f, tc->H * tc->H, kStateTolFrac);
+    ok &= ExpectStateNear("n", tc->expected_n, n_f, tc->H, kNStateTolFrac);
 
     /* tol_s8_per_channel is populated for every case in reference_data.h
      * today (build_cases()'s post-processing pass in
@@ -238,13 +319,18 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
         per_channel_tol = uniform_tol;
     }
 
-    static float channel_err[256];
-    for (int j = 0; j < tc->H; ++j) channel_err[j] = 0.0f;
+    /* channel_ref[j] is the largest golden magnitude channel j takes over
+     * y and every stored output timestep - the scale the floor check's
+     * relative term is measured against below. */
+    static float channel_err[256], channel_ref[256];
+    for (int j = 0; j < tc->H; ++j) { channel_err[j] = 0.0f; channel_ref[j] = 0.0f; }
 
     for (int j = 0; j < tc->H; ++j) {
         float tol = per_channel_tol[j];
         float diff = std::abs(tc->expected_y[j] - y_f[j]);
         if (diff > channel_err[j]) channel_err[j] = diff;
+        if (std::abs(tc->expected_y[j]) > channel_ref[j])
+            channel_ref[j] = std::abs(tc->expected_y[j]);
         if (diff > tol + kRelTol * std::abs(tc->expected_y[j])) {
             std::printf("  FAIL y[%d]: expected %.8f, got %.8f (diff %.2e, tol %.4f)\n",
                         j, tc->expected_y[j], y_f[j], diff, tol);
@@ -258,6 +344,8 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
                 float tol = per_channel_tol[j];
                 float diff = std::abs(tc->expected_output[idx] - output_f[idx]);
                 if (diff > channel_err[j]) channel_err[j] = diff;
+                if (std::abs(tc->expected_output[idx]) > channel_ref[j])
+                    channel_ref[j] = std::abs(tc->expected_output[idx]);
                 if (diff > tol + kRelTol * std::abs(tc->expected_output[idx])) {
                     std::printf("  FAIL output[%d]: expected %.8f, got %.8f (diff %.2e, tol %.4f)\n",
                                 idx, tc->expected_output[idx], output_f[idx], diff, tol);
@@ -277,15 +365,32 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
      * (see task-4-report.md), so 1.5x never false-fires today but still
      * catches a real divergence. Guarded the same way as
      * tol_s8_per_channel above; skipped (not defaulted) when absent,
-     * since there is nothing meaningful to check consistency against. */
+     * since there is nothing meaningful to check consistency against.
+     *
+     * Be clear about what this is: `1.5 x floor` is TIGHTER than
+     * tol_s8_per_channel on most channels, so it - not the per-channel
+     * loop above - is the binding bound for this suite. Measured with a
+     * multiplicative perturbation of pre-requantization y: 1.001x passes
+     * (it is baked into floor by construction), 1.002x already fails
+     * SweepM64, 1.005x fails SweepM16 and SweepM64, and 1.05x fails 4 of
+     * 9 cases - in every one of those runs the failing assertion is this
+     * one, not the loop above. That sensitivity is the point, but it also
+     * means this check fires for a genuine kernel regression at least as
+     * often as for generator drift, hence the two-sided message below.
+     *
+     * kFloorEps + kRelTol: see kFloorEps in test_util.h. Without them a
+     * channel whose floor is exactly 0.0 demands bit-exact float output. */
     if (tc->tol_s8_floor_per_channel) {
         for (int j = 0; j < tc->H; ++j) {
             float floor = tc->tol_s8_floor_per_channel[j];
-            if (channel_err[j] > floor * 1.5f) {
+            float bound = floor * 1.5f + kFloorEps + kRelTol * channel_ref[j];
+            if (channel_err[j] > bound) {
                 std::printf("  FAIL floor-consistency ch[%d]: measured error %.6f exceeds "
-                            "1.5x the numpy replica's predicted floor %.6f - "
-                            "generate_reference.py's replica may be out of sync with the "
-                            "C kernel\n", j, channel_err[j], floor);
+                            "bound %.6f (1.5x the numpy replica's predicted floor %.6f, "
+                            "plus float slack) - either the C kernel regressed or "
+                            "generate_reference.py's replica drifted away from it; check "
+                            "the kernel first if you just changed one\n",
+                            j, channel_err[j], bound, floor);
                 ok = false;
             }
         }
@@ -301,7 +406,7 @@ static bool TestMlstmS8QuantizationBound() {
     float max_err = 0.0f;
     for (int i = 0; i < kMlstmCasesCount; ++i) {
         const XlstmRefCase* tc = &kMlstmCases[i];
-        float err = EvalMlstmS8Case(tc, y_f, NULL, NULL);
+        float err = EvalMlstmS8Case(tc, y_f, NULL, NULL, NULL, NULL);
         std::printf("  %-10s H=%-3d max abs error vs f32: %.6f (worst-channel bound: %.4f)\n",
                      tc->name, tc->H, err, tc->tol_s8);
         if (err > max_err) max_err = err;
@@ -317,10 +422,13 @@ static bool TestMlstmS8QuantizationBound() {
      * see task-4-report.md for the per-case measurements, the headroom
      * derivation, and the full tol_s8/dynamic-range ratio table. This
      * aggregate bound covers the whole table with one number, purely for
-     * a quick human-readable summary; it is not what keeps this test
-     * suite sensitive to a real regression on a specific channel -
-     * RunMlstmS8Case's per-channel loop against tc->tol_s8_per_channel
-     * is. */
+     * a quick human-readable summary; it is not what keeps this test suite
+     * sensitive to a real regression on a specific channel. That
+     * sensitivity comes from RunMlstmS8Case, where the effective
+     * per-channel bound is
+     * min(tol_s8_per_channel, 1.5 x tol_s8_floor_per_channel + slack) -
+     * the floor term is the tighter of the two on most channels and is
+     * what actually binds. */
     if (max_err > 1.10f) {
         std::printf("  FAIL: max error %.6f exceeds bound 1.10\n", max_err);
         return false;

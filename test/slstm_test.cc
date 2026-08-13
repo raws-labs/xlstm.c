@@ -21,6 +21,16 @@ static float g_scratch[4 * 256];
 static bool RunSlstmCase(const XlstmRefCase* tc) {
     const int H = tc->H, T = tc->T;
 
+    /* g_output holds T*H, not B*T*H, and the state buffers hold one batch;
+     * the output assertion below checks batch 0's slice only. Every case in
+     * reference_data.h is B=1, but a future B=2 case at H=256 would overrun
+     * g_output rather than fail. Fail loudly instead. */
+    if (tc->B != 1) {
+        std::printf("  FAIL %s: B=%d, but this runner is written for B=1 only\n",
+                    tc->name, tc->B);
+        return false;
+    }
+
     for (int i = 0; i < H; ++i) { g_y[i] = 0; g_c[i] = 0; g_n[i] = 0; g_m[i] = 0; }
     for (int i = 0; i < T * H; ++i) g_output[i] = 0;
     for (int i = 0; i < 4 * H; ++i) g_scratch[i] = 0;

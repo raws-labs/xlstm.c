@@ -54,8 +54,8 @@ static void DeriveScales(const float* W, int w_len, const float* x, int x_len,
  * headroom exists because calibrating from a single final-state snapshot
  * (all reference_data.h stores) can badly undershoot the true mid-
  * sequence trajectory peak - measured up to 6.2x for SweepM1's n and
- * 3.4x for SweepM8's C. See kStateHeadroom below and task-4-report.md's
- * Fix Round 2 for the full per-case ratio table and how 4x was chosen. */
+ * 3.4x for SweepM8's C. See kStateHeadroom below and task-4-report.md for
+ * the full per-case ratio table and how 4x was chosen. */
 static void QuantSymmetricS16(const float* data, int len, float headroom,
                                XlstmQuantParam* out) {
     float max_abs = 0.0f;
@@ -93,7 +93,7 @@ static const float kStateHeadroom = 4.0f;
  * exercised: reuse n's calibrated scale with no multiplier if a future
  * case omits C. (An earlier version of this fallback used an empirically
  * tuned 8x n_quant.scale for the one case that needed it, H=64 - removed
- * because that case now stores C directly; see task-4-report.md Fix 4.) */
+ * because that case now stores C directly; see task-4-report.md.) */
 static void PrepareMlstmS8(const XlstmRefCase* tc, MlstmS8Setup* s) {
     const int H = tc->H, T = tc->T, I = tc->I;
     const int total = 4 * H + 2;
@@ -166,7 +166,7 @@ static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
      * final-y error is 0.124726, but an intermediate timestep reaches
      * 1.127354 (transient C/n excursion beyond the final-snapshot
      * calibration range, saturating INT16 mid-sequence - see
-     * task-4-report.md Fix 5/1). Reporting only the final-y number would
+     * task-4-report.md). Reporting only the final-y number would
      * understate what tolerance the case actually needs. */
     static float output_local[3 * 256];
     xlstm_dequantize_s8_to_f32(output, output_local, T * H, &s.params.y_quant);
@@ -188,16 +188,103 @@ static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
     return max_err;
 }
 
+/* Several channels across the mLSTM sweep have their own measured error
+ * far enough below the case's blanket tol_s8 that the blanket value is
+ * vacuous for them specifically (case-wide tol_s8 / that channel's own
+ * max|golden| >= 1.0, i.e. an all-zero corruption of just that channel
+ * would go undetected) - a direct consequence of the blanket being
+ * sized for the case's single worst channel while H=16/17/64 span a wide
+ * range of per-channel magnitudes. Each gets a bound derived from its
+ * own measured error, the same methodology used for sLSTM's SweepS17/
+ * SweepS64 carve-outs in slstm_s8_test.cc:
+ *   - SweepM16 channel 10: own error 0.010887, own range 0.075296.
+ *     bound 0.02 (1.5x, rounded) -> ratio 0.266. Fully resolved.
+ *   - SweepM17 channel 14: own error 0.048712, own range 0.130253.
+ *     bound 0.08 (1.5x, rounded) -> ratio 0.614. Fully resolved.
+ *   - SweepM17 channel  1: own error 0.059621, own range 1.163852.
+ *     bound 0.09 (1.5x, rounded) -> ratio 0.077. Fully resolved.
+ *   - SweepM17 channel  9: own error 0.009140, own range 0.353493.
+ *     bound 0.014 (1.5x, rounded) -> ratio 0.039. Fully resolved.
+ *   - SweepM64 channel  4: own error 0.035842, own range 0.194414.
+ *     bound 0.054 (1.5x, rounded) -> ratio 0.278. Fully resolved.
+ *   - SweepM64 channel 38: own error 0.007423, own range 0.266070.
+ *     bound 0.012 (1.5x, rounded) -> ratio 0.045. Fully resolved.
+ *   - SweepM64 channel 42: own error 0.023425, own range 0.188005.
+ *     bound 0.036 (1.5x, rounded) -> ratio 0.192. Fully resolved.
+ *   - SweepM64 channel 63: own error 0.010621, own range 0.010621 -
+ *     these are equal, not approximately equal: this channel's true
+ *     value quantizes to exactly the y_quant zero-point under this
+ *     case's calibrated scale, so its measured error against a
+ *     correctly-computed value IS the value itself. No tolerance choice
+ *     can distinguish this channel's correct output from an all-zero
+ *     corruption of it - not a margin-tuning problem, a representability
+ *     limit of per-tensor INT8 quantization when one channel's true
+ *     value is far smaller than the tensor's overall range. bound 0.016
+ *     (1.5x, rounded) still shrinks the undetectable window by >16x
+ *     versus the 0.27 blanket it replaces, and remains larger than the
+ *     measured error so it does not cause false failures, but the ratio
+ *     (1.5) stays above 1 - reported, not hidden, in task-4-report.md.
+ * Every other channel, in every other case, is comfortably covered by
+ * its case's blanket tol_s8 - see task-4-report.md's per-channel audit
+ * for the full table, including the small number of channels between
+ * ratio 0.5 and 0.9 that are not vacuous (ratio < 1) and so are not
+ * overridden here. */
+static float MlstmPerChannelTolS8(const XlstmRefCase* tc, int channel, float default_tol) {
+    if (std::strcmp(tc->name, "SweepM16") == 0 && channel == 10) return 0.02f;
+    if (std::strcmp(tc->name, "SweepM17") == 0) {
+        if (channel == 14) return 0.08f;
+        if (channel == 1) return 0.09f;
+        if (channel == 9) return 0.014f;
+    }
+    if (std::strcmp(tc->name, "SweepM64") == 0) {
+        if (channel == 63) return 0.016f;
+        if (channel == 4) return 0.054f;
+        if (channel == 38) return 0.012f;
+        if (channel == 42) return 0.036f;
+    }
+    return default_tol;
+}
+
 static bool RunMlstmS8Case(const XlstmRefCase* tc) {
     static float y_f[256], m_f[1], output_f[3 * 256];
-    float err = EvalMlstmS8Case(tc, y_f, m_f, output_f);
+    EvalMlstmS8Case(tc, y_f, m_f, output_f);
     bool ok = true;
     ok &= ExpectFinite("y", y_f, tc->H);
     ok &= ExpectFinite("m", m_f, 1);
-    ok &= ExpectNear("y", tc->expected_y, y_f, tc->H, tc->tol_s8);
-    if (tc->expected_output)
-        ok &= ExpectNear("output", tc->expected_output, output_f, tc->T * tc->H, tc->tol_s8);
-    if (err > tc->tol_s8) ok = false;
+
+    bool has_carveout = std::strcmp(tc->name, "SweepM16") == 0 ||
+                         std::strcmp(tc->name, "SweepM17") == 0 ||
+                         std::strcmp(tc->name, "SweepM64") == 0;
+    if (!has_carveout) {
+        ok &= ExpectNear("y", tc->expected_y, y_f, tc->H, tc->tol_s8);
+        if (tc->expected_output)
+            ok &= ExpectNear("output", tc->expected_output, output_f, tc->T * tc->H, tc->tol_s8);
+        return ok;
+    }
+
+    for (int j = 0; j < tc->H; ++j) {
+        float tol = MlstmPerChannelTolS8(tc, j, tc->tol_s8);
+        float diff = std::abs(tc->expected_y[j] - y_f[j]);
+        if (diff > tol + kRelTol * std::abs(tc->expected_y[j])) {
+            std::printf("  FAIL y[%d]: expected %.8f, got %.8f (diff %.2e, tol %.4f)\n",
+                        j, tc->expected_y[j], y_f[j], diff, tol);
+            ok = false;
+        }
+    }
+    if (tc->expected_output) {
+        for (int t = 0; t < tc->T; ++t) {
+            for (int j = 0; j < tc->H; ++j) {
+                int idx = t * tc->H + j;
+                float tol = MlstmPerChannelTolS8(tc, j, tc->tol_s8);
+                float diff = std::abs(tc->expected_output[idx] - output_f[idx]);
+                if (diff > tol + kRelTol * std::abs(tc->expected_output[idx])) {
+                    std::printf("  FAIL output[%d]: expected %.8f, got %.8f (diff %.2e, tol %.4f)\n",
+                                idx, tc->expected_output[idx], output_f[idx], diff, tol);
+                    ok = false;
+                }
+            }
+        }
+    }
     return ok;
 }
 
@@ -221,9 +308,8 @@ static bool TestMlstmS8QuantizationBound() {
     /* Bound set to ~1.5x the measured maximum (0.726042), which is
      * SweepM17. SweepM8's calibration-headroom fix (kStateHeadroom in
      * PrepareMlstmS8) brought its error down from 1.127354 to 0.038831 -
-     * see task-4-report.md Fix Round 2/3 for the per-case measurements,
-     * the headroom derivation, and the full tol_s8/dynamic-range ratio
-     * table. */
+     * see task-4-report.md for the per-case measurements, the headroom
+     * derivation, and the full tol_s8/dynamic-range ratio table. */
     if (max_err > 1.10f) {
         std::printf("  FAIL: max error %.6f exceeds bound 1.10\n", max_err);
         return false;

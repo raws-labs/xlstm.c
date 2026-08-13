@@ -179,18 +179,18 @@ def slstm_sized_case(H, seed, tol_s8):
     T=3 matters: a multi-step sequence forces the recurrent path and makes
     state errors observable in the per-timestep output.
 
-    tol_s8 is required (not defaulted): a code review (Task 4 Fix Round 2)
-    found that a single blanket default across every case is unsound. A
-    tolerance has to be small relative to the dynamic range it guards
-    (ratio = tol_s8 / max|expected value|) or it can't detect a destroyed
-    output - e.g. an all-zero-output mutant. Cases differ hugely in scale
-    (max|y| ranges from ~0.07 to ~1.0 across this sweep), so one constant
-    can't safely cover all of them; SWEEP_TOL_S8 below sets each size's
-    tol_s8 to ~1.5x its own measured whole-trajectory INT8 error. See
-    task-4-report.md Fix Round 2/3 for the full per-case ratio table.
+    tol_s8 is required (not defaulted): a single blanket default across
+    every case is unsound. A tolerance has to be small relative to the
+    dynamic range it guards (ratio = tol_s8 / max|expected value|) or it
+    can't detect a destroyed output - e.g. an all-zero-output mutant.
+    Cases differ hugely in scale (max|y| ranges from ~0.07 to ~1.0 across
+    this sweep), so one constant can't safely cover all of them;
+    SLSTM_SWEEP_TOL_S8 (at the call site below) sets each size's tol_s8
+    to ~1.5x its own measured whole-trajectory INT8 error. See
+    task-4-report.md for the full per-case ratio table.
 
     H=17's INT8 error is elevated (~0.23 at its worst element), but
-    isolated to two channels: with this random weight draw, those
+    isolated to a few channels: with this random weight draw, those
     channels' pre-activation lands near the zero-crossing of
     tanh/sigmoid, where accumulated INT8xINT8 matmul rounding noise
     (summed over I=17 terms) gets amplified by the activation's steep
@@ -200,10 +200,12 @@ def slstm_sized_case(H, seed, tol_s8):
     kernel bug. Rather than loosen tol_s8 for the whole case (which would
     also hide an unrelated defect in xlstm_matvec_s8's SIMD tail handling
     - H=17 is the only sweep size with cols % 8 != 0 and cols > 8, i.e.
-    the only one that exercises a scalar tail), the two diagnosed
-    channels get a narrow, named carve-out in slstm_s8_test.cc; every
-    other channel, and every other case, is held to this case's normal
-    tol_s8. See task-4-report.md Fix 5.
+    the only one that exercises a scalar tail), the diagnosed channels get
+    a narrow, named carve-out in slstm_s8_test.cc sized to each channel's
+    own measured error against its own dynamic range - not the case-wide
+    range, which can hide a small-valued channel behind the case's
+    larger-valued ones. Every other channel, and every other case, is
+    held to this case's normal tol_s8. See task-4-report.md.
     """
     torch.manual_seed(seed)
     I = H
@@ -227,31 +229,32 @@ def mlstm_sized_case(H, seed, tol_s8):
     _emit_case/_emit_table), including H=64 (an extra ~4096 floats in
     reference_data.h). An earlier version of this case capped storage at
     H<=17 to bound header size and derived H=64's C_quant scale from an
-    empirically-tuned multiple of n's scale instead - a code review (Task
-    4 Fix 4) showed that guess was not actually the binding constraint on
-    H=64's INT8 error (scaling it across a 128x range left the error
-    unchanged), so storing C directly removes a guess without evidence
-    behind it. See task-4-report.md Fix 4 for the follow-up root-cause
-    analysis on what H=64's residual error actually is.
+    empirically-tuned multiple of n's scale instead - a code review showed
+    that guess was not actually the binding constraint on H=64's INT8
+    error (scaling it across a 128x range left the error unchanged), so
+    storing C directly removes a guess without evidence behind it. See
+    task-4-report.md for the root-cause analysis on what H=64's residual
+    error actually is.
 
     tol_s8 is required (not defaulted) for the same reason as
     slstm_sized_case: it must be sized to this case's own dynamic range,
     not a shared constant - mLSTM's cases span more than four orders of
     magnitude in max|y| across this sweep (~0.001 at H=1 to ~17 at H=17),
     so a single default cannot keep every case's tol_s8/max|expected|
-    ratio safely below 1.0. SWEEP_TOL_S8 sets each size's tol_s8 to ~1.5x
-    its own measured whole-trajectory INT8 error.
+    ratio safely below 1.0. MLSTM_SWEEP_TOL_S8 (at the call site below)
+    sets each size's tol_s8 to ~1.5x its own measured whole-trajectory
+    INT8 error.
 
-    H=17's error is elevated (~0.73 after Task 4 Fix Round 2's
-    calibration-headroom fix): mLSTM's readout is
-    q^T C / max(|q^T n|, exp(-m)), which - unlike sLSTM's gated-tanh cell
-    - is not architecturally bounded, so the golden y values themselves
-    reach into the double digits for this draw. INT8/INT16 quantization
-    noise in q, C and n compounds through that dot product and division.
-    Verified against a from-scratch numpy replica (matches the f32 golden
-    values when run unquantized) and reproduces identically under sse2
-    and ref, so this is quantization noise, not a kernel bug - see
-    task-4-report.md.
+    H=17's error is elevated (~0.73, after fixing an earlier calibration
+    that undershot the true state trajectory - see task-4-report.md):
+    mLSTM's readout is q^T C / max(|q^T n|, exp(-m)), which - unlike
+    sLSTM's gated-tanh cell - is not architecturally bounded, so the
+    golden y values themselves reach into the double digits for this
+    draw. INT8/INT16 quantization noise in q, C and n compounds through
+    that dot product and division. Verified against a from-scratch numpy
+    replica (matches the f32 golden values when run unquantized) and
+    reproduces identically under sse2 and ref, so this is quantization
+    noise, not a kernel bug - see task-4-report.md.
     """
     torch.manual_seed(seed)
     I = H
@@ -381,33 +384,48 @@ def build_cases():
         tol_s8=0.0005))
 
     # Every sweep case gets its own explicit tol_s8, ~1.5x its measured
-    # whole-trajectory INT8 error (post Task 4 Fix Round 2's calibration-
-    # headroom fix - see QuantSymmetricS16/kStateHeadroom in both
-    # *_s8_test.cc files). A code review (Fix Round 3) found that a
-    # shared blanket default (0.10) is unsound in general: the invariant
-    # that actually matters is ratio = tol_s8 / max|expected value| for
-    # that case, and cases here span four-plus orders of magnitude in
+    # whole-trajectory INT8 error (see QuantSymmetricS16/kStateHeadroom in
+    # both *_s8_test.cc files for the calibration this error is measured
+    # against). A code review found that a shared blanket default (0.10)
+    # is unsound in general: the invariant that actually matters is
+    # ratio = tol_s8 / max|expected value| for whatever the tolerance
+    # applies to, and cases here span four-plus orders of magnitude in
     # dynamic range (mLSTM SweepM1's max|y| ~0.001 vs SweepM17's ~17), so
     # one constant cannot keep every case's ratio safely below 1.0 - under
     # the old blanket 0.10, SweepM1's ratio was ~32x and SweepM8's was
     # ~5.7x, both able to accept an all-zero-output mutant undetected.
-    # See task-4-report.md Fix Round 3 for the full per-case ratio table
-    # (worst ratio achieved here: ~0.37, sLSTM SweepS17's per-channel
-    # carve-out vs its own dynamic range).
     #
-    # sLSTM SweepS17's elevated error is isolated to two channels
-    # (verified by trace - task-4-report.md Fix 5) and is handled with a
-    # narrow per-channel carve-out directly in slstm_s8_test.cc, so its
-    # tol_s8 here is the same measured-based value as every other sLSTM
-    # size, not inflated to cover those two channels: inflating it would
-    # also hide an unrelated defect in xlstm_matvec_s8's SIMD tail
-    # handling, which only H=17 (cols=17, the only sweep size with
-    # cols % 8 != 0 and cols > 8) exercises.
+    # A follow-up review sharpened this further: the denominator has to
+    # match the granularity the tolerance actually applies at. A blanket
+    # per-case tol_s8 is checked against every channel independently, so
+    # a case-wide max|expected value| can hide a channel whose own value
+    # is much smaller than the case's typical channel - that channel is
+    # then vacuous even though the case-wide ratio looks fine. See
+    # task-4-report.md for the full per-channel audit; the worst case
+    # that a tolerance can be usefully set for is sLSTM SweepS17's
+    # per-channel carve-out (ratio ~0.86 against that channel's own
+    # range). A few individual channels (sLSTM Test1 channel 0, SweepS17
+    # channel 5, SweepS64 channel 15; mLSTM SweepM64 channel 63) have a
+    # true value close enough to zero that even a tolerance set from that
+    # channel's own measured error cannot get meaningfully below a ratio
+    # of 1 - this is not a tolerance-tuning problem, it is a
+    # representability limit of per-tensor INT8 quantization when one
+    # channel's true value is much smaller than the tensor's overall
+    # range. Documented, not hidden - see task-4-report.md.
+    #
+    # sLSTM SweepS17's elevated error is isolated to a few channels
+    # (verified by trace) and is handled with a narrow per-channel
+    # carve-out directly in slstm_s8_test.cc, so its tol_s8 here is the
+    # same measured-based value as every other sLSTM size, not inflated
+    # to cover those channels: inflating it would also hide an unrelated
+    # defect in xlstm_matvec_s8's SIMD tail handling, which only H=17
+    # (cols=17, the only sweep size with cols % 8 != 0 and cols > 8)
+    # exercises.
     #
     # mLSTM's elevated cases (H=17 especially) spread error across
-    # several channels rather than one or two (see task-4-report.md Fix 5
-    # notes), so a matching narrow carve-out isn't as clean there; these
-    # use the same measured-based per-case tol_s8 as every other size.
+    # several channels rather than one or two (see task-4-report.md), so
+    # a matching narrow carve-out isn't as clean there; these use the
+    # same measured-based per-case tol_s8 as every other size.
     SLSTM_SWEEP_TOL_S8 = {1: 0.025, 8: 0.05, 16: 0.05, 17: 0.10, 64: 0.13}
     MLSTM_SWEEP_TOL_S8 = {1: 0.0003, 8: 0.06, 16: 0.08, 17: 1.10, 64: 0.27}
 

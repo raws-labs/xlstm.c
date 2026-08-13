@@ -308,7 +308,11 @@ def _t2n(t):
 
 def _slstm_int8_trace(tc, perturb=1.0):
     """Numpy replica of PrepareS8 + slstm_eval_s8. Returns (out[T,H],
-    golden_output[T,H], golden_y[H])."""
+    golden_output[T,H], golden_y[H], state), where state is the replica's
+    dequantized EXIT state {"state": c[H], "n": n[H], "m": m[H]} - the
+    same three buffers the C kernel leaves behind for the caller, in the
+    same dequantized units the INT8 test reads them back in. They feed
+    compute_state_tol_per_elem below; nothing else uses them."""
     H, T, I = tc["H"], tc["T"], tc["I"]
     W = _t2n(tc["W"]).reshape(4 * H, I)
     R = _t2n(tc["R"]).reshape(4 * H, H)
@@ -366,12 +370,17 @@ def _slstm_int8_trace(tc, perturb=1.0):
         m_state = m_new
         y_q = np.clip(np.round(y_new / y_scale + y_zp), -128, 127).astype(np.int64)
         out_computed[t] = y_scale * (y_q - y_zp)
-    return out_computed, out_gold, y_gold
+    state = {"state": c_q.astype(np.float64) * c_scale,
+             "n": n_q.astype(np.float64) * n_scale,
+             "m": m_state.copy()}
+    return out_computed, out_gold, y_gold, state
 
 
 def _mlstm_int8_trace(tc, perturb=1.0):
     """Numpy replica of PrepareMlstmS8 + mlstm_eval_s8. Returns (out[T,H],
-    golden_output[T,H], golden_y[H])."""
+    golden_output[T,H], golden_y[H], state), where state is the replica's
+    dequantized EXIT state {"state": C[H*H], "n": n[H], "m": m[1]} - see
+    _slstm_int8_trace above."""
     H, T, I = tc["H"], tc["T"], tc["I"]
     W = _t2n(tc["W"]).reshape(4 * H + 2, I)
     b = _t2n(tc["b"])
@@ -420,7 +429,8 @@ def _mlstm_int8_trace(tc, perturb=1.0):
         y_new = y_new * perturb
         yq = np.clip(np.round(y_new / y_scale + y_zp), -128, 127)
         out_computed[t] = y_scale * (yq - y_zp)
-    return out_computed, out_gold, y_gold
+    state = {"state": C_f.flatten().copy(), "n": n_f.copy(), "m": m_state.copy()}
+    return out_computed, out_gold, y_gold, state
 
 
 def _round_sig(x, sig=2, up=False):
@@ -507,11 +517,11 @@ def compute_tol_s8_per_channel(tc, cell):
     instead of the trajectory-wide max, so it always catches a
     final-state-only corruption of the whole case."""
     if cell == "s":
-        out0, gold, y_gold = _slstm_int8_trace(tc, 1.0)
-        out1, _, _ = _slstm_int8_trace(tc, 1.001)
+        out0, gold, y_gold, _ = _slstm_int8_trace(tc, 1.0)
+        out1, _, _, _ = _slstm_int8_trace(tc, 1.001)
     else:
-        out0, gold, y_gold = _mlstm_int8_trace(tc, 1.0)
-        out1, _, _ = _mlstm_int8_trace(tc, 1.001)
+        out0, gold, y_gold, _ = _mlstm_int8_trace(tc, 1.0)
+        out1, _, _, _ = _mlstm_int8_trace(tc, 1.001)
     err0 = np.max(np.abs(out0 - gold), axis=0)
     err1 = np.max(np.abs(out1 - gold), axis=0)
     floor = np.maximum(err0, err1)
@@ -522,6 +532,118 @@ def compute_tol_s8_per_channel(tc, cell):
         j = int(np.argmax(np.abs(y_gold)))
         bounds[j] = _derive_bound(float(floor[j]), abs(float(y_gold[j])))
     return bounds, [float(v) for v in floor]
+
+
+# Sentinel written into a state bound array for an element that cannot be
+# given a useful bound at all. See compute_state_tol_per_elem below; the
+# INT8 runners skip these and print how many they skipped, so an unasserted
+# element is visible in the test output rather than silently absent.
+STATE_TOL_UNASSERTABLE = -1.0
+
+# Smallest factor by which a state bound must clear that element's own
+# measured error to be worth shipping. Matches the 1.2 already used inside
+# _derive_bound to decide whether a half-of-range target sits far enough
+# above the floor. See compute_state_tol_per_elem.
+STATE_MIN_MARGIN = 1.2
+
+
+def compute_state_tol_per_elem(tc, cell):
+    """Per-ELEMENT INT8 bounds for the kernel's exit state.
+
+    Returns {"state": [...], "n": [...], "m": [...]} - one bound per
+    element of each state tensor (sLSTM c[H]/n[H]/m[H], mLSTM
+    C[H*H]/n[H]/m[1]), derived exactly the way compute_tol_s8_per_channel
+    derives the output bounds, and for the same reason.
+
+    Why per element and not one bound per tensor: an earlier round bounded
+    each state tensor at a fixed fraction of that tensor's own maximum
+    magnitude. That is non-vacuous for the tensor as a whole (zeroing the
+    whole tensor fails) but leaves every element whose own magnitude is
+    below the fraction individually zeroable with nothing firing - counted
+    at the time: 4063 of SweepM64's 4096 C elements (99.2%), 62 of its 64 n
+    elements, 56 of SweepS64's 64 c elements. A mutant zeroing exactly
+    those elements after the timestep loop, so it never feeds back into y,
+    passed both INT8 suites green. The same argument that forced the output
+    bounds per channel forces these per element.
+
+    floor is the replica's own measured deviation from the f32 golden for
+    that element, taken as the max over the baseline run and a run with the
+    same 1.001x pre-requantization perturbation the output floors use.
+    Caveat worth stating: in sLSTM that perturbation reaches the state
+    through the recurrent y path, but mLSTM has no y recurrence, so its
+    state floor is the baseline replica deviation alone. It makes little
+    practical difference because the selection rule below lands far above
+    the floor on all but a handful of elements.
+
+    rng is that element's own golden magnitude - a state element has one
+    golden value, not a trajectory, so there is no trajectory-wide max to
+    take. Zeroing the element produces an error of exactly rng, which is
+    what makes `bound < rng` the precise non-vacuity condition.
+
+    Bounds must NOT come from the golden magnitude by a fixed relative
+    factor: sLSTM Test1's c[0] deviates 3.749x its own golden
+    (0.03609742), so any relative bound tight enough to be meaningful
+    elsewhere false-fails there. They come from the measured floor,
+    maximized toward 0.5 x rng by the same _derive_bound used for outputs.
+
+    An element gets STATE_TOL_UNASSERTABLE when no bound can be both
+    non-vacuous and free of false failures - rng == 0 (the golden is
+    already zero, so zeroing it is undetectable by construction) or
+    floor >= rng (the honest, measured error already covers the element's
+    whole dynamic range). Shipping a bound there would mean shipping one
+    that either cannot fail or fails on a correct kernel; both are worse
+    than an explicit, counted omission.
+
+    STATE_MIN_MARGIN extends that to the near-miss case. When floor is
+    only just below rng the surviving window is real but tiny, and
+    _derive_bound's midpoint fallback lands a hair above floor: measured
+    without this rule, mLSTM SweepM64's C[2071] got bound 0.016 against a
+    real-kernel error of 0.0157991, a margin of 1.013x. A bound that
+    close to the honest measured error is one a legitimate backend trips,
+    which is the failure mode this whole tolerance scheme exists to avoid.
+    An element whose best available bound cannot clear its floor by
+    STATE_MIN_MARGIN is therefore dropped rather than shipped tight - the
+    same 1.2 factor _derive_bound already uses to decide whether a
+    half-of-range target has enough room above the floor to be worth
+    taking. Measured cost: it moves 32 of 5085 asserted elements (0.6%)
+    into the unassertable count; measured benefit: mLSTM's state
+    assertions stop being the first thing a LUT-style gate perturbation
+    trips (see the report for the sweep)."""
+    if cell == "s":
+        _, _, _, st0 = _slstm_int8_trace(tc, 1.0)
+        _, _, _, st1 = _slstm_int8_trace(tc, 1.001)
+    else:
+        _, _, _, st0 = _mlstm_int8_trace(tc, 1.0)
+        _, _, _, st1 = _mlstm_int8_trace(tc, 1.001)
+
+    golds = {"state": _t2n(tc["c"]).flatten(),
+             "n": _t2n(tc["n"]).flatten(),
+             "m": _t2n(tc["m"]).flatten()}
+
+    out = {}
+    for key, gold in golds.items():
+        a, b = np.asarray(st0[key]).flatten(), np.asarray(st1[key]).flatten()
+        assert a.shape == gold.shape, (
+            f"{tc['name']} {key}: replica {a.shape} vs golden {gold.shape}")
+        floor = np.maximum(np.abs(a - gold), np.abs(b - gold))
+        bounds = []
+        for i in range(len(gold)):
+            rng = abs(float(gold[i]))
+            fl = float(floor[i])
+            if rng <= 0.0 or fl >= rng:
+                bounds.append(STATE_TOL_UNASSERTABLE)
+                continue
+            bound = _derive_bound(fl, rng)
+            # _derive_bound is written for the output case and can, after
+            # 2-significant-digit rounding, land outside (floor, rng) on a
+            # narrow window. Rather than trust it, check the properties that
+            # actually matter and drop the element if any fails.
+            if not (fl * STATE_MIN_MARGIN <= bound < rng):
+                bounds.append(STATE_TOL_UNASSERTABLE)
+                continue
+            bounds.append(bound)
+        out[key] = bounds
+    return out
 
 
 def slstm_sized_case(H, seed):
@@ -880,14 +1002,21 @@ def build_cases():
     # case in an earlier round but is not one: its window is narrow
     # (ratio 0.931) but real, and it has a normal, valid bound (0.055) -
     # do not re-add it here.
+    #
+    # The exit state (c/n/m, C/n/m) gets the same treatment one level down,
+    # per ELEMENT rather than per channel - see compute_state_tol_per_elem
+    # for why a per-tensor fraction was not enough and what an element with
+    # no usable bound gets instead.
     for tc in slstm_cases:
         tc["tol_s8_per_channel"], tc["tol_s8_floor_per_channel"] = \
             compute_tol_s8_per_channel(tc, "s")
         tc["tol_s8"] = max(tc["tol_s8_per_channel"])
+        tc["tol_s8_state"] = compute_state_tol_per_elem(tc, "s")
     for tc in mlstm_cases:
         tc["tol_s8_per_channel"], tc["tol_s8_floor_per_channel"] = \
             compute_tol_s8_per_channel(tc, "m")
         tc["tol_s8"] = max(tc["tol_s8_per_channel"])
+        tc["tol_s8_state"] = compute_state_tol_per_elem(tc, "m")
 
     return slstm_cases, mlstm_cases, {"head2": head2_fused}
 
@@ -933,6 +1062,16 @@ def _emit_case(f, tc, state_key, has_R):
     if "tol_s8_floor_per_channel" in tc:
         vals = ", ".join(f"{v:.8f}f" for v in tc["tol_s8_floor_per_channel"])
         f.write(f"const float k{n}_tol_s8_floor_per_channel[] = {{{vals}}};\n")
+    # Per-element exit-state bounds. The 'state' array is skipped for a case
+    # that does not store its state golden at all, since there would be
+    # nothing to compare against.
+    for key, suffix in (("state", state_key), ("n", "n"), ("m", "m")):
+        if "tol_s8_state" not in tc:
+            break
+        if key == "state" and not tc.get("store_state", True):
+            continue
+        vals = ", ".join(f"{v:.8f}f" for v in tc["tol_s8_state"][key])
+        f.write(f"const float k{n}_tol_s8_{suffix}_per_elem[] = {{{vals}}};\n")
     f.write("\n")
 
 
@@ -962,6 +1101,18 @@ CASE_STRUCT = """typedef struct {
                                              * RunMlstmS8Case so a kernel change that
                                              * silently outgrows the replica fails
                                              * loudly instead of just widening a bound. */
+    /* Per-ELEMENT bounds on the kernel's INT8 exit state, derived by
+     * generate_reference.py's compute_state_tol_per_elem the same way the
+     * output bounds above are derived (see that function for the rule and
+     * for why a per-tensor bound was not enough). Lengths follow the
+     * tensors they bound: state is [H] for sLSTM c and [H*H] for mLSTM C,
+     * n is [H], m is [H] for sLSTM and [1] for mLSTM. A negative entry is
+     * XLSTM_STATE_TOL_UNASSERTABLE: that element has no bound that is both
+     * non-vacuous and free of false failures, so the runners skip it and
+     * report how many they skipped. NULL if not emitted. */
+    const float* tol_s8_state_per_elem;
+    const float* tol_s8_n_per_elem;
+    const float* tol_s8_m_per_elem;
 } XlstmRefCase;
 
 """
@@ -986,12 +1137,17 @@ def _emit_table(f, cases, table_name, state_key, has_R):
         state = f"k{n}_expected_{state_key}" if tc.get("store_state", True) else "NULL"
         per_channel = f"k{n}_tol_s8_per_channel" if "tol_s8_per_channel" in tc else "NULL"
         floor = f"k{n}_tol_s8_floor_per_channel" if "tol_s8_floor_per_channel" in tc else "NULL"
+        has_state_tol = "tol_s8_state" in tc
+        st_tol = (f"k{n}_tol_s8_{state_key}_per_elem"
+                  if has_state_tol and tc.get("store_state", True) else "NULL")
+        n_tol = f"k{n}_tol_s8_n_per_elem" if has_state_tol else "NULL"
+        m_tol = f"k{n}_tol_s8_m_per_elem" if has_state_tol else "NULL"
         f.write(
             f'    {{"{n}", {tc["B"]}, {tc["T"]}, {tc["I"]}, {tc["H"]}, '
             f'k{src}_W, {R}, k{src}_b, k{n}_input, k{n}_expected_y, {state}, '
             f'k{n}_expected_n, k{n}_expected_m, {out}, '
             f'{tc.get("tol_f32", 1e-5):.8g}f, {tc.get("tol_s8", 0.10):.8g}f, '
-            f'{per_channel}, {floor}}},\n'
+            f'{per_channel}, {floor}, {st_tol}, {n_tol}, {m_tol}}},\n'
         )
     f.write("};\n")
     f.write(f"static const int {table_name}Count = "
@@ -1057,6 +1213,11 @@ def generate(f):
         " * both files static_assert against this. See GENERATOR_HEADROOM in\n"
         " * generate_reference.py. */\n"
         f"#define XLSTM_GENERATOR_HEADROOM {GENERATOR_HEADROOM:.8f}f\n\n"
+        "/* Sentinel in a tol_s8_*_per_elem array: this element has no bound\n"
+        " * that is both non-vacuous and free of false failures, so the INT8\n"
+        " * runners skip it and report the count. See\n"
+        " * compute_state_tol_per_elem in generate_reference.py. */\n"
+        f"#define XLSTM_STATE_TOL_UNASSERTABLE {STATE_TOL_UNASSERTABLE:.8f}f\n\n"
     )
 
     f.write(CASE_STRUCT)

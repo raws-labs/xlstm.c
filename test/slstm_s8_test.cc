@@ -240,31 +240,6 @@ static float EvalSlstmS8Case(const XlstmRefCase* tc, float* y_out,
     return max_err;
 }
 
-/* Fraction of a state tensor's own dynamic range used as that tensor's
- * absolute bound (ExpectStateNear in test_util.h). 0.5 is not a guess: it
- * is the same target compute_tol_s8_per_channel in generate_reference.py
- * uses for the output bounds ("target a bound at HALF of a channel's own
- * range"), applied here at tensor granularity because no per-channel state
- * data is generated.
- *
- * Measured worst deviation/range over every case in reference_data.h,
- * identical on ref, sse2 and neon:
- *
- *     m  0.1234  (Head2)      c  0.2715  (Test1)      n  0.1743  (SweepS17)
- *
- * so 0.5 clears the worst measurement by 1.8x (c) to 4.1x (m) and stays
- * below 1.0, which is what keeps it non-vacuous. Do not re-tighten toward
- * the measured numbers: the margin is there for backends whose activation
- * functions are not bit-identical to this one (CMSIS-NN's LUT sigmoid/tanh
- * being the concrete upcoming case), the same reasoning generate_reference.py
- * spells out for the output bounds.
- *
- * A flat absolute bound was considered and rejected by measurement: 0.7,
- * which covers the largest measured m deviation (0.558, SweepS17), exceeds
- * SweepS1's entire m range (0.2215) and would therefore pass a kernel that
- * returned m = 0 for that case. */
-static constexpr float kStateTolFrac = 0.5f;
-
 /* Every INT8 assertion is checked one channel at a time, so the bound
  * that channel is held to has to come from tc->tol_s8_per_channel[j] -
  * computed at generation time in generate_reference.py
@@ -304,18 +279,33 @@ static bool RunSlstmS8Case(const XlstmRefCase* tc) {
     ok &= ExpectFinite("c", c_f, tc->H);
     ok &= ExpectFinite("n", n_f, tc->H);
 
-    /* Value assertions on the exit state. Without these the suite is
-     * finiteness-only on c/n/m: a kernel that zeroes all three after the
-     * timestep loop passed 11/11 before they were added, even though the
-     * same mutation fails the f32 suite on the first case. m is the
-     * project's headline claim (it stays float32 in INT8 precisely because
-     * it matters) and Test3 pins it at 100.0, which no INT8 y assertion
-     * can see. See ExpectStateNear in test_util.h for how the bound is
-     * built and what it cannot catch. */
-    ok &= ExpectStateNear("m", tc->expected_m, m_f, tc->H, kStateTolFrac);
+    /* Value assertions on the exit state, one bound per element. Without
+     * these the suite is finiteness-only on c/n/m: a kernel that zeroes all
+     * three after the timestep loop passed 11/11 before they were added,
+     * even though the same mutation fails the f32 suite on the first case.
+     * m is the project's headline claim (it stays float32 in INT8 precisely
+     * because it matters) and Test3 pins it at 100.0, which no INT8 y
+     * assertion can see. Per element and not per tensor because a
+     * tensor-wide bound left every below-average element individually
+     * zeroable - see ExpectStatePerElem in test_util.h and
+     * compute_state_tol_per_elem in generate_reference.py. */
+    int unasserted = 0;
+    ok &= ExpectStatePerElem("m", tc->expected_m, m_f,
+                             tc->tol_s8_m_per_elem, tc->H, &unasserted);
     if (tc->expected_state)
-        ok &= ExpectStateNear("c", tc->expected_state, c_f, tc->H, kStateTolFrac);
-    ok &= ExpectStateNear("n", tc->expected_n, n_f, tc->H, kStateTolFrac);
+        ok &= ExpectStatePerElem("c", tc->expected_state, c_f,
+                                 tc->tol_s8_state_per_elem, tc->H, &unasserted);
+    ok &= ExpectStatePerElem("n", tc->expected_n, n_f,
+                             tc->tol_s8_n_per_elem, tc->H, &unasserted);
+    if (unasserted > 0) {
+        /* Reported, not hidden: these are elements whose golden is exactly
+         * zero or whose honest measured error already spans their whole
+         * dynamic range, so no bound can be both non-vacuous and free of
+         * false failures. See compute_state_tol_per_elem. */
+        std::printf("  note: %d of %d exit-state elements have no usable bound "
+                    "(unassertable, see compute_state_tol_per_elem)\n",
+                    unasserted, 3 * tc->H);
+    }
 
     /* tol_s8_per_channel is populated for every case in reference_data.h
      * today (build_cases()'s post-processing pass in
@@ -421,6 +411,16 @@ static bool TestS8QuantizationBound() {
     float max_err = 0.0f;
     for (int i = 0; i < kSlstmCasesCount; ++i) {
         const XlstmRefCase* tc = &kSlstmCases[i];
+        /* Same B=1 hazard the per-case runner guards, and this loop runs
+         * unconditionally after it: EvalSlstmS8Case's static output buffer
+         * holds T*H and the kernel writes output[(batch*T+t)*H+i], so a
+         * B=2,T=3,H=256 case would overrun it by 768 bytes through this
+         * path even though RunSlstmS8Case refused to run it. */
+        if (tc->B != 1) {
+            std::printf("  FAIL %s: B=%d, but this summary is written for B=1 only\n",
+                        tc->name, tc->B);
+            return false;
+        }
         float err = EvalSlstmS8Case(tc, y_f, NULL, NULL, NULL, NULL);
         std::printf("  %-10s H=%-3d max abs error vs f32: %.6f (worst-channel bound: %.4f)\n",
                      tc->name, tc->H, err, tc->tol_s8);

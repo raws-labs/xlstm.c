@@ -77,56 +77,57 @@ static bool ExpectFinite(const char* name, const float* vals, int len) {
  * MTest3's |y| ~ 15, where one ULP is already 1.9e-06. */
 static const float kFloorEps = 1e-6f;
 
-/* Absolute floor added to a state-tensor bound so that a tensor whose
- * golden values are all zero (range 0) is not silently asked for bit-exact
- * float equality - the same defect class as kFloorEps in the two INT8
- * runners. No case in reference_data.h has a zero-range state today; this
- * is a guard, not a working tolerance. At 1e-6 it is ~8x FLT_EPSILON and
- * several orders below every state magnitude in the table, so it never
- * moves a real bound. */
-static const float kStateTolAbs = 1e-6f;
-
-/* Value assertion for an INT8 exit state (sLSTM c/n/m, mLSTM C/n/m).
+/* Value assertion for an INT8 exit state (sLSTM c/n/m, mLSTM C/n/m),
+ * one bound per ELEMENT.
  *
- * reference_data.h carries per-channel INT8 bounds for the OUTPUT path
- * only - generate_reference.py derives nothing for the state tensors. A
- * per-channel relative bound is not usable for them either: the measured
- * INT8-vs-f32 deviation reaches 3.75x a channel's own magnitude (sLSTM
- * Test1's c[0], the same sign-flip channel .docs/SCOPE.md section 8
- * documents for y). So each state tensor is held to one case-wide
- * absolute bound: `frac` x the largest golden magnitude that tensor takes
- * in this case.
+ * `tol` is the case's tol_s8_state_per_elem / _n_per_elem / _m_per_elem
+ * array from reference_data.h, produced by generate_reference.py's
+ * compute_state_tol_per_elem from that element's own measured replica
+ * error and its own golden magnitude. Read that function for the
+ * derivation; the two properties it guarantees, and that this function
+ * re-checks rather than trusts, are:
  *
- * That bound is non-vacuous by construction for any frac < 1 - a kernel
- * that returns an all-zero state errs by exactly the range and fails -
- * and the check below turns that into a verified invariant rather than a
- * comment, so raising frac past 1.0 fails loudly instead of quietly
- * disabling the assertion.
+ *   1. NON-VACUOUS. bound < |golden[i]|, so zeroing element i (error
+ *      exactly |golden[i]|) always fails. An earlier round bounded each
+ *      state tensor at a fraction of the whole tensor's maximum instead;
+ *      that passed a mutant which zeroed 4063 of SweepM64's 4096 C
+ *      elements, because each one individually sat under the tensor-wide
+ *      bound. The invariant is checked here, per element, so a bound that
+ *      cannot fail fails the build instead of passing silently.
+ *   2. NOT BIT-EXACT. bound >= the replica's measured error for that
+ *      element, including a 1.001x activation perturbation. A bound
+ *      derived from |golden[i]| by a fixed relative factor would be
+ *      unusable: sLSTM Test1's c[0] deviates 3.749x its own golden.
  *
- * What it does NOT do: a case-wide bound cannot see a small-magnitude
- * channel hiding behind a large one in the same tensor. That is the same
- * limitation the per-channel output bounds exist to avoid, and it is
- * accepted here because no per-channel state data exists to do better.
- * See each caller's kStateTolFrac comment for the measured ratios. */
-[[maybe_unused]] static bool ExpectStateNear(const char* name, const float* expected,
-                                             const float* actual, int len, float frac) {
-    float range = 0.0f;
-    for (int i = 0; i < len; ++i) {
-        float a = std::abs(expected[i]);
-        if (a > range) range = a;
-    }
-    float tol = frac * range + kStateTolAbs;
-    if (range > 0.0f && tol >= range) {
-        std::printf("  FAIL %s: bound %.8e is vacuous - it is >= the tensor's own "
-                    "range %.8e, so an all-zero state would pass\n", name, tol, range);
-        return false;
+ * A negative entry is XLSTM_STATE_TOL_UNASSERTABLE: no bound for that
+ * element can satisfy both at once (its golden is exactly zero, so
+ * zeroing it is undetectable, or its honest measured error already covers
+ * its whole dynamic range). Those are skipped and counted into
+ * *unasserted, which the callers report, so an unasserted element shows
+ * up in the test output rather than quietly not existing. */
+[[maybe_unused]] static bool ExpectStatePerElem(const char* name, const float* expected,
+                                                const float* actual, const float* tol,
+                                                int len, int* unasserted) {
+    if (!tol) {
+        std::printf("  note: %s has no per-element bounds in reference_data.h - "
+                    "not asserted (regenerate with `make reference`)\n", name);
+        *unasserted += len;
+        return true;
     }
     for (int i = 0; i < len; ++i) {
+        if (tol[i] < 0.0f) { ++*unasserted; continue; }
+        float rng = std::abs(expected[i]);
+        if (tol[i] >= rng) {
+            std::printf("  FAIL %s[%d]: bound %.8e is vacuous - it is >= the element's "
+                        "own magnitude %.8e, so zeroing this element would pass\n",
+                        name, i, tol[i], rng);
+            return false;
+        }
         float diff = std::abs(expected[i] - actual[i]);
-        if (diff > tol) {
-            std::printf("  FAIL %s[%d]: expected %.8f, got %.8f (diff %.2e, "
-                        "bound %.2e = %.3f x range %.6f)\n",
-                        name, i, expected[i], actual[i], diff, tol, frac, range);
+        if (diff > tol[i]) {
+            std::printf("  FAIL %s[%d]: expected %.8f, got %.8f (diff %.2e, bound %.2e, "
+                        "element magnitude %.2e)\n",
+                        name, i, expected[i], actual[i], diff, tol[i], rng);
             return false;
         }
     }

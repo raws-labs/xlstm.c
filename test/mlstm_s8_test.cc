@@ -217,39 +217,6 @@ static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
     return max_err;
 }
 
-/* Fraction of a state tensor's own dynamic range used as that tensor's
- * absolute bound (ExpectStateNear in test_util.h). 0.5 is the same target
- * compute_tol_s8_per_channel in generate_reference.py uses for the output
- * bounds ("target a bound at HALF of a channel's own range"), applied here
- * at tensor granularity because no per-channel state data is generated.
- *
- * Measured worst deviation/range over every case in reference_data.h,
- * identical on ref, sse2 and neon: m 0.0354 (SweepM17), C 0.0478
- * (MTest3). 0.5 clears both by >10x and stays below 1.0, which is what
- * keeps it non-vacuous. Do not re-tighten toward the measured numbers -
- * the margin exists for backends whose activation functions are not
- * bit-identical to this one. */
-static constexpr float kStateTolFrac = 0.5f;
-
-/* n needs its own, looser fraction: SweepM1 measures deviation/range of
- * 0.747, far above the 0.0354/0.0478 that m and C manage. That case is
- * H=1, so its n tensor is a single element and the ratio is a plain
- * relative error - INT8 n really is ~75% off there. The cause is known and
- * documented (.docs/SCOPE.md section 8): SweepM1's true mid-sequence n
- * peak is 6.2x its final value, n_quant is calibrated from the final
- * snapshot with kStateHeadroom = 4.0, so n saturates INT16 mid-sequence.
- *
- * 0.875 is generate_reference.py's own documented fallback for exactly
- * this situation ("if the floor already exceeds 0.5x the range, fall back
- * to the midpoint of (floor, range)") applied to a floor of 0.75. It stays
- * below 1.0, so the assertion is still non-vacuous and still fails a
- * kernel that returns n = 0. The honest caveat: it clears SweepM1's
- * measurement by only 1.17x, so a backend materially less accurate than
- * this one on that single case would trip it. Every other case clears it
- * by more than 20x. Raising kStateHeadroom would be the real fix, but it
- * would invalidate every tol_s8_per_channel bound in reference_data.h. */
-static constexpr float kNStateTolFrac = 0.875f;
-
 /* Every INT8 assertion is checked one channel at a time, so the bound
  * that channel is held to has to come from tc->tol_s8_per_channel[j] -
  * computed at generation time in generate_reference.py
@@ -290,18 +257,33 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
     ok &= ExpectFinite("C", C_f, tc->H * tc->H);
     ok &= ExpectFinite("n", n_f, tc->H);
 
-    /* Value assertions on the exit state. Without these the suite is
-     * finiteness-only on C/n/m: a kernel that zeroes all three after the
-     * timestep loop passed 9/9 before they were added, even though the
-     * same mutation fails the f32 suite on the first case. m is the
-     * project's headline claim (it stays float32 in INT8 precisely because
-     * it matters) and MTest3 pins it at 150.0, which no INT8 y assertion
-     * can see. See ExpectStateNear in test_util.h for how the bound is
-     * built and what it cannot catch. */
-    ok &= ExpectStateNear("m", tc->expected_m, m_f, 1, kStateTolFrac);
+    /* Value assertions on the exit state, one bound per element. Without
+     * these the suite is finiteness-only on C/n/m: a kernel that zeroes all
+     * three after the timestep loop passed 9/9 before they were added, even
+     * though the same mutation fails the f32 suite on the first case. m is
+     * the project's headline claim (it stays float32 in INT8 precisely
+     * because it matters) and MTest3 pins it at 150.0, which no INT8 y
+     * assertion can see. Per element and not per tensor because a
+     * tensor-wide bound left 4063 of SweepM64's 4096 C elements
+     * individually zeroable - see ExpectStatePerElem in test_util.h and
+     * compute_state_tol_per_elem in generate_reference.py. */
+    int unasserted = 0;
+    ok &= ExpectStatePerElem("m", tc->expected_m, m_f,
+                             tc->tol_s8_m_per_elem, 1, &unasserted);
     if (tc->expected_state)
-        ok &= ExpectStateNear("C", tc->expected_state, C_f, tc->H * tc->H, kStateTolFrac);
-    ok &= ExpectStateNear("n", tc->expected_n, n_f, tc->H, kNStateTolFrac);
+        ok &= ExpectStatePerElem("C", tc->expected_state, C_f,
+                                 tc->tol_s8_state_per_elem, tc->H * tc->H, &unasserted);
+    ok &= ExpectStatePerElem("n", tc->expected_n, n_f,
+                             tc->tol_s8_n_per_elem, tc->H, &unasserted);
+    if (unasserted > 0) {
+        /* Reported, not hidden: these are elements whose golden is exactly
+         * zero or whose honest measured error already spans their whole
+         * dynamic range, so no bound can be both non-vacuous and free of
+         * false failures. See compute_state_tol_per_elem. */
+        std::printf("  note: %d of %d exit-state elements have no usable bound "
+                    "(unassertable, see compute_state_tol_per_elem)\n",
+                    unasserted, tc->H * tc->H + tc->H + 1);
+    }
 
     /* tol_s8_per_channel is populated for every case in reference_data.h
      * today (build_cases()'s post-processing pass in
@@ -406,6 +388,16 @@ static bool TestMlstmS8QuantizationBound() {
     float max_err = 0.0f;
     for (int i = 0; i < kMlstmCasesCount; ++i) {
         const XlstmRefCase* tc = &kMlstmCases[i];
+        /* Same B=1 hazard the per-case runner guards, and this loop runs
+         * unconditionally after it: EvalMlstmS8Case's static output buffer
+         * holds T*H and the kernel writes output[(batch*T+t)*H+i], so a
+         * B=2,T=3,H=256 case would overrun it by 768 bytes through this
+         * path even though RunMlstmS8Case refused to run it. */
+        if (tc->B != 1) {
+            std::printf("  FAIL %s: B=%d, but this summary is written for B=1 only\n",
+                        tc->name, tc->B);
+            return false;
+        }
         float err = EvalMlstmS8Case(tc, y_f, NULL, NULL, NULL, NULL);
         std::printf("  %-10s H=%-3d max abs error vs f32: %.6f (worst-channel bound: %.4f)\n",
                      tc->name, tc->H, err, tc->tol_s8);

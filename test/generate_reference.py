@@ -174,10 +174,22 @@ def build_cases():
     plus its dimensions. Keeping this as the single source of truth is what
     lets the .h and .json emitters stay in sync.
 
-    A case with combined=True reuses the previous case's W/R/b unchanged
-    (only the input/output differ), matching the header's compact
-    single-line comment for those cases: no new k<name>_W/R/b arrays are
-    emitted for them since the tests reuse the prior case's arrays.
+    Required keys: name, B, T, I, H, W, b, input, y, c, n, m, output
+    (output may be None). sLSTM cases also need R.
+
+    Optional keys, all read via .get() with safe defaults in _emit_case, so
+    a new case can omit them entirely:
+      - comment: one-line description shown in the header comment.
+        Defaults to "" if omitted.
+      - label: display text for the header comment, e.g. "Test 1" or
+        "mLSTM Test 1". Only the six legacy cases below need this (their
+        display text has a space the C identifier prefix doesn't); new
+        cases can skip it and it defaults to the case's `name`.
+      - combined: set True only to reuse the previous case's W/R/b unchanged
+        (compact single-line header, no new k<name>_W/R/b arrays emitted).
+        New cases should leave this unset/False and supply their own W/R/b.
+      - note: extra comment line (e.g. an overflow-prevention explainer)
+        emitted after the B=..., T=... line. Omit if not needed.
     """
     slstm_cases = []
     mlstm_cases = []
@@ -270,15 +282,21 @@ def _emit_case(f, tc, state_key, has_R):
 
     combined=True cases reuse the previous case's W/R/b, so their header
     folds onto a single comment line and no k<name>_W/R/b arrays are written.
+
+    label, comment, combined, and note are all optional (see build_cases'
+    docstring for defaults) so a case built from only the documented
+    interface keys still emits without raising.
     """
     n = tc["name"]
+    label = tc.get("label", n)
+    comment = tc.get("comment", "")
     if tc.get("combined"):
         f.write(
-            f"// {tc['label']}: {tc['comment']} "
+            f"// {label}: {comment} "
             f"(B={tc['B']}, T={tc['T']}, I={tc['I']}, H={tc['H']})\n"
         )
     else:
-        f.write(f"// {tc['label']}: {tc['comment']}\n")
+        f.write(f"// {label}: {comment}\n")
         f.write(f"// B={tc['B']}, T={tc['T']}, I={tc['I']}, H={tc['H']}\n")
         if tc.get("note"):
             f.write(f"// {tc['note']}\n")

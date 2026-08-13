@@ -167,8 +167,139 @@ def fmt(tensor):
     return ", ".join(f"{v:.8f}f" for v in tensor.flatten().tolist())
 
 
+def build_cases():
+    """Build every reference case once. Both emitters consume this.
+
+    Returns (slstm_cases, mlstm_cases). Each case is a dict of torch tensors
+    plus its dimensions. Keeping this as the single source of truth is what
+    lets the .h and .json emitters stay in sync.
+
+    A case with combined=True reuses the previous case's W/R/b unchanged
+    (only the input/output differ), matching the header's compact
+    single-line comment for those cases: no new k<name>_W/R/b arrays are
+    emitted for them since the tests reuse the prior case's arrays.
+    """
+    slstm_cases = []
+    mlstm_cases = []
+
+    # --- sLSTM 1: single timestep, zero initial state ---
+    torch.manual_seed(42)
+    W = torch.randn(8, 2) * 0.5
+    R = torch.randn(8, 2) * 0.5
+    b = torch.zeros(8)
+    x1 = torch.tensor([[[1.0, 0.5]]])
+    _, y, c, n, m = run_slstm(W, R, b, x1)
+    slstm_cases.append(dict(
+        name="Test1", label="Test 1", comment="Single timestep, zero initial state",
+        B=1, T=1, I=2, H=2,
+        W=W, R=R, b=b, input=x1,
+        y=y, c=c, n=n, m=m, output=None))
+
+    # --- sLSTM 2: 3 timesteps, state propagation (reuses Test1 weights) ---
+    x2 = torch.tensor([[[1.0, 0.5], [0.3, -0.2], [-0.5, 1.0]]])
+    output, y, c, n, m = run_slstm(W, R, b, x2)
+    slstm_cases.append(dict(
+        name="Test2", label="Test 2", comment="3 timesteps, state propagation",
+        B=1, T=3, I=2, H=2, combined=True,
+        W=W, R=R, b=b, input=x2,
+        y=y, c=c, n=n, m=m, output=output))
+
+    # --- sLSTM 3: large inputs, overflow prevention ---
+    W3 = torch.tensor([
+        [5.0, 5.0], [5.0, 5.0],
+        [5.0, 5.0], [5.0, 5.0],
+        [0.5, 0.5], [0.5, 0.5],
+        [0.5, 0.5], [0.5, 0.5],
+    ])
+    R3 = torch.zeros(8, 2)
+    b3 = torch.zeros(8)
+    x3 = torch.tensor([[[10.0, 10.0]]])
+    _, y, c, n, m = run_slstm(W3, R3, b3, x3)
+    slstm_cases.append(dict(
+        name="Test3", label="Test 3", comment="Large inputs, overflow prevention",
+        note="i_raw = 100 - would overflow without m-stabilizer",
+        B=1, T=1, I=2, H=2,
+        W=W3, R=R3, b=b3, input=x3,
+        y=y, c=c, n=n, m=m, output=None))
+
+    # --- mLSTM 1: single timestep, zero initial state ---
+    torch.manual_seed(123)
+    mW = torch.randn(10, 3) * 0.5
+    mb = torch.zeros(10)
+    mx1 = torch.tensor([[[1.0, 0.5, -0.3]]])
+    _, y, C, n, m = run_mlstm(mW, mb, mx1)
+    mlstm_cases.append(dict(
+        name="MTest1", label="mLSTM Test 1", comment="Single timestep, zero initial state",
+        B=1, T=1, I=3, H=2,
+        W=mW, b=mb, input=mx1,
+        y=y, c=C, n=n, m=m, output=None))
+
+    # --- mLSTM 2: 3 timesteps, state propagation ---
+    mx2 = torch.tensor([[[1.0, 0.5, -0.3], [0.3, -0.2, 0.8], [-0.5, 1.0, 0.1]]])
+    output, y, C, n, m = run_mlstm(mW, mb, mx2)
+    mlstm_cases.append(dict(
+        name="MTest2", label="mLSTM Test 2", comment="3 timesteps, state propagation",
+        B=1, T=3, I=3, H=2, combined=True,
+        W=mW, b=mb, input=mx2,
+        y=y, c=C, n=n, m=m, output=output))
+
+    # --- mLSTM 3: large values, overflow prevention ---
+    mW3 = torch.tensor([
+        [0.5, 0.5, 0.5], [0.5, 0.5, 0.5],
+        [0.5, 0.5, 0.5], [0.5, 0.5, 0.5],
+        [0.5, 0.5, 0.5], [0.5, 0.5, 0.5],
+        [5.0, 5.0, 5.0],
+        [5.0, 5.0, 5.0],
+        [0.5, 0.5, 0.5], [0.5, 0.5, 0.5],
+    ])
+    mb3 = torch.zeros(10)
+    mx3 = torch.tensor([[[10.0, 10.0, 10.0]]])
+    _, y, C, n, m = run_mlstm(mW3, mb3, mx3)
+    mlstm_cases.append(dict(
+        name="MTest3", label="mLSTM Test 3", comment="Large values, overflow prevention",
+        note="i_raw = 150 - would overflow without m-stabilizer",
+        B=1, T=1, I=3, H=2,
+        W=mW3, b=mb3, input=mx3,
+        y=y, c=C, n=n, m=m, output=None))
+
+    return slstm_cases, mlstm_cases
+
+
+def _emit_case(f, tc, state_key, has_R):
+    """Emit one case as C arrays. state_key is 'c' (sLSTM) or 'C' (mLSTM).
+
+    combined=True cases reuse the previous case's W/R/b, so their header
+    folds onto a single comment line and no k<name>_W/R/b arrays are written.
+    """
+    n = tc["name"]
+    if tc.get("combined"):
+        f.write(
+            f"// {tc['label']}: {tc['comment']} "
+            f"(B={tc['B']}, T={tc['T']}, I={tc['I']}, H={tc['H']})\n"
+        )
+    else:
+        f.write(f"// {tc['label']}: {tc['comment']}\n")
+        f.write(f"// B={tc['B']}, T={tc['T']}, I={tc['I']}, H={tc['H']}\n")
+        if tc.get("note"):
+            f.write(f"// {tc['note']}\n")
+        f.write(f"const float k{n}_W[] = {{{fmt(tc['W'])}}};\n")
+        if has_R:
+            f.write(f"const float k{n}_R[] = {{{fmt(tc['R'])}}};\n")
+        f.write(f"const float k{n}_b[] = {{{fmt(tc['b'])}}};\n")
+    f.write(f"const float k{n}_input[] = {{{fmt(tc['input'])}}};\n")
+    f.write(f"const float k{n}_expected_y[] = {{{fmt(tc['y'])}}};\n")
+    f.write(f"const float k{n}_expected_{state_key}[] = {{{fmt(tc['c'])}}};\n")
+    f.write(f"const float k{n}_expected_n[] = {{{fmt(tc['n'])}}};\n")
+    f.write(f"const float k{n}_expected_m[] = {{{fmt(tc['m'])}}};\n")
+    if tc["output"] is not None:
+        f.write(f"const float k{n}_expected_output[] = {{{fmt(tc['output'])}}};\n")
+    f.write("\n")
+
+
 def generate(f):
     """Generate all reference data into file handle f."""
+    slstm_cases, mlstm_cases = build_cases()
+
     f.write(
         "/* Auto-generated - do not edit.\n"
         " * Source: NX-AI/xlstm reference (vanilla backend)\n"
@@ -178,133 +309,17 @@ def generate(f):
         "#define REFERENCE_DATA_H_\n\n"
     )
 
-    # ========================================================================
-    # sLSTM reference data
-    # ========================================================================
     f.write("// " + "=" * 72 + "\n")
     f.write("// sLSTM reference data\n")
     f.write("// " + "=" * 72 + "\n\n")
+    for tc in slstm_cases:
+        _emit_case(f, tc, state_key="c", has_R=True)
 
-    # --- sLSTM Test 1: Single timestep, zero initial state (B=1, T=1, I=2, H=2)
-    torch.manual_seed(42)
-    W = torch.randn(8, 2) * 0.5
-    R = torch.randn(8, 2) * 0.5
-    b = torch.zeros(8)
-    x1 = torch.tensor([[[1.0, 0.5]]])
-
-    _, y, c, n, m = run_slstm(W, R, b, x1)
-
-    f.write("// Test 1: Single timestep, zero initial state\n")
-    f.write("// B=1, T=1, I=2, H=2\n")
-    f.write(f"const float kTest1_W[] = {{{fmt(W)}}};\n")
-    f.write(f"const float kTest1_R[] = {{{fmt(R)}}};\n")
-    f.write(f"const float kTest1_b[] = {{{fmt(b)}}};\n")
-    f.write(f"const float kTest1_input[] = {{{fmt(x1)}}};\n")
-    f.write(f"const float kTest1_expected_y[] = {{{fmt(y)}}};\n")
-    f.write(f"const float kTest1_expected_c[] = {{{fmt(c)}}};\n")
-    f.write(f"const float kTest1_expected_n[] = {{{fmt(n)}}};\n")
-    f.write(f"const float kTest1_expected_m[] = {{{fmt(m)}}};\n\n")
-
-    # --- sLSTM Test 2: 3 timesteps, state propagation (B=1, T=3, I=2, H=2)
-    x2 = torch.tensor([[[1.0, 0.5], [0.3, -0.2], [-0.5, 1.0]]])
-    output, y, c, n, m = run_slstm(W, R, b, x2)
-
-    f.write("// Test 2: 3 timesteps, state propagation (B=1, T=3, I=2, H=2)\n")
-    f.write(f"const float kTest2_input[] = {{{fmt(x2)}}};\n")
-    f.write(f"const float kTest2_expected_y[] = {{{fmt(y)}}};\n")
-    f.write(f"const float kTest2_expected_c[] = {{{fmt(c)}}};\n")
-    f.write(f"const float kTest2_expected_n[] = {{{fmt(n)}}};\n")
-    f.write(f"const float kTest2_expected_m[] = {{{fmt(m)}}};\n")
-    f.write(f"const float kTest2_expected_output[] = {{{fmt(output)}}};\n\n")
-
-    # --- sLSTM Test 3: Large inputs, overflow prevention (B=1, T=1, I=2, H=2)
-    W3 = torch.tensor([
-        [5.0, 5.0], [5.0, 5.0],   # i gates
-        [5.0, 5.0], [5.0, 5.0],   # f gates
-        [0.5, 0.5], [0.5, 0.5],   # z gates
-        [0.5, 0.5], [0.5, 0.5],   # o gates
-    ])
-    R3 = torch.zeros(8, 2)
-    b3 = torch.zeros(8)
-    x3 = torch.tensor([[[10.0, 10.0]]])
-
-    _, y, c, n, m = run_slstm(W3, R3, b3, x3)
-
-    f.write("// Test 3: Large inputs, overflow prevention\n")
-    f.write("// B=1, T=1, I=2, H=2\n")
-    f.write("// i_raw = 100 - would overflow without m-stabilizer\n")
-    f.write(f"const float kTest3_W[] = {{{fmt(W3)}}};\n")
-    f.write(f"const float kTest3_R[] = {{{fmt(R3)}}};\n")
-    f.write(f"const float kTest3_b[] = {{{fmt(b3)}}};\n")
-    f.write(f"const float kTest3_input[] = {{{fmt(x3)}}};\n")
-    f.write(f"const float kTest3_expected_y[] = {{{fmt(y)}}};\n")
-    f.write(f"const float kTest3_expected_c[] = {{{fmt(c)}}};\n")
-    f.write(f"const float kTest3_expected_n[] = {{{fmt(n)}}};\n")
-    f.write(f"const float kTest3_expected_m[] = {{{fmt(m)}}};\n\n")
-
-    # ========================================================================
-    # mLSTM reference data
-    # ========================================================================
     f.write("// " + "=" * 72 + "\n")
     f.write("// mLSTM reference data\n")
     f.write("// " + "=" * 72 + "\n\n")
-
-    # --- mLSTM Test 1: Single timestep, zero initial state (B=1, T=1, I=3, H=2)
-    torch.manual_seed(123)
-    # W: [(4*H+2), I] = [10, 3]
-    mW = torch.randn(10, 3) * 0.5
-    mb = torch.zeros(10)
-    mx1 = torch.tensor([[[1.0, 0.5, -0.3]]])
-
-    output, y, C, n, m = run_mlstm(mW, mb, mx1)
-
-    f.write("// mLSTM Test 1: Single timestep, zero initial state\n")
-    f.write("// B=1, T=1, I=3, H=2\n")
-    f.write(f"const float kMTest1_W[] = {{{fmt(mW)}}};\n")
-    f.write(f"const float kMTest1_b[] = {{{fmt(mb)}}};\n")
-    f.write(f"const float kMTest1_input[] = {{{fmt(mx1)}}};\n")
-    f.write(f"const float kMTest1_expected_y[] = {{{fmt(y)}}};\n")
-    f.write(f"const float kMTest1_expected_C[] = {{{fmt(C)}}};\n")
-    f.write(f"const float kMTest1_expected_n[] = {{{fmt(n)}}};\n")
-    f.write(f"const float kMTest1_expected_m[] = {{{fmt(m)}}};\n\n")
-
-    # --- mLSTM Test 2: 3 timesteps, state propagation (B=1, T=3, I=3, H=2)
-    mx2 = torch.tensor([[[1.0, 0.5, -0.3], [0.3, -0.2, 0.8], [-0.5, 1.0, 0.1]]])
-    output, y, C, n, m = run_mlstm(mW, mb, mx2)
-
-    f.write("// mLSTM Test 2: 3 timesteps, state propagation (B=1, T=3, I=3, H=2)\n")
-    f.write(f"const float kMTest2_input[] = {{{fmt(mx2)}}};\n")
-    f.write(f"const float kMTest2_expected_y[] = {{{fmt(y)}}};\n")
-    f.write(f"const float kMTest2_expected_C[] = {{{fmt(C)}}};\n")
-    f.write(f"const float kMTest2_expected_n[] = {{{fmt(n)}}};\n")
-    f.write(f"const float kMTest2_expected_m[] = {{{fmt(m)}}};\n")
-    f.write(f"const float kMTest2_expected_output[] = {{{fmt(output)}}};\n\n")
-
-    # --- mLSTM Test 3: Large values, overflow prevention (B=1, T=1, I=3, H=2)
-    # W: [10, 3] - large weights to produce large gate pre-activations
-    mW3 = torch.tensor([
-        [0.5, 0.5, 0.5], [0.5, 0.5, 0.5],   # W_q
-        [0.5, 0.5, 0.5], [0.5, 0.5, 0.5],   # W_k
-        [0.5, 0.5, 0.5], [0.5, 0.5, 0.5],   # W_v
-        [5.0, 5.0, 5.0],                      # w_i (scalar)
-        [5.0, 5.0, 5.0],                      # w_f (scalar)
-        [0.5, 0.5, 0.5], [0.5, 0.5, 0.5],   # W_o
-    ])
-    mb3 = torch.zeros(10)
-    mx3 = torch.tensor([[[10.0, 10.0, 10.0]]])
-
-    output, y, C, n, m = run_mlstm(mW3, mb3, mx3)
-
-    f.write("// mLSTM Test 3: Large values, overflow prevention\n")
-    f.write("// B=1, T=1, I=3, H=2\n")
-    f.write("// i_raw = 150 - would overflow without m-stabilizer\n")
-    f.write(f"const float kMTest3_W[] = {{{fmt(mW3)}}};\n")
-    f.write(f"const float kMTest3_b[] = {{{fmt(mb3)}}};\n")
-    f.write(f"const float kMTest3_input[] = {{{fmt(mx3)}}};\n")
-    f.write(f"const float kMTest3_expected_y[] = {{{fmt(y)}}};\n")
-    f.write(f"const float kMTest3_expected_C[] = {{{fmt(C)}}};\n")
-    f.write(f"const float kMTest3_expected_n[] = {{{fmt(n)}}};\n")
-    f.write(f"const float kMTest3_expected_m[] = {{{fmt(m)}}};\n\n")
+    for tc in mlstm_cases:
+        _emit_case(f, tc, state_key="C", has_R=False)
 
     f.write("#endif /* REFERENCE_DATA_H_ */\n")
 
@@ -316,109 +331,32 @@ def to_list(tensor):
 
 def generate_json(path):
     """Generate reference_data.json with the same values as the C header."""
+    slstm_cases, mlstm_cases = build_cases()
     data = {"slstm": {}, "mlstm": {}}
 
-    # --- sLSTM Test 1 ---
-    torch.manual_seed(42)
-    W = torch.randn(8, 2) * 0.5
-    R = torch.randn(8, 2) * 0.5
-    b = torch.zeros(8)
-    x1 = torch.tensor([[[1.0, 0.5]]])
+    for i, tc in enumerate(slstm_cases, start=1):
+        entry = {
+            "B": tc["B"], "T": tc["T"], "I": tc["I"], "H": tc["H"],
+            "W": to_list(tc["W"]), "R": to_list(tc["R"]), "b": to_list(tc["b"]),
+            "input": to_list(tc["input"]),
+            "expected_y": to_list(tc["y"]), "expected_c": to_list(tc["c"]),
+            "expected_n": to_list(tc["n"]), "expected_m": to_list(tc["m"]),
+        }
+        if tc["output"] is not None:
+            entry["expected_output"] = to_list(tc["output"])
+        data["slstm"][f"test{i}"] = entry
 
-    _, y, c, n, m = run_slstm(W, R, b, x1)
-
-    data["slstm"]["test1"] = {
-        "B": 1, "T": 1, "I": 2, "H": 2,
-        "W": to_list(W), "R": to_list(R), "b": to_list(b),
-        "input": to_list(x1),
-        "expected_y": to_list(y), "expected_c": to_list(c),
-        "expected_n": to_list(n), "expected_m": to_list(m),
-    }
-
-    # --- sLSTM Test 2 ---
-    x2 = torch.tensor([[[1.0, 0.5], [0.3, -0.2], [-0.5, 1.0]]])
-    output, y, c, n, m = run_slstm(W, R, b, x2)
-
-    data["slstm"]["test2"] = {
-        "B": 1, "T": 3, "I": 2, "H": 2,
-        "W": to_list(W), "R": to_list(R), "b": to_list(b),
-        "input": to_list(x2),
-        "expected_y": to_list(y), "expected_c": to_list(c),
-        "expected_n": to_list(n), "expected_m": to_list(m),
-        "expected_output": to_list(output),
-    }
-
-    # --- sLSTM Test 3 ---
-    W3 = torch.tensor([
-        [5.0, 5.0], [5.0, 5.0],
-        [5.0, 5.0], [5.0, 5.0],
-        [0.5, 0.5], [0.5, 0.5],
-        [0.5, 0.5], [0.5, 0.5],
-    ])
-    R3 = torch.zeros(8, 2)
-    b3 = torch.zeros(8)
-    x3 = torch.tensor([[[10.0, 10.0]]])
-
-    _, y, c, n, m = run_slstm(W3, R3, b3, x3)
-
-    data["slstm"]["test3"] = {
-        "B": 1, "T": 1, "I": 2, "H": 2,
-        "W": to_list(W3), "R": to_list(R3), "b": to_list(b3),
-        "input": to_list(x3),
-        "expected_y": to_list(y), "expected_c": to_list(c),
-        "expected_n": to_list(n), "expected_m": to_list(m),
-    }
-
-    # --- mLSTM Test 1 ---
-    torch.manual_seed(123)
-    mW = torch.randn(10, 3) * 0.5
-    mb = torch.zeros(10)
-    mx1 = torch.tensor([[[1.0, 0.5, -0.3]]])
-
-    output, y, C, n, m = run_mlstm(mW, mb, mx1)
-
-    data["mlstm"]["test1"] = {
-        "B": 1, "T": 1, "I": 3, "H": 2,
-        "W": to_list(mW), "b": to_list(mb),
-        "input": to_list(mx1),
-        "expected_y": to_list(y), "expected_C": to_list(C),
-        "expected_n": to_list(n), "expected_m": to_list(m),
-    }
-
-    # --- mLSTM Test 2 ---
-    mx2 = torch.tensor([[[1.0, 0.5, -0.3], [0.3, -0.2, 0.8], [-0.5, 1.0, 0.1]]])
-    output, y, C, n, m = run_mlstm(mW, mb, mx2)
-
-    data["mlstm"]["test2"] = {
-        "B": 1, "T": 3, "I": 3, "H": 2,
-        "W": to_list(mW), "b": to_list(mb),
-        "input": to_list(mx2),
-        "expected_y": to_list(y), "expected_C": to_list(C),
-        "expected_n": to_list(n), "expected_m": to_list(m),
-        "expected_output": to_list(output),
-    }
-
-    # --- mLSTM Test 3 ---
-    mW3 = torch.tensor([
-        [0.5, 0.5, 0.5], [0.5, 0.5, 0.5],
-        [0.5, 0.5, 0.5], [0.5, 0.5, 0.5],
-        [0.5, 0.5, 0.5], [0.5, 0.5, 0.5],
-        [5.0, 5.0, 5.0],
-        [5.0, 5.0, 5.0],
-        [0.5, 0.5, 0.5], [0.5, 0.5, 0.5],
-    ])
-    mb3 = torch.zeros(10)
-    mx3 = torch.tensor([[[10.0, 10.0, 10.0]]])
-
-    output, y, C, n, m = run_mlstm(mW3, mb3, mx3)
-
-    data["mlstm"]["test3"] = {
-        "B": 1, "T": 1, "I": 3, "H": 2,
-        "W": to_list(mW3), "b": to_list(mb3),
-        "input": to_list(mx3),
-        "expected_y": to_list(y), "expected_C": to_list(C),
-        "expected_n": to_list(n), "expected_m": to_list(m),
-    }
+    for i, tc in enumerate(mlstm_cases, start=1):
+        entry = {
+            "B": tc["B"], "T": tc["T"], "I": tc["I"], "H": tc["H"],
+            "W": to_list(tc["W"]), "b": to_list(tc["b"]),
+            "input": to_list(tc["input"]),
+            "expected_y": to_list(tc["y"]), "expected_C": to_list(tc["c"]),
+            "expected_n": to_list(tc["n"]), "expected_m": to_list(tc["m"]),
+        }
+        if tc["output"] is not None:
+            entry["expected_output"] = to_list(tc["output"])
+        data["mlstm"][f"test{i}"] = entry
 
     with open(path, "w") as f:
         json.dump(data, f, indent=2)

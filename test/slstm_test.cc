@@ -40,8 +40,13 @@ static bool RunSlstmCase(const XlstmRefCase* tc) {
         ok &= ExpectNear("c", tc->expected_state, g_c, H, tc->tol_f32);
     ok &= ExpectNear("n", tc->expected_n, g_n, H, tc->tol_f32);
     ok &= ExpectNear("m", tc->expected_m, g_m, H, tc->tol_f32);
-    if (tc->expected_output)
-        ok &= ExpectNear("output", tc->expected_output, g_output, T * H, tc->tol_f32);
+    /* Cases with no stored expected_output (Test1, Test3) have T=1, where
+     * output == y, so fall back to expected_y rather than leaving output
+     * unchecked. A future T>1 case without expected_output would correctly
+     * skip this (the fallback only fires when T == 1). */
+    const float* out_ref = tc->expected_output ? tc->expected_output : tc->expected_y;
+    if (tc->expected_output || T == 1)
+        ok &= ExpectNear("output", out_ref, g_output, T * H, tc->tol_f32);
     return ok;
 }
 

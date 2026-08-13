@@ -232,7 +232,16 @@ def _quant_asym(a):
     return scale, zp
 
 
-def _quant_sym16_headroom(a, headroom=4.0):
+# Must match kStateHeadroom in both test/slstm_s8_test.cc and
+# test/mlstm_s8_test.cc exactly - it is what those files' QuantSymmetricS16
+# uses to calibrate c_quant/n_quant/C_quant, and every tol_s8_per_channel
+# bound in reference_data.h is derived assuming that calibration. Emitted
+# into reference_data.h as XLSTM_GENERATOR_HEADROOM so both C++ files can
+# static_assert against it instead of the two copies silently drifting.
+GENERATOR_HEADROOM = 4.0
+
+
+def _quant_sym16_headroom(a, headroom=GENERATOR_HEADROOM):
     m = float(np.max(np.abs(a)))
     scale = (m * headroom / 32767.0) if m > 0 else 1.0
     return scale, 0
@@ -411,8 +420,18 @@ def _derive_bound(floor, rng):
 
 
 def compute_tol_s8_per_channel(tc, cell):
-    """Returns a list of H per-channel tol_s8 bounds for one case dict
-    (cell is 's' or 'm').
+    """Returns (bounds, floor): two lists of H floats each, for one case
+    dict (cell is 's' or 'm'). bounds are the tol_s8_per_channel values
+    every INT8 assertion checks against. floor is what this function's
+    own numpy replica measured as each channel's worst-case error
+    (baseline vs. perturbed) - emitted into reference_data.h alongside
+    bounds so the real C kernel's measured error can be asserted against
+    it at test time (see RunSlstmS8Case/RunMlstmS8Case's floor-
+    consistency check). The replica and the real kernel
+    (src/slstm_s8.c/src/mlstm_s8.c) are two hand-synchronized
+    implementations of the same math; without that assertion, a kernel
+    edit that isn't mirrored here would silently invalidate every bound
+    in this file rather than failing loudly.
 
     rng per channel is the max magnitude across that channel's whole
     trajectory (every stored output timestep, plus the final y - which
@@ -452,7 +471,7 @@ def compute_tol_s8_per_channel(tc, cell):
     if not any(bounds[i] < abs(float(y_gold[i])) for i in range(len(rng))):
         j = int(np.argmax(np.abs(y_gold)))
         bounds[j] = _derive_bound(float(floor[j]), abs(float(y_gold[j])))
-    return bounds
+    return bounds, [float(v) for v in floor]
 
 
 def slstm_sized_case(H, seed):
@@ -673,23 +692,28 @@ def build_cases():
     # 3). See compute_tol_s8_per_channel's module docstring above for the
     # derivation and task-4-report.md for the measured data.
     #
-    # A few individual channels (sLSTM Test1 channel 0, SweepS17 channel
-    # 5, SweepS64 channel 15; mLSTM SweepM64 channel 63) have a true
-    # value close enough to zero that even a bound derived from that
-    # channel's own measured error cannot get meaningfully below a ratio
-    # of 1 - this is not a tolerance-tuning problem, it is a
-    # representability limit of per-tensor INT8 quantization when one
-    # channel's true value is much smaller than the tensor's overall
-    # range (two of these, SweepS64 ch15 and SweepM64 ch63, dequantize to
-    # exactly the y_quant zero-point, so correct and all-zero-corrupted
-    # output are bit-identical for that channel - undecidable by any
-    # tolerance, not merely a hard-to-choose one). Documented, not
-    # hidden - see task-4-report.md.
+    # Three individual channels (sLSTM Test1 channel 0; sLSTM SweepS64
+    # channel 15; mLSTM SweepM64 channel 63) have a true value close
+    # enough to zero that even a bound derived from that channel's own
+    # measured error cannot get below a ratio of 1 - this is not a
+    # tolerance-tuning problem, it is a representability limit of
+    # per-tensor INT8 quantization when one channel's true value is much
+    # smaller than the tensor's overall range (two of these, SweepS64
+    # ch15 and SweepM64 ch63, dequantize to exactly the y_quant
+    # zero-point, so correct and all-zero-corrupted output are
+    # bit-identical for that channel - undecidable by any tolerance, not
+    # merely a hard-to-choose one). Documented, not hidden - see
+    # task-4-report.md. sLSTM SweepS17 channel 5 looked like a fourth
+    # case in an earlier round but is not one: its window is narrow
+    # (ratio 0.931) but real, and it has a normal, valid bound (0.055) -
+    # do not re-add it here.
     for tc in slstm_cases:
-        tc["tol_s8_per_channel"] = compute_tol_s8_per_channel(tc, "s")
+        tc["tol_s8_per_channel"], tc["tol_s8_floor_per_channel"] = \
+            compute_tol_s8_per_channel(tc, "s")
         tc["tol_s8"] = max(tc["tol_s8_per_channel"])
     for tc in mlstm_cases:
-        tc["tol_s8_per_channel"] = compute_tol_s8_per_channel(tc, "m")
+        tc["tol_s8_per_channel"], tc["tol_s8_floor_per_channel"] = \
+            compute_tol_s8_per_channel(tc, "m")
         tc["tol_s8"] = max(tc["tol_s8_per_channel"])
 
     return slstm_cases, mlstm_cases
@@ -733,6 +757,9 @@ def _emit_case(f, tc, state_key, has_R):
     if "tol_s8_per_channel" in tc:
         vals = ", ".join(f"{v:.8f}f" for v in tc["tol_s8_per_channel"])
         f.write(f"const float k{n}_tol_s8_per_channel[] = {{{vals}}};\n")
+    if "tol_s8_floor_per_channel" in tc:
+        vals = ", ".join(f"{v:.8f}f" for v in tc["tol_s8_floor_per_channel"])
+        f.write(f"const float k{n}_tol_s8_floor_per_channel[] = {{{vals}}};\n")
     f.write("\n")
 
 
@@ -749,8 +776,19 @@ CASE_STRUCT = """typedef struct {
     const float* expected_m;
     const float* expected_output; /* [T*H], NULL if not stored */
     float tol_f32;
-    float tol_s8;                 /* max(tol_s8_per_channel); coarse/reporting use only */
-    const float* tol_s8_per_channel; /* [H], the bound each INT8 assertion actually uses */
+    float tol_s8;                 /* max(tol_s8_per_channel); printed alongside the
+                                    * measured error in TestS8QuantizationBound /
+                                    * TestMlstmS8QuantizationBound - not used for any
+                                    * pass/fail check, tol_s8_per_channel is. */
+    const float* tol_s8_per_channel;       /* [H], the bound each INT8 assertion actually uses */
+    const float* tol_s8_floor_per_channel; /* [H], what generate_reference.py's numpy
+                                             * replica measured as each channel's own
+                                             * worst-case error - the real kernel's
+                                             * measured error is asserted against
+                                             * floor*1.5 in RunSlstmS8Case/
+                                             * RunMlstmS8Case so a kernel change that
+                                             * silently outgrows the replica fails
+                                             * loudly instead of just widening a bound. */
 } XlstmRefCase;
 
 """
@@ -774,11 +812,13 @@ def _emit_table(f, cases, table_name, state_key, has_R):
         out = f"k{n}_expected_output" if tc["output"] is not None else "NULL"
         state = f"k{n}_expected_{state_key}" if tc.get("store_state", True) else "NULL"
         per_channel = f"k{n}_tol_s8_per_channel" if "tol_s8_per_channel" in tc else "NULL"
+        floor = f"k{n}_tol_s8_floor_per_channel" if "tol_s8_floor_per_channel" in tc else "NULL"
         f.write(
             f'    {{"{n}", {tc["B"]}, {tc["T"]}, {tc["I"]}, {tc["H"]}, '
             f'k{src}_W, {R}, k{src}_b, k{n}_input, k{n}_expected_y, {state}, '
             f'k{n}_expected_n, k{n}_expected_m, {out}, '
-            f'{tc.get("tol_f32", 1e-5):.8g}f, {tc.get("tol_s8", 0.10):.8g}f, {per_channel}}},\n'
+            f'{tc.get("tol_f32", 1e-5):.8g}f, {tc.get("tol_s8", 0.10):.8g}f, '
+            f'{per_channel}, {floor}}},\n'
         )
     f.write("};\n")
     f.write(f"static const int {table_name}Count = "
@@ -797,6 +837,10 @@ def generate(f):
         "#ifndef REFERENCE_DATA_H_\n"
         "#define REFERENCE_DATA_H_\n\n"
         "#include <stddef.h>\n\n"
+        "/* Must equal kStateHeadroom in slstm_s8_test.cc/mlstm_s8_test.cc -\n"
+        " * both files static_assert against this. See GENERATOR_HEADROOM in\n"
+        " * generate_reference.py. */\n"
+        f"#define XLSTM_GENERATOR_HEADROOM {GENERATOR_HEADROOM:.8f}f\n\n"
     )
 
     f.write(CASE_STRUCT)

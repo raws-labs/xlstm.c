@@ -90,7 +90,20 @@ static void QuantSymmetricS16(const float* data, int len, float headroom,
  * so headroom only matters for mLSTM here, but is applied uniformly to
  * keep one number to justify rather than two. See task-4-report.md for
  * the sweep data. */
-static const float kStateHeadroom = 4.0f;
+static constexpr float kStateHeadroom = 4.0f;
+
+/* generate_reference.py's numpy replica calibrates c_quant/n_quant with
+ * the same formula and headroom (GENERATOR_HEADROOM there,
+ * XLSTM_GENERATOR_HEADROOM here) to derive every tol_s8_per_channel bound
+ * in reference_data.h. The two are independent, hand-synchronized copies
+ * of the same constant; this catches the case where one changes and the
+ * other doesn't, rather than letting every bound in the file quietly
+ * stop matching what it was calibrated against. */
+static_assert(kStateHeadroom == XLSTM_GENERATOR_HEADROOM,
+              "kStateHeadroom (slstm_s8_test.cc) must match "
+              "XLSTM_GENERATOR_HEADROOM (generate_reference.py's "
+              "GENERATOR_HEADROOM, emitted into reference_data.h) - "
+              "every tol_s8_per_channel bound was derived assuming they agree");
 
 /* Sets up quantized weights/input plus calibrated state-quant scales for
  * one reference case.
@@ -232,9 +245,29 @@ static bool RunSlstmS8Case(const XlstmRefCase* tc) {
     ok &= ExpectFinite("y", y_f, tc->H);
     ok &= ExpectFinite("m", m_f, tc->H);
 
+    /* tol_s8_per_channel is populated for every case in reference_data.h
+     * today (build_cases()'s post-processing pass in
+     * generate_reference.py), but _emit_table falls back to NULL for a
+     * case that omits it from that pass, so this cannot assume
+     * non-NULL - guarded the same way PrepareS8 already guards
+     * expected_state, rather than segfault on a future case that adds
+     * itself without going through that pass. Fallback: the case-wide
+     * tol_s8 applied uniformly, matching this file's behavior before
+     * per-channel bounds existed. */
+    static float uniform_tol[256];
+    const float* per_channel_tol = tc->tol_s8_per_channel;
+    if (!per_channel_tol) {
+        for (int j = 0; j < tc->H; ++j) uniform_tol[j] = tc->tol_s8;
+        per_channel_tol = uniform_tol;
+    }
+
+    static float channel_err[256];
+    for (int j = 0; j < tc->H; ++j) channel_err[j] = 0.0f;
+
     for (int j = 0; j < tc->H; ++j) {
-        float tol = tc->tol_s8_per_channel[j];
+        float tol = per_channel_tol[j];
         float diff = std::abs(tc->expected_y[j] - y_f[j]);
+        if (diff > channel_err[j]) channel_err[j] = diff;
         if (diff > tol + kRelTol * std::abs(tc->expected_y[j])) {
             std::printf("  FAIL y[%d]: expected %.8f, got %.8f (diff %.2e, tol %.4f)\n",
                         j, tc->expected_y[j], y_f[j], diff, tol);
@@ -245,13 +278,38 @@ static bool RunSlstmS8Case(const XlstmRefCase* tc) {
         for (int t = 0; t < tc->T; ++t) {
             for (int j = 0; j < tc->H; ++j) {
                 int idx = t * tc->H + j;
-                float tol = tc->tol_s8_per_channel[j];
+                float tol = per_channel_tol[j];
                 float diff = std::abs(tc->expected_output[idx] - output_f[idx]);
+                if (diff > channel_err[j]) channel_err[j] = diff;
                 if (diff > tol + kRelTol * std::abs(tc->expected_output[idx])) {
                     std::printf("  FAIL output[%d]: expected %.8f, got %.8f (diff %.2e, tol %.4f)\n",
                                 idx, tc->expected_output[idx], output_f[idx], diff, tol);
                     ok = false;
                 }
+            }
+        }
+    }
+
+    /* Floor consistency: tol_s8_floor_per_channel is what
+     * generate_reference.py's numpy replica measured for this exact
+     * kernel+calibration. If a kernel change isn't mirrored in the
+     * replica, every derived bound quietly stops matching reality
+     * instead of failing loudly - this assertion is what makes that
+     * failure loud. 1.5x margin: the worst observed replica-vs-real-
+     * kernel discrepancy across every channel in this table is ~1.9%
+     * (see task-4-report.md), so 1.5x never false-fires today but still
+     * catches a real divergence. Guarded the same way as
+     * tol_s8_per_channel above; skipped (not defaulted) when absent,
+     * since there is nothing meaningful to check consistency against. */
+    if (tc->tol_s8_floor_per_channel) {
+        for (int j = 0; j < tc->H; ++j) {
+            float floor = tc->tol_s8_floor_per_channel[j];
+            if (channel_err[j] > floor * 1.5f) {
+                std::printf("  FAIL floor-consistency ch[%d]: measured error %.6f exceeds "
+                            "1.5x the numpy replica's predicted floor %.6f - "
+                            "generate_reference.py's replica may be out of sync with the "
+                            "C kernel\n", j, channel_err[j], floor);
+                ok = false;
             }
         }
     }
@@ -267,7 +325,8 @@ static bool TestS8QuantizationBound() {
     for (int i = 0; i < kSlstmCasesCount; ++i) {
         const XlstmRefCase* tc = &kSlstmCases[i];
         float err = EvalSlstmS8Case(tc, y_f, NULL, NULL);
-        std::printf("  %-10s H=%-3d max abs error vs f32: %.6f\n", tc->name, tc->H, err);
+        std::printf("  %-10s H=%-3d max abs error vs f32: %.6f (worst-channel bound: %.4f)\n",
+                     tc->name, tc->H, err, tc->tol_s8);
         if (err > max_err) max_err = err;
     }
     std::printf("  max absolute error vs f32 across all cases: %.6f\n", max_err);

@@ -55,18 +55,36 @@ void xlstm_matvec_f32(const float* M, const float* v,
     int i;
 
     for (i = 0; i < rows; ++i) {
-        float dot;
         if (fast) {
             /* Chip-generic macro: dispatches to _aes3 on ESP32-S3, _ae32 on
              * ESP32, _ansi elsewhere. The previous code hardcoded _ae32, the
              * ESP32 variant, which compiles on S3 (its guard is generic Xtensa
              * capability flags, not a chip check) but leaves the S3-optimized
              * path unused. */
+            float dot;
             dsps_dotprod_f32(M + i * cols, v, &dot, cols);
+            out[i] += dot;
         } else {
-            dsps_dotprod_f32_ansi(M + i * cols, v, &dot, cols);
+            /* Deliberately NOT dsps_dotprod_f32_ansi. That computes the dot
+             * into a fresh accumulator and leaves the caller to do
+             * out[i] += dot, whereas xlstm_simd_ref.c seeds one running
+             * accumulator from out[i]. The mathematics is identical but the
+             * float grouping is not, and on a cancellation-sensitive case it
+             * moves the result: mLSTM SweepM17 y[0] came out 4.20e-05 from the
+             * golden value against a ~3.98e-05 bound, failing the gate on the
+             * esp backend's first end-to-end run.
+             *
+             * The fallback is plain C either way, so there is nothing to gain
+             * from ESP-DSP here and a real divergence to lose. Match ref
+             * exactly - it is the baseline every other backend is defined
+             * against. */
+            int j;
+            float acc = out[i];
+            for (j = 0; j < cols; ++j) {
+                acc += M[i * cols + j] * v[j];
+            }
+            out[i] = acc;
         }
-        out[i] += dot;
     }
 }
 

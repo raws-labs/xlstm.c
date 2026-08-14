@@ -14,6 +14,7 @@
 
 #include "slstm_s8.h"
 #include "xlstm_quant.h"
+#include "test_config.h"
 #include "test_util.h"
 
 // ============================================================================
@@ -26,12 +27,13 @@
 // Helper: derive and apply quantization scales from case data
 // ============================================================================
 
-/* Static buffers sized for the largest case. XLSTM_MAX_HIDDEN is 256. */
+/* Static buffers sized for the largest case. See test_config.h for what
+ * XLSTM_TEST_MAX_H bounds and how it differs from XLSTM_MAX_HIDDEN. */
 struct SlstmS8Setup {
-    int8_t W_q[4 * 256 * 256];   /* max [4*H, I] */
-    int8_t R_q[4 * 256 * 256];   /* max [4*H, H] */
-    int32_t b_q[4 * 256];        /* max [4*H] */
-    int8_t input_q[3 * 256];     /* max [T, I] */
+    int8_t W_q[4 * XLSTM_TEST_MAX_H * XLSTM_TEST_MAX_H];   /* max [4*H, I] */
+    int8_t R_q[4 * XLSTM_TEST_MAX_H * XLSTM_TEST_MAX_H];   /* max [4*H, H] */
+    int32_t b_q[4 * XLSTM_TEST_MAX_H];        /* max [4*H] */
+    int8_t input_q[3 * XLSTM_TEST_MAX_H];     /* max [T, I] */
     SlstmS8Params params;
 };
 
@@ -186,11 +188,11 @@ static float EvalSlstmS8Case(const XlstmRefCase* tc, float* y_out,
     static SlstmS8Setup s;
     PrepareS8(tc, &s);
 
-    static int8_t y[256];
-    static int16_t c[256], n_state[256];
-    static float m_state[256];
-    static int8_t output[3 * 256];
-    static int32_t scratch[4 * 256];
+    static int8_t y[XLSTM_TEST_MAX_H];
+    static int16_t c[XLSTM_TEST_MAX_H], n_state[XLSTM_TEST_MAX_H];
+    static float m_state[XLSTM_TEST_MAX_H];
+    static int8_t output[3 * XLSTM_TEST_MAX_H];
+    static int32_t scratch[4 * XLSTM_TEST_MAX_H];
     for (int i = 0; i < H; ++i) { y[i] = 0; c[i] = 0; n_state[i] = 0; m_state[i] = 0; }
     for (int i = 0; i < T * H; ++i) output[i] = 0;
     for (int i = 0; i < 4 * H; ++i) scratch[i] = 0;
@@ -220,7 +222,7 @@ static float EvalSlstmS8Case(const XlstmRefCase* tc, float* y_out,
      * showed 0.124726, but an intermediate timestep reaches 1.127354 -
      * see task-4-report.md). Reporting only the final-y number would
      * understate what tolerance the case actually needs. */
-    static float output_local[3 * 256];
+    static float output_local[3 * XLSTM_TEST_MAX_H];
     xlstm_dequantize_s8_to_f32(output, output_local, T * H, &s.params.y_quant);
     if (output_out) {
         for (int i = 0; i < T * H; ++i) output_out[i] = output_local[i];
@@ -268,7 +270,7 @@ static bool RunSlstmS8Case(const XlstmRefCase* tc) {
         return false;
     }
 
-    static float y_f[256], m_f[256], c_f[256], n_f[256], output_f[3 * 256];
+    static float y_f[XLSTM_TEST_MAX_H], m_f[XLSTM_TEST_MAX_H], c_f[XLSTM_TEST_MAX_H], n_f[XLSTM_TEST_MAX_H], output_f[3 * XLSTM_TEST_MAX_H];
     /* The return value is the case-wide max error, which only
      * TestS8QuantizationBound's summary uses; the per-channel and
      * per-tensor assertions below are what decide this case. */
@@ -331,7 +333,7 @@ static bool RunSlstmS8Case(const XlstmRefCase* tc) {
      * itself without going through that pass. Fallback: the case-wide
      * tol_s8 applied uniformly, matching this file's behavior before
      * per-channel bounds existed. */
-    static float uniform_tol[256];
+    static float uniform_tol[XLSTM_TEST_MAX_H];
     const float* per_channel_tol = tc->tol_s8_per_channel;
     if (!per_channel_tol) {
         for (int j = 0; j < tc->H; ++j) uniform_tol[j] = tc->tol_s8;
@@ -341,7 +343,7 @@ static bool RunSlstmS8Case(const XlstmRefCase* tc) {
     /* channel_ref[j] is the largest golden magnitude channel j takes over
      * y and every stored output timestep - the scale the floor check's
      * relative term is measured against below. */
-    static float channel_err[256], channel_ref[256];
+    static float channel_err[XLSTM_TEST_MAX_H], channel_ref[XLSTM_TEST_MAX_H];
     for (int j = 0; j < tc->H; ++j) { channel_err[j] = 0.0f; channel_ref[j] = 0.0f; }
 
     for (int j = 0; j < tc->H; ++j) {
@@ -422,7 +424,7 @@ static bool RunSlstmS8Case(const XlstmRefCase* tc) {
  * the max absolute error vs the f32 golden y. This is the size-vs-error
  * measurement: how INT8 error grows with H (.docs/SCOPE.md section 8). */
 static bool TestS8QuantizationBound() {
-    static float y_f[256];
+    static float y_f[XLSTM_TEST_MAX_H];
     float max_err = 0.0f;
     for (int i = 0; i < kSlstmCasesCount; ++i) {
         const XlstmRefCase* tc = &kSlstmCases[i];
@@ -468,7 +470,11 @@ static bool TestS8QuantizationBound() {
 // Main
 // ============================================================================
 
-int main() {
+#ifndef XLSTM_TEST_MAIN
+#define XLSTM_TEST_MAIN main
+#endif
+
+int XLSTM_TEST_MAIN(void) {
     std::printf("[==========] Running sLSTM INT8 kernel tests\n");
 
     for (int i = 0; i < kSlstmCasesCount; ++i) {

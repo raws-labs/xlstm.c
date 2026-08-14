@@ -8,15 +8,17 @@
  * =========================================================================*/
 
 #include "slstm.h"
+#include "test_config.h"
 #include "test_util.h"
 #include "reference_data.h"
 
 #include <cstdio>
 
-/* Static buffers sized for the largest case. XLSTM_MAX_HIDDEN is 256. */
-static float g_y[256], g_c[256], g_n[256], g_m[256];
-static float g_output[3 * 256];
-static float g_scratch[4 * 256];
+/* Static buffers sized for the largest case. See test_config.h for what
+ * XLSTM_TEST_MAX_H bounds and how it differs from XLSTM_MAX_HIDDEN. */
+static float g_y[XLSTM_TEST_MAX_H], g_c[XLSTM_TEST_MAX_H], g_n[XLSTM_TEST_MAX_H], g_m[XLSTM_TEST_MAX_H];
+static float g_output[3 * XLSTM_TEST_MAX_H];
+static float g_scratch[4 * XLSTM_TEST_MAX_H];
 
 static bool RunSlstmCase(const XlstmRefCase* tc) {
     const int H = tc->H, T = tc->T;
@@ -123,7 +125,11 @@ static bool TestHeadComposition() {
     return ok;
 }
 
-int main() {
+#ifndef XLSTM_TEST_MAIN
+#define XLSTM_TEST_MAIN main
+#endif
+
+int XLSTM_TEST_MAIN(void) {
     std::printf("[==========] Running sLSTM kernel tests\n");
 
     for (int i = 0; i < kSlstmCasesCount; ++i) {

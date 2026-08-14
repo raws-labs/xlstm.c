@@ -1,0 +1,59 @@
+# sdkconfig.defaults for the xlstm.c ESP32-S3 hardware-in-the-loop firmware.
+#
+# Every non-default choice below exists for a specific, load-bearing reason
+# tied to this firmware's shape (four fused test suites, INT8 kernels with
+# large stack frames, no interactive debugger between flash and result).
+# See test/hil/README.md and the W5 report for the full rationale; the short
+# version of each is in its own comment.
+
+# The INT8 kernels (src/slstm_s8.c, src/mlstm_s8.c) declare stack-resident
+# accumulators sized off XLSTM_MAX_HIDDEN (include/xlstm_simd.h, default
+# 256) - e.g. slstm_s8.c's `int32_t acc_wx[4*H], acc_ry[4*H]` is ~8 KB by
+# itself at the default XLSTM_MAX_HIDDEN, on top of the rest of each call
+# chain's frames. IDF's default main-task stack (3584 B) panics
+# (stack overflow) before the first suite even runs. This is a different
+# knob from test/test_config.h's XLSTM_TEST_MAX_H (main/CMakeLists.txt sets
+# that one to 64 for the test harness's own BSS buffers) - XLSTM_MAX_HIDDEN
+# is not touched here or anywhere in this build, deliberately, per the task
+# brief's instruction not to modify kernel sources or their sizing.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=65536
+
+# The fused suite runs all four test binaries back to back with no
+# FreeRTOS yield points inside a single suite's run - on real hardware this
+# can take several seconds. IDF's Task Watchdog defaults to a 5 second
+# timeout on CPU0's idle task and panics the whole system if it fires.
+# Disabling TWDT init entirely (not just raising the timeout) matches this
+# firmware's actual behavior: it never intends to feed the watchdog.
+CONFIG_ESP_TASK_WDT_INIT=n
+
+# test/reference_data.h (checked-in golden data for all four suites) is
+# several hundred KB of .rodata. The IDF default single-app partition table
+# sizes the factory app partition at 1 MB, which is tight once golden data,
+# four fused test binaries, and the rest of .text/.rodata are all in the
+# same image. The "large" variant widens the app partition to 1.5 MB.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# The rig's board flash size is not documented anywhere we could find, so
+# this is a safe conservative floor, not a measured value - 4 MB is the
+# smallest size esptool.py can reliably assume for an S3 devkit without
+# guessing wrong in a way that bricks a smaller part. hil_platform_
+# provenance_fields() in main/hil_esp32s3.c reports the ACTUAL runtime-
+# detected flash size (esp_flash_get_size()) in the provenance banner every
+# run specifically so this guess can be corrected from evidence once real
+# hardware has run this firmware once.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# Deliberately absent: any CONFIG_SPIRAM=y. The rig's PSRAM situation is as
+# undocumented as its flash size, and unlike flash size there is no safe
+# floor to guess for PSRAM (assuming it exists when it doesn't is a boot-
+# time failure, not just wasted space) - so this build assumes none, and
+# main/hil_esp32s3.c reports whether PSRAM is actually present at runtime
+# instead of guessing.
+
+# The rig opens a plain serial port ("srig serial") - not USB-CDC, not
+# USB-Serial-JTAG. UART0 at 115200 8N1 is the IDF default for an S3 without
+# native USB console selected, but both are set explicitly here so this
+# file is self-documenting rather than relying on whichever default happens
+# to be current.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200

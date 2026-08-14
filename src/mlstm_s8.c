@@ -76,7 +76,7 @@ void mlstm_step_s8(
     /* 4. Stabilized gates (scalar m) */
     float m_prev = m[0];
     float log_f_plus_m = log_sigmoid_f32(f_raw) + m_prev;
-    float m_new = fmaxf(log_f_plus_m, i_raw);
+    float m_new = xlstm_maxf(log_f_plus_m, i_raw);
 
     float f_gate = expf(log_f_plus_m - m_new);
     float i_gate = expf(i_raw - m_new);
@@ -88,11 +88,23 @@ void mlstm_step_s8(
             float C_new = f_gate * C_prev + i_gate * k[r] * v[c];
 
             if (params->cell_clip > 0.0f) {
-                C_new = fmaxf(-params->cell_clip, fminf(params->cell_clip, C_new));
+                C_new = xlstm_maxf(-params->cell_clip,
+                                   xlstm_minf(params->cell_clip, C_new));
             }
 
+            /* The divide stays, deliberately. Hoisting 1/scale out of this
+             * loop and multiplying would remove a vdiv per element - the most
+             * expensive instruction in the loop on Cortex-M4 - but x * (1/s)
+             * rounds twice where x / s rounds once, so the two are not the
+             * same function. Measured over 4M random (x, s) pairs drawn from
+             * the scale range these kernels calibrate to: 25.9% of quotients
+             * differ before rounding and 1 in ~7,400 still differs after the
+             * INT16 round, i.e. a one-LSB state error. The gate happens not
+             * to contain such a pair (0 of its 15,154 state requantizations
+             * move), which is exactly why it is not evidence of equivalence.
+             * See .superpowers/sdd/2026-08-14-cortexm/item-3-report.md. */
             float C_q = C_new / params->C_quant.scale;
-            C[r * H + c] = (int16_t)fmaxf(-32768.0f, fminf(32767.0f, roundf(C_q)));
+            C[r * H + c] = (int16_t)xlstm_round_clamp_i32(C_q, -32768.0f, 32767.0f);
         }
     }
 
@@ -101,7 +113,7 @@ void mlstm_step_s8(
         float n_prev = (float)n[i] * params->n_quant.scale;
         float n_new = f_gate * n_prev + i_gate * k[i];
         float n_q = n_new / params->n_quant.scale;
-        n[i] = (int16_t)fmaxf(-32768.0f, fminf(32767.0f, roundf(n_q)));
+        n[i] = (int16_t)xlstm_round_clamp_i32(n_q, -32768.0f, 32767.0f);
     }
 
     /* 7. Update m */
@@ -114,7 +126,7 @@ void mlstm_step_s8(
         float n_f = (float)n[i] * params->n_quant.scale;
         qn += q[i] * n_f;
     }
-    float denom = fmaxf(fabsf(qn), expf(-m_new)) + 1e-6f;
+    float denom = xlstm_maxf(fabsf(qn), expf(-m_new)) + 1e-6f;
 
     for (j = 0; j < H; ++j) {
         float qC_j = 0.0f;
@@ -126,7 +138,7 @@ void mlstm_step_s8(
 
         /* Requantize output to INT8 */
         float y_q = y_new / params->y_quant.scale + (float)params->y_quant.zero_point;
-        y[j] = (int8_t)fmaxf(-128.0f, fminf(127.0f, roundf(y_q)));
+        y[j] = (int8_t)xlstm_round_clamp_i32(y_q, -128.0f, 127.0f);
     }
 }
 

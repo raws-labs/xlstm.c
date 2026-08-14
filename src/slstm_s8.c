@@ -87,11 +87,11 @@ void slstm_step_s8(
             /* First timestep (n state uninitialized) */
             m_new = i_raw;
         } else {
-            m_new = fmaxf(i_raw, log_f_plus_m);
+            m_new = xlstm_maxf(i_raw, log_f_plus_m);
         }
 
-        float i_gate = fminf(expf(i_raw - m_new), 1.0f);
-        float f_gate = fminf(expf(log_f_plus_m - m_new), 1.0f);
+        float i_gate = xlstm_minf(expf(i_raw - m_new), 1.0f);
+        float f_gate = xlstm_minf(expf(log_f_plus_m - m_new), 1.0f);
         float o_gate = sigmoid_f32(o_raw);
         float c_input = tanhf(z_raw);
 
@@ -100,24 +100,27 @@ void slstm_step_s8(
         float n_new = f_gate * n_prev + i_gate;
 
         if (params->cell_clip > 0.0f) {
-            c_new = fmaxf(-params->cell_clip, fminf(params->cell_clip, c_new));
+            c_new = xlstm_maxf(-params->cell_clip,
+                               xlstm_minf(params->cell_clip, c_new));
         }
 
-        float y_new = o_gate * (c_new / fmaxf(n_new, 1e-6f));
+        float y_new = o_gate * (c_new / xlstm_maxf(n_new, 1e-6f));
 
-        /* 6. Requantize states to INT16 (symmetric: zp=0) */
+        /* 6. Requantize states to INT16 (symmetric: zp=0).
+         * The divides stay - see the note in mlstm_s8.c's C-update loop for
+         * the measurement showing a reciprocal multiply is not equivalent. */
         float c_q = c_new / params->c_quant.scale;
-        c[i] = (int16_t)fmaxf(-32768.0f, fminf(32767.0f, roundf(c_q)));
+        c[i] = (int16_t)xlstm_round_clamp_i32(c_q, -32768.0f, 32767.0f);
 
         float n_q = n_new / params->n_quant.scale;
-        n[i] = (int16_t)fmaxf(-32768.0f, fminf(32767.0f, roundf(n_q)));
+        n[i] = (int16_t)xlstm_round_clamp_i32(n_q, -32768.0f, 32767.0f);
 
         /* m stays float */
         m[i] = m_new;
 
         /* 7. Requantize output to INT8 */
         float y_q = y_new / params->y_quant.scale + (float)params->y_quant.zero_point;
-        y[i] = (int8_t)fmaxf(-128.0f, fminf(127.0f, roundf(y_q)));
+        y[i] = (int8_t)xlstm_round_clamp_i32(y_q, -128.0f, 127.0f);
     }
 }
 

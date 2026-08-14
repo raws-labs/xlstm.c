@@ -77,6 +77,74 @@ static bool ExpectFinite(const char* name, const float* vals, int len) {
  * MTest3's |y| ~ 15, where one ULP is already 1.9e-06. */
 static const float kFloorEps = 1e-6f;
 
+/* Multiple of a state element's replica-predicted floor that its real
+ * measured error is allowed to reach before the drift detector fires.
+ *
+ * The output path's equivalent is the literal 1.5 in the two INT8
+ * runners' floor-consistency loops. That factor does NOT transfer, and
+ * this was measured rather than assumed: across all 5198 state elements
+ * the worst real-kernel-error / replica-floor ratio is 2.1187 (sLSTM
+ * Test1's m[1], floor 1.32e-03 vs error 2.80e-03), where the output
+ * path's worst is 1.0187. A 1.5 factor would false-fire on the correct,
+ * unmodified kernel.
+ *
+ * The tail is short: only 3 of 5198 elements exceed 1.01, all in Test1
+ * (m[1] 2.119, m[0] 1.038, c[0] 1.024). 2509 sit in 1.000-1.010 and 2683
+ * at or below 1.0 - the state is requantized to INT16, so replica and
+ * kernel usually land on the same integer and the ratio is 1.0 plus float
+ * noise. 3.0 clears the measured worst by 1.42x, which is the same margin
+ * the output path's 1.5 keeps over its own worst of 1.0187 (1.47x). Do
+ * not tighten it toward 2.2 to "make the test stricter": the margin is
+ * what stops a legitimate backend difference from being reported as
+ * replica drift. */
+static const float kStateFloorFactor = 3.0f;
+
+/* Exit-state drift detector - the twin of the output path's
+ * floor-consistency check, which has caught every kernel mutant tried
+ * against it, and which the state path had no equivalent of.
+ *
+ * `floor` is tol_s8_{state,n,m}_floor_per_elem from reference_data.h:
+ * what generate_reference.py's numpy replica measured as that element's
+ * own worst-case error. The replica and the real kernel are two
+ * hand-synchronized implementations of the same math, and a new SIMD
+ * backend is exactly what stresses that coupling. Without this check, a
+ * kernel change that moves the exit state but not y is invisible as a
+ * divergence: it passes if it stays inside the per-element bound, or it
+ * surfaces as a bound violation with nothing pointing at the replica.
+ *
+ * This covers EVERY element, including the 142 whose bound is
+ * XLSTM_STATE_TOL_UNASSERTABLE. Drift detection does not need a
+ * non-vacuous bound to exist, so those elements are unguarded for
+ * correctness but still guarded against divergence.
+ *
+ * kFloorEps + kRelTol carry the same job here as in the output check: 3
+ * elements have a floor of exactly 0.0, which without them would demand
+ * bit-exact float equality (all 3 currently match exactly, so the guard
+ * is what stops one ULP from a different libm failing the suite), and
+ * the relative term keeps that true at mLSTM MTest3's C ~= 159 where one
+ * ULP is already 1.5e-05. */
+[[maybe_unused]] static bool ExpectStateFloorConsistent(const char* name,
+                                                        const float* expected,
+                                                        const float* actual,
+                                                        const float* floor, int len) {
+    if (!floor) return true;
+    for (int i = 0; i < len; ++i) {
+        float err = std::abs(expected[i] - actual[i]);
+        float bound = floor[i] * kStateFloorFactor + kFloorEps
+                    + kRelTol * std::abs(expected[i]);
+        if (err > bound) {
+            std::printf("  FAIL state-floor-consistency %s[%d]: measured error %.8g "
+                        "exceeds bound %.8g (%.1fx the numpy replica's predicted floor "
+                        "%.8g, plus float slack) - either the C kernel regressed or "
+                        "generate_reference.py's replica drifted away from it; check the "
+                        "kernel first if you just changed one\n",
+                        name, i, err, bound, kStateFloorFactor, floor[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
 /* Value assertion for an INT8 exit state (sLSTM c/n/m, mLSTM C/n/m),
  * one bound per ELEMENT.
  *

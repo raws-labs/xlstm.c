@@ -548,12 +548,29 @@ STATE_MIN_MARGIN = 1.2
 
 
 def compute_state_tol_per_elem(tc, cell):
-    """Per-ELEMENT INT8 bounds for the kernel's exit state.
+    """Per-ELEMENT INT8 bounds and floors for the kernel's exit state.
 
-    Returns {"state": [...], "n": [...], "m": [...]} - one bound per
-    element of each state tensor (sLSTM c[H]/n[H]/m[H], mLSTM
-    C[H*H]/n[H]/m[1]), derived exactly the way compute_tol_s8_per_channel
-    derives the output bounds, and for the same reason.
+    Returns (bounds, floors), each {"state": [...], "n": [...],
+    "m": [...]} - one value per element of each state tensor (sLSTM
+    c[H]/n[H]/m[H], mLSTM C[H*H]/n[H]/m[1]), derived exactly the way
+    compute_tol_s8_per_channel derives the output bounds and floors, and
+    for the same reasons.
+
+    floors are what this function's own numpy replica measured as each
+    element's worst-case error, and they are emitted into
+    reference_data.h next to the bounds so the real C kernel's measured
+    state error can be asserted against floor*1.5 at test time - the
+    exit-state half of the drift detector the output path has had since
+    the tol_s8_floor_per_channel round. Without it, a kernel change that
+    moves the exit state without moving y is invisible as a replica
+    divergence: it either passes (if it stays inside the bound) or fails
+    as a bound violation with nothing pointing at the replica. That
+    matters most for a new SIMD backend, which is exactly what stresses
+    this hand-maintained C-to-Python coupling. Note the floors cover
+    EVERY element, including the ones whose bound is
+    STATE_TOL_UNASSERTABLE: drift detection does not need a non-vacuous
+    bound to exist, so those elements are unguarded for correctness but
+    still guarded against divergence.
 
     Why per element and not one bound per tensor: an earlier round bounded
     each state tensor at a fixed fraction of that tensor's own maximum
@@ -621,11 +638,13 @@ def compute_state_tol_per_elem(tc, cell):
              "m": _t2n(tc["m"]).flatten()}
 
     out = {}
+    out_floor = {}
     for key, gold in golds.items():
         a, b = np.asarray(st0[key]).flatten(), np.asarray(st1[key]).flatten()
         assert a.shape == gold.shape, (
             f"{tc['name']} {key}: replica {a.shape} vs golden {gold.shape}")
         floor = np.maximum(np.abs(a - gold), np.abs(b - gold))
+        out_floor[key] = [float(v) for v in floor]
         bounds = []
         for i in range(len(gold)):
             rng = abs(float(gold[i]))
@@ -643,7 +662,7 @@ def compute_state_tol_per_elem(tc, cell):
                 continue
             bounds.append(bound)
         out[key] = bounds
-    return out
+    return out, out_floor
 
 
 def slstm_sized_case(H, seed):
@@ -1011,12 +1030,14 @@ def build_cases():
         tc["tol_s8_per_channel"], tc["tol_s8_floor_per_channel"] = \
             compute_tol_s8_per_channel(tc, "s")
         tc["tol_s8"] = max(tc["tol_s8_per_channel"])
-        tc["tol_s8_state"] = compute_state_tol_per_elem(tc, "s")
+        tc["tol_s8_state"], tc["tol_s8_state_floor"] = \
+            compute_state_tol_per_elem(tc, "s")
     for tc in mlstm_cases:
         tc["tol_s8_per_channel"], tc["tol_s8_floor_per_channel"] = \
             compute_tol_s8_per_channel(tc, "m")
         tc["tol_s8"] = max(tc["tol_s8_per_channel"])
-        tc["tol_s8_state"] = compute_state_tol_per_elem(tc, "m")
+        tc["tol_s8_state"], tc["tol_s8_state_floor"] = \
+            compute_state_tol_per_elem(tc, "m")
 
     return slstm_cases, mlstm_cases, {"head2": head2_fused}
 
@@ -1062,9 +1083,10 @@ def _emit_case(f, tc, state_key, has_R):
     if "tol_s8_floor_per_channel" in tc:
         vals = ", ".join(f"{v:.8f}f" for v in tc["tol_s8_floor_per_channel"])
         f.write(f"const float k{n}_tol_s8_floor_per_channel[] = {{{vals}}};\n")
-    # Per-element exit-state bounds. The 'state' array is skipped for a case
-    # that does not store its state golden at all, since there would be
-    # nothing to compare against.
+    # Per-element exit-state bounds, and the replica floors they were
+    # derived from (see compute_state_tol_per_elem). The 'state' arrays are
+    # skipped for a case that does not store its state golden at all, since
+    # there would be nothing to compare against.
     for key, suffix in (("state", state_key), ("n", "n"), ("m", "m")):
         if "tol_s8_state" not in tc:
             break
@@ -1072,6 +1094,8 @@ def _emit_case(f, tc, state_key, has_R):
             continue
         vals = ", ".join(f"{v:.8f}f" for v in tc["tol_s8_state"][key])
         f.write(f"const float k{n}_tol_s8_{suffix}_per_elem[] = {{{vals}}};\n")
+        vals = ", ".join(f"{v:.8f}f" for v in tc["tol_s8_state_floor"][key])
+        f.write(f"const float k{n}_tol_s8_{suffix}_floor_per_elem[] = {{{vals}}};\n")
     f.write("\n")
 
 
@@ -1113,6 +1137,20 @@ CASE_STRUCT = """typedef struct {
     const float* tol_s8_state_per_elem;
     const float* tol_s8_n_per_elem;
     const float* tol_s8_m_per_elem;
+    /* What generate_reference.py's numpy replica measured as each state
+     * element's own worst-case error - the exit-state twin of
+     * tol_s8_floor_per_channel above. The real kernel's measured state
+     * error is asserted against floor*1.5 in RunSlstmS8Case/RunMlstmS8Case
+     * so a kernel change that moves the exit state without moving y is
+     * reported as a replica divergence instead of silently passing or
+     * surfacing as an unexplained bound violation. Unlike the bounds,
+     * these cover every element, including the ones whose bound is
+     * XLSTM_STATE_TOL_UNASSERTABLE: drift detection does not require a
+     * non-vacuous bound to exist. Same lengths as the bounds. NULL if not
+     * emitted. */
+    const float* tol_s8_state_floor_per_elem;
+    const float* tol_s8_n_floor_per_elem;
+    const float* tol_s8_m_floor_per_elem;
 } XlstmRefCase;
 
 """
@@ -1142,12 +1180,17 @@ def _emit_table(f, cases, table_name, state_key, has_R):
                   if has_state_tol and tc.get("store_state", True) else "NULL")
         n_tol = f"k{n}_tol_s8_n_per_elem" if has_state_tol else "NULL"
         m_tol = f"k{n}_tol_s8_m_per_elem" if has_state_tol else "NULL"
+        st_fl = (f"k{n}_tol_s8_{state_key}_floor_per_elem"
+                 if has_state_tol and tc.get("store_state", True) else "NULL")
+        n_fl = f"k{n}_tol_s8_n_floor_per_elem" if has_state_tol else "NULL"
+        m_fl = f"k{n}_tol_s8_m_floor_per_elem" if has_state_tol else "NULL"
         f.write(
             f'    {{"{n}", {tc["B"]}, {tc["T"]}, {tc["I"]}, {tc["H"]}, '
             f'k{src}_W, {R}, k{src}_b, k{n}_input, k{n}_expected_y, {state}, '
             f'k{n}_expected_n, k{n}_expected_m, {out}, '
             f'{tc.get("tol_f32", 1e-5):.8g}f, {tc.get("tol_s8", 0.10):.8g}f, '
-            f'{per_channel}, {floor}, {st_tol}, {n_tol}, {m_tol}}},\n'
+            f'{per_channel}, {floor}, {st_tol}, {n_tol}, {m_tol}, '
+            f'{st_fl}, {n_fl}, {m_fl}}},\n'
         )
     f.write("};\n")
     f.write(f"static const int {table_name}Count = "

@@ -279,11 +279,27 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
         /* Reported, not hidden: these are elements whose golden is exactly
          * zero or whose honest measured error already spans their whole
          * dynamic range, so no bound can be both non-vacuous and free of
-         * false failures. See compute_state_tol_per_elem. */
+         * false failures. See compute_state_tol_per_elem. They are still
+         * covered by the drift detector below, which needs no bound. */
         std::printf("  note: %d of %d exit-state elements have no usable bound "
-                    "(unassertable, see compute_state_tol_per_elem)\n",
+                    "(unassertable, see compute_state_tol_per_elem; still "
+                    "drift-checked)\n",
                     unasserted, tc->H * tc->H + tc->H + 1);
     }
+
+    /* Exit-state drift consistency - the twin of the output floor check
+     * further down, for the half of the kernel's contract that check
+     * cannot see. See ExpectStateFloorConsistent in test_util.h for the
+     * measured factor and what it is guarding against. NULL-guarded the
+     * same way as tol_s8_floor_per_channel. */
+    ok &= ExpectStateFloorConsistent("m", tc->expected_m, m_f,
+                                     tc->tol_s8_m_floor_per_elem, 1);
+    if (tc->expected_state)
+        ok &= ExpectStateFloorConsistent("C", tc->expected_state, C_f,
+                                         tc->tol_s8_state_floor_per_elem,
+                                         tc->H * tc->H);
+    ok &= ExpectStateFloorConsistent("n", tc->expected_n, n_f,
+                                     tc->tol_s8_n_floor_per_elem, tc->H);
 
     /* tol_s8_per_channel is populated for every case in reference_data.h
      * today (build_cases()'s post-processing pass in

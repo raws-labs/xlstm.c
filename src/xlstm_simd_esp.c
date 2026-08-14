@@ -19,13 +19,53 @@
 #include "xlstm_simd.h"
 #include "dsps_dotprod.h"
 
+#include <stdint.h>
+
+/* ESP-DSP's optimized dot products load 128 bits at a time
+ * (EE.LDF.128.IP src, 16) and consume four floats per iteration, so both
+ * operands must be 16-byte aligned and the length must be a multiple of 4.
+ * Nothing in the ESP-DSP headers states this - it is visible only in the
+ * .S sources - and violating it does not fault, it silently returns wrong
+ * numbers.
+ *
+ * xlstm_matvec_f32 walks rows as M + i*cols, so row alignment depends on
+ * both the base pointer and cols. Rather than assume, check, and fall back
+ * to ESP-DSP's own ANSI implementation when the preconditions do not hold.
+ * dsps_dotprod_f32_ansi is plain C with no alignment or length constraint.
+ *
+ * Note also that despite the header's doc comment claiming
+ * "*dest += src1[i]*src2[i]", every implementation ASSIGNS (*dest = acc;
+ * `ssi f0, a4, 0` in the assembly). The uninitialized `dot` below is
+ * therefore correct - do not "fix" it by zeroing, and do not assume the
+ * accumulate semantics the comment advertises.
+ */
+#define XLSTM_ESP_DSP_ALIGN 16
+
+static inline int xlstm_esp_aligned(const void* p)
+{
+    return (((uintptr_t)p) & (XLSTM_ESP_DSP_ALIGN - 1)) == 0;
+}
+
 void xlstm_matvec_f32(const float* M, const float* v,
                       float* out, int rows, int cols)
 {
+    /* Hoisted: if cols is a multiple of 4 then every row shares the base
+     * pointer's alignment, so this is decided once rather than per row. */
+    const int fast = (cols % 4) == 0 && xlstm_esp_aligned(M) && xlstm_esp_aligned(v);
     int i;
+
     for (i = 0; i < rows; ++i) {
         float dot;
-        dsps_dotprod_f32_ae32(M + i * cols, v, &dot, cols);
+        if (fast) {
+            /* Chip-generic macro: dispatches to _aes3 on ESP32-S3, _ae32 on
+             * ESP32, _ansi elsewhere. The previous code hardcoded _ae32, the
+             * ESP32 variant, which compiles on S3 (its guard is generic Xtensa
+             * capability flags, not a chip check) but leaves the S3-optimized
+             * path unused. */
+            dsps_dotprod_f32(M + i * cols, v, &dot, cols);
+        } else {
+            dsps_dotprod_f32_ansi(M + i * cols, v, &dot, cols);
+        }
         out[i] += dot;
     }
 }

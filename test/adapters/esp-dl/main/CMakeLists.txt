@@ -12,4 +12,5 @@ idf_component_register(
         "/workspace/test"
     REQUIRES
         esp-dl
+        esp-dsp
 )

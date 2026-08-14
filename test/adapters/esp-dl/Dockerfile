@@ -13,6 +13,12 @@ FROM espressif/idf:v5.3
 # Clone ESP-DL v3.0.0 (compatible with IDF v5.3)
 RUN git clone --depth 1 --branch v3.0.0 https://github.com/espressif/esp-dl.git /opt/esp-dl
 
+# Clone ESP-DSP v1.5.2 (released Aug 2024, contemporaneous with IDF v5.3;
+# provides dsps_dotprod_* used by the esp SIMD backend in
+# src/xlstm_simd_esp.c). ESP-DL does not pull this in itself - it is a
+# separate component our own adapter code depends on directly.
+RUN git clone --depth 1 --branch v1.5.2 https://github.com/espressif/esp-dsp.git /opt/esp-dsp
+
 WORKDIR /workspace
 
 # Copy source tree

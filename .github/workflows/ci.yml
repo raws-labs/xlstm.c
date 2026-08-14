@@ -7,6 +7,10 @@ on:
     branches: [main]
 
 jobs:
+  # Host backends. `make test` auto-detects, which resolves to sse2 on the x86
+  # runners; `make test-ref` forces the scalar backend. ref is gated explicitly
+  # because it is the baseline every other backend is defined against - if it
+  # regresses, the reference vectors themselves are suspect, not the backend.
   build-and-test:
     runs-on: ubuntu-latest
     strategy:
@@ -18,8 +22,29 @@ jobs:
             cxx: clang++
     steps:
       - uses: actions/checkout@v4
-      - name: Build and test
+      - name: Build and test (auto-detected backend)
         run: make test
         env:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cxx }}
+      - name: Test scalar reference backend
+        run: make test-ref
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+
+  # ARM NEON, cross-compiled and executed under emulation. This is the only
+  # non-x86 backend the suite can execute, so it is the one gate that catches
+  # ISA-specific defects (loop tails, alignment, accumulator width) before they
+  # reach a real target.
+  cross-neon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install aarch64 cross toolchain and emulator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu qemu-user
+      - name: Cross-compile and run under qemu-aarch64
+        run: make test-neon

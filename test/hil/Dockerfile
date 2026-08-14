@@ -7,9 +7,14 @@
 #
 # v5.4, not the v5.3 test/adapters/esp-dl/Dockerfile uses: v5.3's bundled
 # QEMU has no esp32s3 machine, and this image's QEMU (esp_develop_9.0.0)
-# does - `idf.py qemu` runs this firmware and all four suites pass under
-# it, which is how this Dockerfile was validated before any real hardware
-# was involved.
+# does.
+#
+# This is a REAL gate, not a build-only smoke test: CMD (see the bottom of
+# this file and test/hil/qemu_gate.sh) boots the firmware headless under
+# QEMU, reads its serial output, and exits with the firmware's own
+# "##srig-exit:N##" verdict. `docker run` on this image only exits 0 if
+# all four suites actually ran and passed - a hang, crash, or missing
+# sentinel is a non-zero exit, never a silent pass.
 #
 # Usage:
 #   docker build -f test/hil/Dockerfile -t xlstm-hil .
@@ -62,4 +67,31 @@ RUN bash -c "source \$IDF_PATH/export.sh && \
       0x8000  build/partition_table/partition-table.bin \
       0x10000 build/xlstm_hil.bin"
 
-CMD ["bash", "-c", "source $IDF_PATH/export.sh && idf.py size && ls -la build/xlstm_hil_merged.bin"]
+# Generate the two artifacts qemu_gate.sh's CMD needs to boot this
+# firmware under QEMU directly: qemu_flash.bin (a 4 MB flash image, padded
+# to the full flash size unlike xlstm_hil_merged.bin above, which real
+# hardware does not need) and qemu_efuse.bin (1024 bytes of efuse state).
+#
+# `idf.py qemu` is the only thing that knows how to produce these two
+# files - but it BLOCKS forever once QEMU actually launches, since its
+# job is to run a live emulator, not just generate its input files, and
+# it has no flag to stop short of that. Both files are written to disk
+# (confirmed by their timestamps) within a couple of seconds of startup,
+# well before QEMU itself finishes booting the guest - so this runs it
+# under `timeout` and discards whatever exit status that produces (124
+# from the timeout firing is the EXPECTED outcome here, not a failure);
+# a `&`-backgrounded alternative was tried first and does not survive
+# here - see the "on backgrounding idf.py qemu" note in
+# test/hil/README.md for why. What actually gates this step is the
+# explicit file-existence check below, not idf.py's own exit code.
+RUN bash -c "source \$IDF_PATH/export.sh && \
+    rm -f build/qemu_flash.bin build/qemu_efuse.bin && \
+    (timeout -k 5 20 idf.py qemu > /tmp/qemu_gen.log 2>&1 || true) && \
+    if [ ! -f build/qemu_flash.bin ] || [ ! -f build/qemu_efuse.bin ]; then \
+      echo 'FATAL: idf.py qemu did not produce qemu_flash.bin/qemu_efuse.bin' >&2; \
+      cat /tmp/qemu_gen.log >&2; \
+      exit 1; \
+    fi; \
+    ls -la build/qemu_flash.bin build/qemu_efuse.bin"
+
+CMD ["bash", "/workspace/test/hil/qemu_gate.sh"]

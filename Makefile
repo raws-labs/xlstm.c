@@ -34,7 +34,8 @@ endif
 .PHONY: all test simd-info test-ref test-sse2 test-neon reference clean \
         test-docker-ort test-docker-tvm test-docker-tflm test-docker-espdl \
         bench bench-ref bench-sse2 \
-        hil-esp32s3-build hil-esp32s3-qemu hil-esp32s3 hil-preflight
+        hil-esp32s3-build hil-esp32s3-qemu hil-esp32s3 hil-preflight \
+        hil-cortexm-build hil-cortexm-qemu hil-cortexm-m4 hil-cortexm-m7 hil-cortexm-m33
 
 all: $(BUILD)/slstm.o $(BUILD)/mlstm.o \
      $(BUILD)/xlstm_quant.o $(BUILD)/slstm_s8.o $(BUILD)/mlstm_s8.o \
@@ -198,6 +199,42 @@ hil-preflight:
 		exit 1; \
 	fi
 	@echo "hil-preflight: OK (SRIG_API_KEY set, srig on PATH, 'run' subcommand present)"
+
+# --- Cortex-M hardware-in-the-loop (HIL), QEMU only ---
+# See test/hil/cortexm/README.md. Same shape as the ESP32-S3 section
+# above, but there is no hardware target here: qemu-system-arm is this
+# repository's chosen way to prove the Cortex-M harness (see
+# .docs/plans/2026-08-14-cortexm-backend.md decision 4), and a real board
+# target (NUCLEO-F446RE/H753ZI, RP2350) is a later work item that, per the
+# same manual-only policy as hil-esp32s3, will never be wired into CI.
+#
+# Scope: harness only, no SIMD backend. All three images link
+# src/xlstm_simd_ref.c (-DXLSTM_HIL_EXPECT_BACKEND=ref) - there is no
+# src/xlstm_simd_cortexm.c yet. hil-cortexm-qemu's own exit code IS the
+# combined verdict across all three emulated cores (M4/an386, M7/an500,
+# M33/an505): test/hil/cortexm/qemu_gate.sh (this image's CMD) boots each
+# one headless under QEMU and exits non-zero if any core hangs, crashes,
+# or fails - never a silent pass.
+
+HIL_CORTEXM_IMAGE := xlstm-hil-cortexm
+
+hil-cortexm-build:
+	docker build -f test/hil/cortexm/Dockerfile -t $(HIL_CORTEXM_IMAGE) .
+
+hil-cortexm-qemu:
+	docker build -f test/hil/cortexm/Dockerfile -t $(HIL_CORTEXM_IMAGE) .
+	docker run --rm $(HIL_CORTEXM_IMAGE)
+
+# Per-core convenience targets - same image, same gate script, just
+# restricted (via HIL_CORTEXM_CORES) to one core's ELF/QEMU machine.
+hil-cortexm-m4: hil-cortexm-build
+	docker run --rm -e HIL_CORTEXM_CORES=m4 $(HIL_CORTEXM_IMAGE)
+
+hil-cortexm-m7: hil-cortexm-build
+	docker run --rm -e HIL_CORTEXM_CORES=m7 $(HIL_CORTEXM_IMAGE)
+
+hil-cortexm-m33: hil-cortexm-build
+	docker run --rm -e HIL_CORTEXM_CORES=m33 $(HIL_CORTEXM_IMAGE)
 
 # --- Benchmark ---
 

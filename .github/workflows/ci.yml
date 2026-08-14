@@ -48,3 +48,22 @@ jobs:
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu qemu-user
       - name: Cross-compile and run under qemu-aarch64
         run: make test-neon
+
+  # Cortex-M HIL harness, EMULATED ONLY (qemu-system-arm inside Docker, via
+  # test/hil/cortexm/Dockerfile). Runs the four golden-data suites, fused
+  # via test/hil_runner.cc, on three emulated cores: M4 (mps2-an386), M7
+  # (mps2-an500), M33 (mps2-an505). All three link src/xlstm_simd_ref.c -
+  # there is no src/xlstm_simd_cortexm.c yet (see CLAUDE.md work items
+  # 1-2). `docker run`'s own exit code is the combined verdict across all
+  # three cores (test/hil/cortexm/qemu_gate.sh), so this job fails on a
+  # hang, crash, or missing sentinel from any one of them, never a silent
+  # pass. This does NOT run on real hardware - that is a separate,
+  # deliberately manual-only path (see hil-esp32s3 in the root Makefile
+  # for the same policy applied to the existing ESP32-S3 target) and is
+  # never wired into CI.
+  cortexm-hil-emulated:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run the Cortex-M QEMU HIL gate (M4 + M7 + M33, emulated)
+        run: make hil-cortexm-qemu

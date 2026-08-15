@@ -102,7 +102,8 @@ void mlstm_step_s8(
              * INT16 round, i.e. a one-LSB state error. The gate happens not
              * to contain such a pair (0 of its 15,154 state requantizations
              * move), which is exactly why it is not evidence of equivalence.
-             * See .superpowers/sdd/2026-08-14-cortexm/item-3-report.md. */
+             * Measured and rejected - do not "optimize" this without redoing
+             * that measurement. */
             float C_q = C_new / params->C_quant.scale;
             C[r * H + c] = (int16_t)xlstm_round_clamp_i32(C_q, -32768.0f, 32767.0f);
         }

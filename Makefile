@@ -85,7 +85,10 @@ $(BUILD)/slstm_s8_test: test/slstm_s8_test.cc $(BUILD)/slstm_s8.o $(BUILD)/xlstm
 $(BUILD)/mlstm_s8_test: test/mlstm_s8_test.cc $(BUILD)/mlstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o include/mlstm_s8.h test/reference_data.h | $(BUILD)
 	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/mlstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o -lm
 
-test: $(BUILD)/slstm_test $(BUILD)/mlstm_test $(BUILD)/slstm_s8_test $(BUILD)/mlstm_s8_test
+TEST_BINS := $(BUILD)/slstm_test $(BUILD)/mlstm_test \
+             $(BUILD)/slstm_s8_test $(BUILD)/mlstm_s8_test
+
+test: $(TEST_BINS)
 	@$(BUILD)/slstm_test
 	@$(BUILD)/mlstm_test
 	@$(BUILD)/slstm_s8_test
@@ -104,9 +107,13 @@ test-sse2:
 	@$(MAKE) clean
 	@$(MAKE) test XLSTM_SIMD=sse2
 
+
+# Build only, then run under the emulator explicitly. Invoking the `test`
+# target here would execute aarch64 binaries on the build host, which appears
+# to work wherever binfmt_misc is registered and fails everywhere else.
 test-neon:
 	@$(MAKE) clean
-	@$(MAKE) test XLSTM_SIMD=neon \
+	@$(MAKE) $(TEST_BINS) XLSTM_SIMD=neon \
 		CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
 		CFLAGS="-std=c99 -O2 -Wall -Wextra -static" \
 		CXXFLAGS="-std=c++17 -O2 -Wall -Wextra -static"

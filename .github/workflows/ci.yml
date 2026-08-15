@@ -57,15 +57,3 @@ jobs:
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu qemu-user
       - name: Cross-compile and run under qemu-aarch64
         run: make test-neon
-
-  # Cortex-M HIL harness, EMULATED ONLY (qemu-system-arm inside Docker via
-  # test/hil/cortexm/Dockerfile). Runs the four golden-data suites on
-  # three emulated cores (M4/an386, M7/an500, M33/an505), all linking the
-  # scalar src/xlstm_simd_ref.c backend. Just invokes the same target a
-  # human would; the gate logic lives in the Dockerfile, not here.
-  cortexm-hil-emulated:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build and run the Cortex-M QEMU HIL gate (M4 + M7 + M33, emulated)
-        run: make hil-cortexm-qemu

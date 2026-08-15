@@ -89,7 +89,8 @@ static inline float log_sigmoid_f32(float x) {
  * precision test is wrong for M33. ACLE's __ARM_FEATURE_NUMERIC_MAXMIN and
  * __ARM_FEATURE_DIRECTED_ROUNDING would say exactly the right thing, but gcc
  * does not define either for M-profile at all. So the build declares it,
- * alongside the -mfpu that decides it (see test/hil/cortexm/Makefile).
+ * alongside the -mfpu that decides it (set by whatever Cortex-M build links
+ * this header - out of this repository's scope; see the xlstm.c-hil harness).
  *
  * The auto-detect below is a genuine capability test where one exists:
  * __ARM_FEATURE_NUMERIC_MAXMIN is ACLE's macro for exactly these numeric

@@ -29,8 +29,11 @@ Compute-intensive primitives (matvec, rank-1 update) dispatch to a SIMD backend 
 | `sse2` | x86/x86-64 with SSE2 |
 | `neon` | ARM with NEON |
 | `esp` | ESP32-S3 (Xtensa) |
+| `cortexm` | Cortex-M4/M7/M33 (ARMv7E-M / ARMv8-M DSP extension) |
 
-Auto-detection probes the compiler's predefined macros. Override with `XLSTM_SIMD=ref|sse2|neon|esp`.
+Auto-detection probes the compiler's predefined macros. Override with `XLSTM_SIMD=ref|sse2|neon|esp|cortexm`.
+
+A backend need not accelerate everything. `cortexm` implements the two matrix-vector kernels (`SXTAB16` + `SMLAD` for INT8; fused `VFMA` for f32) and defers the other two to the scalar bodies in `src/xlstm_simd_scalar.inc`, which is the same text `ref` compiles rather than a copy of it. `cortexm` is cross-compiled and gated only from the hardware-in-the-loop harness, which is a separate repository.
 
 ### Naming convention
 

@@ -7,7 +7,11 @@ BUILD   := build
 VENV    := .venv/bin/python3
 
 # --- SIMD backend selection ---
-# XLSTM_SIMD: auto (default), ref, sse2, neon, esp
+# XLSTM_SIMD: auto (default), ref, sse2, neon, esp, cortexm
+#
+# auto never picks esp or cortexm: both need a cross toolchain and neither
+# can run on the build host, so they are opt-in and are gated from their
+# cross-compiled harnesses rather than from `make test` here.
 XLSTM_SIMD ?= auto
 
 ifeq ($(XLSTM_SIMD),auto)
@@ -45,7 +49,8 @@ $(BUILD):
 
 # --- SIMD kernel object ---
 
-$(BUILD)/xlstm_simd.o: src/xlstm_simd_$(XLSTM_SIMD_IMPL).c include/xlstm_simd.h | $(BUILD)
+$(BUILD)/xlstm_simd.o: src/xlstm_simd_$(XLSTM_SIMD_IMPL).c include/xlstm_simd.h \
+    src/xlstm_simd_scalar.inc | $(BUILD)
 	@$(CC) $(CFLAGS) $(SIMD_CFLAGS) -Iinclude -c $< -o $@
 
 # --- Core objects ---

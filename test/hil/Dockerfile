@@ -30,8 +30,8 @@ WORKDIR /workspace
 # Selective COPY, matching test/adapters/esp-dl/Dockerfile's pattern: only
 # what main/CMakeLists.txt's SRCS/INCLUDE_DIRS reference by absolute
 # /workspace/... path, plus what those sources themselves #include.
-# Deliberately excludes test/adapters/ (a separate, unrelated build; see
-# CLAUDE.md) and the other test/*.cc integration harnesses.
+# Deliberately excludes test/adapters/ (a separate, unrelated build) and
+# the other test/*.cc integration harnesses.
 COPY include/ include/
 COPY src/ src/
 COPY test/test_config.h test/test_config.h

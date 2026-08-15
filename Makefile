@@ -35,7 +35,8 @@ endif
         test-docker-ort test-docker-tvm test-docker-tflm test-docker-espdl \
         bench bench-ref bench-sse2 \
         hil-esp32s3-build hil-esp32s3-qemu hil-esp32s3 hil-preflight \
-        hil-cortexm-build hil-cortexm-qemu hil-cortexm-m4 hil-cortexm-m7 hil-cortexm-m33
+        hil-cortexm-build hil-cortexm-qemu hil-cortexm-m4 hil-cortexm-m7 hil-cortexm-m33 \
+        check-internal-refs
 
 all: $(BUILD)/slstm.o $(BUILD)/mlstm.o \
      $(BUILD)/xlstm_quant.o $(BUILD)/slstm_s8.o $(BUILD)/mlstm_s8.o \
@@ -250,6 +251,40 @@ test/reference_data.h: test/generate_reference.py
 
 reference: test/generate_reference.py
 	@$(VENV) $<
+
+# --- Public-repo hygiene ---
+#
+# This repository is public. Tracked files must not reference paths that only
+# exist on a maintainer's machine: they leak internal structure and are broken
+# references for anyone who clones. Write the fact, not a pointer.
+
+# Two rules, both stated generically so this file names nothing it is looking
+# for. A checker that must spell out the paths it forbids defeats its purpose.
+#
+#   1. No absolute paths into a user's home directory.
+#   2. Every .md a tracked file cites must itself be tracked. Citing a document
+#      that is not in the repository is either a broken reference for whoever
+#      clones it, or a pointer to something that was never meant to ship.
+
+check-internal-refs:
+	@fail=0; \
+	abs=$$(git ls-files -z | xargs -0 grep -nE '/(home|Users)/[A-Za-z0-9_.-]+/' 2>/dev/null \
+	       | grep -v '^Makefile:.*home|Users'); \
+	if [ -n "$$abs" ]; then \
+		echo "check-internal-refs: absolute path into a home directory:"; \
+		echo "$$abs"; fail=1; \
+	fi; \
+	for ref in $$(git ls-files -z | xargs -0 grep -hoE '[A-Za-z0-9_][A-Za-z0-9_./-]*\.md' 2>/dev/null | sort -u); do \
+		git ls-files --error-unmatch "$$ref" >/dev/null 2>&1 || { \
+			echo "check-internal-refs: cites an untracked document: $$ref"; \
+			git ls-files -z | xargs -0 grep -n "$$ref" 2>/dev/null | head -3; \
+			fail=1; }; \
+	done; \
+	if [ $$fail -ne 0 ]; then \
+		echo "Write the fact inline instead of citing a document that is not in the repo."; \
+		exit 1; \
+	fi; \
+	echo "check-internal-refs: OK"
 
 # --- Cleanup ---
 

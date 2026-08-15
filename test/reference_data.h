@@ -292,7 +292,7 @@ static const int kSlstmCasesCount = (int)(sizeof(kSlstmCases) / sizeof(kSlstmCas
 // Head composition: one NH=2 cell of head width DH=4
 //
 // hidden_size in this library is the PER-HEAD width; multi-head is the
-// caller's outer loop over head-sliced weights (.docs/SCOPE.md section 6).
+// caller's outer loop over head-sliced weights.
 // The reference's fused weight rows are GATE-major, so head h's four gate
 // blocks are NOT contiguous:
 //

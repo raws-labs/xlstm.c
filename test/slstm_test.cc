@@ -63,7 +63,7 @@ static bool RunSlstmCase(const XlstmRefCase* tc) {
 }
 
 /* Multi-head contract: hidden_size is the PER-HEAD width, and multi-head is
- * the caller's outer loop over head-sliced weights (.docs/SCOPE.md section 6).
+ * the caller's outer loop over head-sliced weights.
  *
  * This is the only test that is not vacuous on that point - every other case
  * is num_heads=1, where per-head width and model width coincide.

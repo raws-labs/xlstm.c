@@ -7,6 +7,15 @@ on:
     branches: [main]
 
 jobs:
+  # This repository is public. Tracked files must not cite paths that exist only
+  # on a maintainer's machine - they leak internal structure and are broken
+  # references in a clone.
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make check-internal-refs
+
   # Host backends. `make test` auto-detects, which resolves to sse2 on the x86
   # runners; `make test-ref` forces the scalar backend. ref is gated explicitly
   # because it is the baseline every other backend is defined against - if it

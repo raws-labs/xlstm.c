@@ -65,7 +65,7 @@ static void DeriveScales(const float* W, int w_len,
  * headroom exists because calibrating from a single final-state snapshot
  * (all reference_data.h stores) can badly undershoot the true mid-
  * sequence trajectory peak: measured up to 6.2x for mLSTM SweepM1's n and
- * 3.4x for SweepM8's C (see kStateHeadroom below and task-4-report.md for
+ * 3.4x for SweepM8's C (see kStateHeadroom below
  * the full per-case ratio table). Pass 1.0f for no headroom (weights/
  * inputs use plain xlstm_quant_symmetric/asymmetric instead and never
  * call this with headroom != kStateHeadroom). */
@@ -90,7 +90,7 @@ static void QuantSymmetricS16(const float* data, int len, float headroom,
  * arbitrarily large. sLSTM is completely insensitive to this value (its
  * dominant error source is INT8 W/x matmul noise, not state clipping),
  * so headroom only matters for mLSTM here, but is applied uniformly to
- * keep one number to justify rather than two. See task-4-report.md for
+ * keep one number to justify rather than two.
  * the sweep data. */
 static constexpr float kStateHeadroom = 4.0f;
 
@@ -112,7 +112,7 @@ static_assert(kStateHeadroom == XLSTM_GENERATOR_HEADROOM,
  *
  * y/c/n scales are calibrated from the case's own golden f32 values
  * (expected_output/expected_y, expected_state, expected_n) rather than a
- * fixed literal - see task-4-report.md's "on calibration" note for what
+ * fixed literal - see the calibration note below for what
  * this oracle-calibrated setup does and does not demonstrate. A fixed
  * 0.01 scale independent of H saturates the INT8 y range once H grows
  * past a couple dozen. y is INT8 (asymmetric, 255 levels); c and n are
@@ -220,7 +220,7 @@ static float EvalSlstmS8Case(const XlstmRefCase* tc, float* y_out,
      * have its worst error at an intermediate timestep rather than the
      * final one that y alone captures (measured for SweepM8: final-y-only
      * showed 0.124726, but an intermediate timestep reaches 1.127354 -
-     * see task-4-report.md). Reporting only the final-y number would
+     *). Reporting only the final-y number would
      * understate what tolerance the case actually needs. */
     static float output_local[3 * XLSTM_TEST_MAX_H];
     xlstm_dequantize_s8_to_f32(output, output_local, T * H, &s.params.y_quant);
@@ -246,7 +246,7 @@ static float EvalSlstmS8Case(const XlstmRefCase* tc, float* y_out,
  * that channel is held to has to come from tc->tol_s8_per_channel[j] -
  * computed at generation time in generate_reference.py
  * (compute_tol_s8_per_channel; see that function's module docstring for
- * the full derivation and task-4-report.md for the measured data) from
+ * the full derivation) from
  * that channel's own error and its own dynamic range, not from
  * tc->tol_s8 (the case-wide max, kept only for coarse reporting) or from
  * any other channel's value. A case-wide denominator or a borrowed bound
@@ -383,7 +383,7 @@ static bool RunSlstmS8Case(const XlstmRefCase* tc) {
      * instead of failing loudly - this assertion is what makes that
      * failure loud. 1.5x margin: the worst observed replica-vs-real-
      * kernel discrepancy across every channel in this table is ~1.9%
-     * (see task-4-report.md), so 1.5x never false-fires today but still
+     * (measured), so 1.5x never false-fires today but still
      * catches a real divergence. Guarded the same way as
      * tol_s8_per_channel above; skipped (not defaulted) when absent,
      * since there is nothing meaningful to check consistency against.
@@ -422,7 +422,7 @@ static bool RunSlstmS8Case(const XlstmRefCase* tc) {
 
 /* Runs the s8 kernel on every case in kSlstmCases and reports, per case,
  * the max absolute error vs the f32 golden y. This is the size-vs-error
- * measurement: how INT8 error grows with H (.docs/SCOPE.md section 8). */
+ * measurement: how INT8 error grows with H. */
 static bool TestS8QuantizationBound() {
     static float y_f[XLSTM_TEST_MAX_H];
     float max_err = 0.0f;
@@ -445,12 +445,12 @@ static bool TestS8QuantizationBound() {
     }
     std::printf("  max absolute error vs f32 across all cases: %.6f\n", max_err);
     std::printf("  (oracle-calibrated: scales are derived from this case's own golden\n"
-                 "   output, not an independent calibration set - see task-4-report.md's\n"
-                 "   'on calibration' note. These are a best case, not a deployment figure.)\n");
+                 "   output, not an independent calibration set. These are a\n"
+                 "   best case, not a deployment figure.)\n");
 
     /* Bound set to ~1.5x the measured maximum (0.231354), which is
      * SweepS17's channel 16 at an intermediate timestep - see
-     * task-4-report.md for the per-case measurements and why H=17 is an
+     * the per-case measurements show why H=17 is an
      * outlier rather than a trend. This aggregate bound covers the whole
      * table with one number, purely for a quick human-readable summary;
      * it is not what keeps this test suite sensitive to a real regression

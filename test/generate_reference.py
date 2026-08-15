@@ -220,7 +220,7 @@ def fmt(tensor):
 
 # Hidden sizes for the correctness sweep. 17 is deliberately not a multiple
 # of 4: it exercises SIMD loop-tail handling, which is where vectorised
-# backends realistically break. See .docs/SCOPE.md section 7.
+# backends realistically break.
 SWEEP_SIZES = [1, 8, 16, 17, 64]
 
 
@@ -237,7 +237,7 @@ SWEEP_SIZES = [1, 8, 16, 17, 64]
 # that channel ever takes (across y and every stored output timestep).
 # A single case-wide bound cannot generally satisfy this for every channel
 # at once - real cases have channels spanning multiple orders of magnitude
-# (see task-4-report.md) - so every channel gets its own bound, computed
+# - so every channel gets its own bound, computed
 # here at generation time from a from-scratch numpy simulation of the
 # exact INT8 kernel math (slstm_s8.c / mlstm_s8.c) and calibration
 # (PrepareS8 / PrepareMlstmS8 in the two test/*_s8_test.cc files,
@@ -460,7 +460,7 @@ def _derive_bound(floor, rng):
     worse than one blind to a corruption of a single already-near-zero
     channel) and returns a bound with headroom above floor, accepting
     that this specific channel is not usefully guarded. See
-    task-4-report.md for the exact list and the reasoning above stated
+    The exact list and the full reasoning are recorded with the measurements
     in full. """
     if floor >= rng:
         return _round_sig(floor * 1.2, 2, up=True)
@@ -510,7 +510,7 @@ def compute_tol_s8_per_channel(tc, cell):
     blind to a final-state-only corruption if it happens to every
     channel. Measured concretely for SweepM8: with the trajectory-wide
     rng, none of its 8 channels had bound < |y_final| - a real,
-    demonstrated gap, not a theoretical one - see task-4-report.md.
+    demonstrated gap, not a theoretical one.
     Guaranteed here: if no channel's bound already comes in under its own
     |y_final|, the channel with the largest |y_final| (most room to work
     with) gets a second pass, deriving its bound from |y_final| alone
@@ -674,8 +674,8 @@ def slstm_sized_case(H, seed):
     tol_s8 is not set here: build_cases() computes a per-channel tol_s8
     array for every case (see compute_tol_s8_per_channel above) after all
     cases are built, because a single case-wide constant cannot safely
-    guard every channel - see that function's module docstring and
-    task-4-report.md for the full derivation and per-case data.
+    guard every channel - see that function's module docstring for the
+    full derivation.
 
     H=17's INT8 error is elevated (~0.23 at its worst element) on a few
     channels: with this random weight draw, those channels' pre-activation
@@ -690,7 +690,7 @@ def slstm_sized_case(H, seed):
     also the only sweep size with cols % 8 != 0 and cols > 8, i.e. the
     only one that exercises xlstm_matvec_s8's scalar SIMD tail, so a
     blanket loosening here would double as cover for an unrelated tail
-    defect. See task-4-report.md.
+    defect.
     """
     torch.manual_seed(seed)
     I = H
@@ -717,9 +717,8 @@ def mlstm_sized_case(H, seed):
     empirically-tuned multiple of n's scale instead - a code review showed
     that guess was not actually the binding constraint on H=64's INT8
     error (scaling it across a 128x range left the error unchanged), so
-    storing C directly removes a guess without evidence behind it. See
-    task-4-report.md for the root-cause analysis on what H=64's residual
-    error actually is.
+    storing C directly removes a guess without evidence behind it. What
+    H=64's residual error actually is remains undiagnosed.
 
     tol_s8 is not set here, for the same reason as slstm_sized_case: see
     compute_tol_s8_per_channel above.
@@ -731,8 +730,7 @@ def mlstm_sized_case(H, seed):
     quantization noise in q, C and n compounds through that dot product
     and division. Verified against a from-scratch numpy replica (matches
     the f32 golden values when run unquantized) and reproduces identically
-    under sse2 and ref, so this is quantization noise, not a kernel bug -
-    see task-4-report.md.
+    under sse2 and ref, so this is quantization noise, not a kernel bug.
     """
     torch.manual_seed(seed)
     I = H
@@ -751,7 +749,7 @@ def mlstm_sized_case(H, seed):
 # ============================================================================
 # Head composition
 #
-# .docs/SCOPE.md section 6: hidden_size is the PER-HEAD width (DH in the
+# hidden_size is the PER-HEAD width (DH in the
 # NX-AI reference) and multi-head is the caller's outer loop over head-sliced
 # weights. Everything else in this file is num_heads=1, where that contract is
 # vacuous. This is the only case that is not.
@@ -1004,7 +1002,7 @@ def build_cases():
     # scheme kept missing channels (a case with 64 widely-spread channel
     # magnitudes needs closer to 64 individually-derived bounds, not 2 or
     # 3). See compute_tol_s8_per_channel's module docstring above for the
-    # derivation and task-4-report.md for the measured data.
+    # derivation.
     #
     # Three individual channels (sLSTM Test1 channel 0; sLSTM SweepS64
     # channel 15; mLSTM SweepM64 channel 63) have a true value close
@@ -1016,8 +1014,8 @@ def build_cases():
     # ch15 and SweepM64 ch63, dequantize to exactly the y_quant
     # zero-point, so correct and all-zero-corrupted output are
     # bit-identical for that channel - undecidable by any tolerance, not
-    # merely a hard-to-choose one). Documented, not hidden - see
-    # task-4-report.md. sLSTM SweepS17 channel 5 looked like a fourth
+    # merely a hard-to-choose one). Documented, not hidden.
+    # sLSTM SweepS17 channel 5 looked like a fourth
     # case in an earlier round but is not one: its window is narrow
     # (ratio 0.931) but real, and it has a normal, valid bound (0.055) -
     # do not re-add it here.
@@ -1211,7 +1209,7 @@ def _emit_head2_fused(f, fused):
     f.write(f"// Head composition: one NH={NH} cell of head width DH={DH}\n")
     f.write("//\n")
     f.write("// hidden_size in this library is the PER-HEAD width; multi-head is the\n")
-    f.write("// caller's outer loop over head-sliced weights (.docs/SCOPE.md section 6).\n")
+    f.write("// caller's outer loop over head-sliced weights.\n")
     f.write("// The reference's fused weight rows are GATE-major, so head h's four gate\n")
     f.write("// blocks are NOT contiguous:\n")
     f.write("//\n")

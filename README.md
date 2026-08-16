@@ -19,6 +19,34 @@ Tested against the NX-AI/xlstm PyTorch reference implementation.
 
 The INT8 kernels use INT8 x INT8 -> INT32 matmul, dequantize to float for gating, and requantize states/output back to integer. The `m` stabilizer stays float32: it prevents exponential overflow via log-space arithmetic and doesn't benefit from quantization.
 
+### State memory, per head
+
+sLSTM state is linear in `hidden_size`; mLSTM state is **quadratic**, because its cell state
+is a `hidden_size x hidden_size` matrix per head. That difference, not the weights, is what
+decides whether a given width fits an MCU.
+
+Per head, with `H` = `hidden_size`:
+
+| | sLSTM | mLSTM |
+|---|---|---|
+| f32 | `16H` bytes (`y`,`c`,`n`,`m`) | `4H^2 + 4H + 4` bytes (`C`,`n`,`m`) |
+| INT8 | `9H` bytes (`y` int8, `c`/`n` int16, `m` float32) | `2H^2 + 2H + 4` bytes (`C`/`n` int16, `m` float32) |
+
+Which works out, for mLSTM, as:
+
+| H | f32 | INT8 |
+|---|---|---|
+| 16 | 1.1 KB | 0.6 KB |
+| 32 | 4.1 KB | 2.1 KB |
+| 64 | 16.3 KB | 8.1 KB |
+| 128 | 64.5 KB | 32.3 KB |
+| 256 | 257 KB | 128.5 KB |
+
+Multiply by the number of heads: heads are the caller's outer loop, and each carries its own
+state. An mLSTM layer with 8 heads at `H` = 64 needs 130 KB of f32 state before any weights,
+which does not fit a 128 KB part. INT8 halves it, since `C` and `n` narrow to int16 while `m`
+stays float32.
+
 ### SIMD backends
 
 Compute-intensive primitives (matvec, rank-1 update) dispatch to a SIMD backend selected at compile time:

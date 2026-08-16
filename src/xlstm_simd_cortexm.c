@@ -17,7 +17,8 @@
  * Two of the four kernels are accelerated:
  *
  *   xlstm_matvec_s8   SXTAB16 + SMLAD, two rows at a time. 16 instructions
- *                     per 8 MACs against the scalar body's 6 per MAC.
+ *                     per 8 MACs against the scalar body's 6 per MAC, at any
+ *                     buffer alignment and any column count.
  *   xlstm_matvec_f32  two rows at a time with fmaf, which these FPUs issue
  *                     as a single VFMA.F32.
  *
@@ -39,6 +40,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #ifndef __ARM_FEATURE_SIMD32
 #error "XLSTM_SIMD=cortexm needs the DSP extension: build with -mcpu=cortex-m4," \
@@ -69,9 +71,41 @@ static inline int16x2_t xlstm_cm_sxtab16_ror8(int16x2_t a, int8x4_t x)
 
 /* A 4-byte group read as one word. may_alias because the caller's buffers
  * are int8_t; the alignment of the type is what makes this a plain LDR
- * rather than a byte assembly, so it may only be used once the guard in
- * xlstm_matvec_s8 has established that the pointer really is word-aligned. */
+ * rather than a byte assembly, so it may only be used once the caller has
+ * established that the pointer really is word-aligned. */
 typedef uint32_t xlstm_cm_word __attribute__((__may_alias__));
+
+/* One 4-byte group of a caller buffer. ALIGNED and the #if are both decided
+ * at compile time, so neither instance of the loop below carries a branch.
+ *
+ * Aligned is a plain LDR. Unaligned is spelled two ways for one reason: where
+ * unaligned access is permitted memcpy is a single LDR, but under
+ * -mno-unaligned-access it becomes a call to memcpy, and the byte assembly
+ * that avoids the call is folded straight back into an unaligned LDR unless
+ * that same flag forbids it. Each spelling is used exactly where it is the
+ * good one. Firmware that sets CCR.UNALIGN_TRP (the recommended debug
+ * setting, and a UsageFault on any unaligned LDR) builds with the flag - as
+ * it must for any C in the image - and gets a kernel that issues no unaligned
+ * access at all, at about 4.5 instructions per MAC against 2, still under the
+ * scalar body's 6.
+ *
+ * Byte order is not chosen here: all three groups of a pass are read the same
+ * way, so any permutation cancels between the lanes SMLAD pairs up. */
+static inline int8x4_t xlstm_cm_ld4(const int8_t* p, int aligned)
+{
+    uint32_t w;
+    if (aligned) {
+        w = *(const xlstm_cm_word*)(const void*)p;
+    } else {
+#ifdef __ARM_FEATURE_UNALIGNED
+        memcpy(&w, p, sizeof w);
+#else
+        w = (uint32_t)(uint8_t)p[0] | ((uint32_t)(uint8_t)p[1] << 8) |
+            ((uint32_t)(uint8_t)p[2] << 16) | ((uint32_t)(uint8_t)p[3] << 24);
+#endif
+    }
+    return (int8x4_t)w;
+}
 
 /* SXTAB16 folds -v_zp into the widening at no cost, which is why this
  * backend needs no row sums: it widens byte lanes to halfwords AND adds a
@@ -87,81 +121,117 @@ typedef uint32_t xlstm_cm_word __attribute__((__may_alias__));
  * overflow of ref's own int32 accumulator if it ever were reached. */
 #define XLSTM_CM_ZP_MAX 32640
 
+/* The DSP body. ALIGNED means both what its name says and that cols is a
+ * multiple of 4 - one flag because the dispatch below tests them together and
+ * a word-typed load needs both. It reaches xlstm_cm_ld4 as a constant from
+ * both call sites; always_inline so that stays true however the inliner's
+ * size heuristic feels about two loops, since a surviving runtime `aligned`
+ * would put a branch on every group load of the common case. */
+static inline __attribute__((always_inline)) void
+xlstm_cm_matvec_s8(const int8_t* M, const int8_t* v, int32_t* out,
+                   int rows, int cols, int32_t v_zp, int aligned)
+{
+    /* Past the last whole group; the 0 to 3 columns after it go scalar.
+     * Walking pointers to it rather than indexing off a group counter is
+     * what keeps the loop test folded into the address arithmetic, and
+     * deriving tail from ALIGNED rather than from cols is what deletes the
+     * scalar remainder outright from the aligned instance. */
+    const int8_t* const vend = v + ((size_t)cols & ~(size_t)3);
+    const int tail = aligned ? 0 : (cols & 3);
+    /* -v_zp in both halfword lanes, the addend SXTAB16 applies. */
+    const int16x2_t nzp = (int16x2_t)(((uint32_t)(-v_zp) & 0xFFFFu) |
+                                      ((uint32_t)(-v_zp) << 16));
+    /* Both row loops run to a pointer rather than counting i: that leaves one
+     * fewer value live across the inner loop, which is what keeps the row
+     * epilogue off the stack. nrows folds a non-positive rows into an empty
+     * range instead of a negative pointer offset. */
+    const size_t stride = (size_t)cols;
+    const size_t nrows = rows > 0 ? (size_t)rows : 0u;
+    const int8_t* const rowend2 = M + (nrows & ~(size_t)1) * stride;
+    const int8_t* const rowend = M + nrows * stride;
+    const int8_t* row = M;
+    int32_t* o = out;
+    int j;
+
+    /* Two rows per pass: the widened v lanes are computed once and
+     * consumed twice, and the two accumulator chains are independent,
+     * so neither stalls on the other's SMLAD result. */
+    for (; row != rowend2; row += 2 * stride, o += 2) {
+        const int8_t* p0 = row;
+        const int8_t* p1 = row + stride;
+        const int8_t* vp = v;
+        int32_t a0 = 0;
+        int32_t a1 = 0;
+
+        for (; vp != vend; vp += 4, p0 += 4, p1 += 4) {
+            int8x4_t w = xlstm_cm_ld4(vp, aligned);
+            int16x2_t ve = __sxtab16(nzp, w);          /* v[4g+0], v[4g+2] */
+            int16x2_t vo = xlstm_cm_sxtab16_ror8(nzp, w); /* v[4g+1], v[4g+3] */
+            int8x4_t m0 = xlstm_cm_ld4(p0, aligned);
+            int8x4_t m1 = xlstm_cm_ld4(p1, aligned);
+
+            a0 = __smlad(__sxtb16(m0), ve, a0);
+            a0 = __smlad(xlstm_cm_sxtb16_ror8(m0), vo, a0);
+            a1 = __smlad(__sxtb16(m1), ve, a1);
+            a1 = __smlad(xlstm_cm_sxtb16_ror8(m1), vo, a1);
+        }
+        /* All three pointers now sit on the first leftover column. */
+        for (j = 0; j < tail; ++j) {
+            a0 += (int32_t)p0[j] * ((int32_t)vp[j] - v_zp);
+            a1 += (int32_t)p1[j] * ((int32_t)vp[j] - v_zp);
+        }
+        o[0] = a0;
+        o[1] = a1;
+    }
+
+    for (; row != rowend; row += stride, ++o) {
+        const int8_t* p0 = row;
+        const int8_t* vp = v;
+        int32_t a0 = 0;
+
+        for (; vp != vend; vp += 4, p0 += 4) {
+            int8x4_t w = xlstm_cm_ld4(vp, aligned);
+            int8x4_t m0 = xlstm_cm_ld4(p0, aligned);
+
+            a0 = __smlad(__sxtb16(m0), __sxtab16(nzp, w), a0);
+            a0 = __smlad(xlstm_cm_sxtb16_ror8(m0),
+                         xlstm_cm_sxtab16_ror8(nzp, w), a0);
+        }
+        for (j = 0; j < tail; ++j) {
+            a0 += (int32_t)p0[j] * ((int32_t)vp[j] - v_zp);
+        }
+        *o = a0;
+    }
+}
+
 void xlstm_matvec_s8(const int8_t* M, const int8_t* v,
                      int32_t* out, int rows, int cols, int32_t v_zp)
 {
-    /* The DSP path never issues an unaligned access rather than relying on
-     * the core to forgive one: these cores do support unaligned LDR, but
-     * only while CCR.UNALIGN_TRP is clear, and firmware that sets it (the
-     * recommended debug setting) turns a group load into a UsageFault. The
-     * usual mitigation, assembling the word from bytes, holds only if the
-     * whole application is also built -mno-unaligned-access - otherwise
-     * GCC's load merging folds that assembly straight back into one
-     * unaligned LDR. A library cannot assert a flag on its caller's command
-     * line, so this checks the pointers instead.
-     *
-     * v word-aligned aligns every group of v; M word-aligned with cols a
-     * multiple of 4 makes every row start M + i*cols inherit that alignment
-     * and leaves no ragged tail group. Anything else - a misaligned buffer,
-     * or a cols that puts successive rows on different alignments - takes
-     * the scalar body, which is exact by construction. */
-    const size_t groups = (size_t)cols / 4u;
-    const int aligned = ((((uintptr_t)M | (uintptr_t)v) & 3u) == 0u) &&
-                        (cols % 4) == 0 && cols >= 0;
-
-    if (!aligned || v_zp > XLSTM_CM_ZP_MAX || v_zp < -XLSTM_CM_ZP_MAX) {
+    /* Two things still leave the DSP body: a zero point SXTAB16 cannot fold
+     * exactly, and a cols of 0 or less, for which a row is not a range of
+     * addresses at all and the loops below would step past out entirely.
+     * Neither is alignment. */
+    if (cols <= 0 || v_zp > XLSTM_CM_ZP_MAX || v_zp < -XLSTM_CM_ZP_MAX) {
         xlstm_scalar_matvec_s8(M, v, out, rows, cols, v_zp);
         return;
     }
 
-    {
-        const xlstm_cm_word* vw = (const xlstm_cm_word*)(const void*)v;
-        const xlstm_cm_word* mw = (const xlstm_cm_word*)(const void*)M;
-        /* -v_zp in both halfword lanes, the addend SXTAB16 applies. */
-        const int16x2_t nzp = (int16x2_t)(((uint32_t)(-v_zp) & 0xFFFFu) |
-                                          ((uint32_t)(-v_zp) << 16));
-        int i = 0;
-        size_t g;
-
-        /* Two rows per pass: the widened v lanes are computed once and
-         * consumed twice, and the two accumulator chains are independent,
-         * so neither stalls on the other's SMLAD result. */
-        for (; i + 1 < rows; i += 2) {
-            const xlstm_cm_word* r0 = mw + (size_t)i * groups;
-            const xlstm_cm_word* r1 = r0 + groups;
-            int32_t a0 = 0;
-            int32_t a1 = 0;
-
-            for (g = 0; g < groups; ++g) {
-                int8x4_t w = (int8x4_t)vw[g];
-                int16x2_t ve = __sxtab16(nzp, w);          /* v[4g+0], v[4g+2] */
-                int16x2_t vo = xlstm_cm_sxtab16_ror8(nzp, w); /* v[4g+1], v[4g+3] */
-                int8x4_t m0 = (int8x4_t)r0[g];
-                int8x4_t m1 = (int8x4_t)r1[g];
-
-                a0 = __smlad(__sxtb16(m0), ve, a0);
-                a0 = __smlad(xlstm_cm_sxtb16_ror8(m0), vo, a0);
-                a1 = __smlad(__sxtb16(m1), ve, a1);
-                a1 = __smlad(xlstm_cm_sxtb16_ror8(m1), vo, a1);
-            }
-            out[i] = a0;
-            out[i + 1] = a1;
-        }
-
-        for (; i < rows; ++i) {
-            const xlstm_cm_word* r0 = mw + (size_t)i * groups;
-            int32_t a0 = 0;
-
-            for (g = 0; g < groups; ++g) {
-                int8x4_t w = (int8x4_t)vw[g];
-                int8x4_t m0 = (int8x4_t)r0[g];
-
-                a0 = __smlad(__sxtb16(m0), __sxtab16(nzp, w), a0);
-                a0 = __smlad(xlstm_cm_sxtb16_ror8(m0),
-                             xlstm_cm_sxtab16_ror8(nzp, w), a0);
-            }
-            out[i] = a0;
-        }
+    /* v word-aligned aligns every group of v; M word-aligned with cols a
+     * multiple of 4 makes every row start M + i*cols inherit that alignment
+     * and leaves no ragged tail group. That case gets word-typed loads.
+     *
+     * Anything else runs the same body over unaligned group loads, which is a
+     * load form rather than a slower kernel. Co-alignment is not being worked
+     * around here, it is unobtainable: SMLAD needs 4 bytes of a row and 4 of v
+     * at one column index, cols % 4 != 0 shifts each row start against v by a
+     * further byte, and no per-row prefix can recover that for more than one
+     * row in four. A path that insisted on aligned words would therefore
+     * abandon the DSP body on most rows of every odd hidden size - H = 17
+     * among them - which is where the whole of the work is. */
+    if ((((uintptr_t)M | (uintptr_t)v) & 3u) == 0u && (cols & 3) == 0) {
+        xlstm_cm_matvec_s8(M, v, out, rows, cols, v_zp, 1);
+    } else {
+        xlstm_cm_matvec_s8(M, v, out, rows, cols, v_zp, 0);
     }
 }
 

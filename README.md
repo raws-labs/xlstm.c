@@ -61,7 +61,15 @@ Compute-intensive primitives (matvec, rank-1 update) dispatch to a SIMD backend 
 
 Auto-detection probes the compiler's predefined macros. Override with `XLSTM_SIMD=ref|sse2|neon|esp|cortexm`.
 
-A backend need not accelerate everything. `cortexm` implements the two matrix-vector kernels (`SXTAB16` + `SMLAD` for INT8; fused `VFMA` for f32) and defers the other two to the scalar bodies in `src/xlstm_simd_scalar.inc`, which is the same text `ref` compiles rather than a copy of it. `cortexm` is cross-compiled and gated only from the hardware-in-the-loop harness, which is a separate repository.
+A backend need not accelerate everything. `cortexm` implements the two matrix-vector kernels (`SXTAB16` + `SMLAD` for INT8; fused `VFMA` for f32) and defers the other two to the scalar bodies in `src/xlstm_simd_scalar.inc`, which is the same text `ref` compiles rather than a copy of it.
+
+`make test-cortexm` gates that backend without a board. `SXTAB16` and `SMLAD` are ARMv6 DSP instructions that A-profile also has, so the kernels cross-compile for `armv7-a` and run the full suite under `qemu-arm`, against the same golden vectors as every other backend. It gates the arithmetic and only the arithmetic:
+
+- armv7-a Linux permits unaligned word access, so the INT8 matvec's `-mno-unaligned-access` load path is never compiled and M-profile alignment behaviour is not exercised at all.
+- `XLSTM_FPU_HAS_MINMAX_ROUND` resolves to 0 there, as on Cortex-M4, so the FPv5 `vminnm`/`vrinta` path that M7 and M33 declare is not covered.
+- Emulated execution says nothing about cycles.
+
+Those three are checked on real parts, from a hardware-in-the-loop harness that lives in a separate repository.
 
 ### Naming convention
 
@@ -79,7 +87,8 @@ make XLSTM_SIMD=ref      # force scalar backend
 make test                # run all tests (f32 + INT8, sLSTM + mLSTM)
 make test-ref            # test with scalar backend
 make test-sse2           # test with SSE2 backend
-make test-neon           # cross-compile ARM + run via QEMU
+make test-neon           # cross-compile aarch64 + run via QEMU
+make test-cortexm        # cross-compile armv7-a + run via QEMU (DSP path)
 make bench               # benchmark all kernels (H = 16, 32, 64, 128)
 make bench-ref           # benchmark scalar backend
 make bench-sse2          # benchmark SSE2 backend

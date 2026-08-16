@@ -69,10 +69,10 @@ jobs:
           CC: gcc
           CXX: g++
 
-  # ARM NEON, cross-compiled and executed under emulation. This is the only
-  # non-x86 backend the suite can execute, so it is the one gate that catches
-  # ISA-specific defects (loop tails, alignment, accumulator width) before they
-  # reach a real target.
+  # ARM NEON, cross-compiled and executed under emulation. Together with
+  # cross-cortexm below these are the only non-x86 backends the suite can
+  # execute, so they are the gates that catch ISA-specific defects (loop tails,
+  # alignment, accumulator width) before they reach a real target.
   cross-neon:
     runs-on: ubuntu-latest
     steps:
@@ -84,3 +84,29 @@ jobs:
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu qemu-user
       - name: Cross-compile and run under qemu-aarch64
         run: make test-neon
+
+  # The cortexm backend's DSP arithmetic, on armv7-a under emulation. Its
+  # SXTAB16 and SMLAD are ARMv6 DSP instructions that A-profile also has, so the
+  # kernels can be cross-compiled and executed with no board and no bare-metal
+  # harness. Without this, cortexm is the one backend with no gate in this
+  # repository at all - it is otherwise checked only from a hardware-in-the-loop
+  # harness that needs physical parts.
+  #
+  # Green here does NOT mean the Cortex-M targets are covered. It gates the
+  # arithmetic against the same golden vectors as every other backend, and
+  # nothing else: armv7-a Linux permits unaligned word access, so the INT8
+  # matvec's -mno-unaligned-access load path is not compiled and M-profile
+  # alignment behaviour is not exercised; XLSTM_FPU_HAS_MINMAX_ROUND resolves to
+  # 0 here, so the FPv5 vminnm/vrinta path M7 and M33 declare is not covered;
+  # and emulated execution says nothing about cycles. See the make target.
+  cross-cortexm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install armhf cross toolchain and emulator
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf qemu-user
+      - name: Cross-compile and run under qemu-arm
+        run: make test-cortexm

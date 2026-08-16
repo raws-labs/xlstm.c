@@ -18,6 +18,13 @@
  *   [0] X[B,T,I]  [1] W[4H+2,I]  [2] b[4H+2]  [3] output[B,T,H]
  *
  * States (y, C, n, m) are owned by the module and persist across calls.
+ *
+ * QUANTIZATION
+ *
+ * forward() branches on quant_type - see slstm_espdl.hpp for the full
+ * description. mLSTM has no recurrent weight, and its cell state is the
+ * H x H matrix C, whose exponent is supplied to the constructor for the
+ * same reason c's is there.
  * ===========================================================================*/
 
 #ifndef MLSTM_ESPDL_HPP_
@@ -27,6 +34,7 @@
 
 extern "C" {
 #include "mlstm.h"
+#include "mlstm_s8.h"
 }
 
 namespace dl {
@@ -41,7 +49,9 @@ public:
            int hidden_size,
            int input_size,
            module_inplace_t inplace = MODULE_NON_INPLACE,
-           quant_type_t quant_type = QUANT_TYPE_NONE);
+           quant_type_t quant_type = QUANT_TYPE_NONE,
+           int C_exponent = 0,
+           int n_exponent = 0);
 
     ~MLSTM();
 
@@ -52,11 +62,26 @@ public:
                  runtime_mode_t mode = RUNTIME_MODE_AUTO) override;
 
 private:
+    bool quantized() const { return quant_type == QUANT_TYPE_SYMM_8BIT; }
+
+    void forward_f32(std::vector<dl::TensorBase*>& tensors);
+    void forward_s8(std::vector<dl::TensorBase*>& tensors);
+
+    /* f32 state */
     float* m_y;
     float* m_C;       /* [H*H] matrix cell state */
     float* m_n;
-    float* m_m;       /* [1] scalar stabilizer */
     float* m_scratch;
+    /* INT8 state - y is INT8, C/n INT16, gate accumulators INT32 */
+    int8_t* m_y_q;
+    int16_t* m_C_q;
+    int16_t* m_n_q;
+    int32_t* m_scratch_q;
+    /* m is a [1] scalar stabilizer, float32 on both paths */
+    float* m_m;
+
+    int m_C_exponent;
+    int m_n_exponent;
     bool m_initialized;
 
     void init_states();

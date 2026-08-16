@@ -23,12 +23,16 @@ namespace dl {
 namespace module {
 
 SLSTM::SLSTM(const char* name, int hidden_size, int input_size,
-              module_inplace_t inplace, quant_type_t quant_type)
+              module_inplace_t inplace, quant_type_t quant_type,
+              int c_exponent, int n_exponent)
     : Module(name, inplace, quant_type),
       m_hidden_size(hidden_size),
       m_input_size(input_size),
-      m_y(nullptr), m_c(nullptr), m_n(nullptr), m_m(nullptr),
-      m_scratch(nullptr), m_initialized(false)
+      m_y(nullptr), m_c(nullptr), m_n(nullptr), m_scratch(nullptr),
+      m_y_q(nullptr), m_c_q(nullptr), m_n_q(nullptr), m_scratch_q(nullptr),
+      m_m(nullptr),
+      m_c_exponent(c_exponent), m_n_exponent(n_exponent),
+      m_initialized(false)
 {
 }
 
@@ -39,11 +43,18 @@ SLSTM::~SLSTM() {
 void SLSTM::init_states() {
     if (m_initialized) return;
     int H = m_hidden_size;
-    m_y       = new float[H]();
-    m_c       = new float[H]();
-    m_n       = new float[H]();
-    m_m       = new float[H]();
-    m_scratch = new float[4 * H]();
+    if (quantized()) {
+        m_y_q       = new int8_t[H]();
+        m_c_q       = new int16_t[H]();
+        m_n_q       = new int16_t[H]();
+        m_scratch_q = new int32_t[4 * H]();
+    } else {
+        m_y       = new float[H]();
+        m_c       = new float[H]();
+        m_n       = new float[H]();
+        m_scratch = new float[4 * H]();
+    }
+    m_m = new float[H]();
     m_initialized = true;
 }
 
@@ -51,9 +62,17 @@ void SLSTM::free_states() {
     delete[] m_y;
     delete[] m_c;
     delete[] m_n;
-    delete[] m_m;
     delete[] m_scratch;
-    m_y = m_c = m_n = m_m = m_scratch = nullptr;
+    delete[] m_y_q;
+    delete[] m_c_q;
+    delete[] m_n_q;
+    delete[] m_scratch_q;
+    delete[] m_m;
+    m_y = m_c = m_n = m_scratch = nullptr;
+    m_y_q = nullptr;
+    m_c_q = m_n_q = nullptr;
+    m_scratch_q = nullptr;
+    m_m = nullptr;
     m_initialized = false;
 }
 
@@ -68,6 +87,16 @@ std::vector<std::vector<int>> SLSTM::get_output_shape(
 }
 
 void SLSTM::forward(std::vector<dl::TensorBase*>& tensors, runtime_mode_t mode) {
+    (void)mode;
+    init_states();
+    if (quantized()) {
+        forward_s8(tensors);
+    } else {
+        forward_f32(tensors);
+    }
+}
+
+void SLSTM::forward_f32(std::vector<dl::TensorBase*>& tensors) {
     // tensors: [0]=X[B,T,I], [1]=W[4H,I], [2]=R[4H,H], [3]=b[4H], [4]=output[B,T,H]
     TensorBase* input_x = tensors[0];
     TensorBase* input_W = tensors[1];
@@ -80,8 +109,6 @@ void SLSTM::forward(std::vector<dl::TensorBase*>& tensors, runtime_mode_t mode) 
     int time_steps  = (x_shape.size() == 3) ? x_shape[1] : x_shape[0];
     int input_size  = x_shape.back();
 
-    init_states();
-
     SlstmParams params = {0.0f};
 
     slstm_eval_f32(
@@ -92,6 +119,47 @@ void SLSTM::forward(std::vector<dl::TensorBase*>& tensors, runtime_mode_t mode) 
         m_y, m_c, m_n, m_m,
         output->get_element_ptr<float>(),
         m_scratch,
+        batch_size, time_steps, input_size, m_hidden_size,
+        &params);
+}
+
+void SLSTM::forward_s8(std::vector<dl::TensorBase*>& tensors) {
+    // Same tensor order as the f32 path; X/W/R/output are int8, b is int32.
+    TensorBase* input_x = tensors[0];
+    TensorBase* input_W = tensors[1];
+    TensorBase* input_R = tensors[2];
+    TensorBase* input_b = tensors[3];
+    TensorBase* output  = tensors[4];
+
+    auto x_shape = input_x->get_shape();
+    int batch_size  = (x_shape.size() == 3) ? x_shape[0] : 1;
+    int time_steps  = (x_shape.size() == 3) ? x_shape[1] : x_shape[0];
+    int input_size  = x_shape.back();
+
+    // ESP-DL stores a scale as its base-2 exponent; DL_SCALE turns it back
+    // into a float. Quantization is symmetric here, so every zero-point is
+    // 0 - this is unpacking the framework's representation, not arithmetic.
+    SlstmS8Params params;
+    params.cell_clip = 0.0f;
+    params.W_scale = DL_SCALE(input_W->exponent);
+    params.R_scale = DL_SCALE(input_R->exponent);
+    params.x_quant.scale      = DL_SCALE(input_x->exponent);
+    params.x_quant.zero_point = 0;
+    params.y_quant.scale      = DL_SCALE(output->exponent);
+    params.y_quant.zero_point = 0;
+    params.c_quant.scale      = DL_SCALE(m_c_exponent);
+    params.c_quant.zero_point = 0;
+    params.n_quant.scale      = DL_SCALE(m_n_exponent);
+    params.n_quant.zero_point = 0;
+
+    slstm_eval_s8(
+        input_x->get_element_ptr<int8_t>(),
+        input_W->get_element_ptr<int8_t>(),
+        input_R->get_element_ptr<int8_t>(),
+        input_b->get_element_ptr<int32_t>(),
+        m_y_q, m_c_q, m_n_q, m_m,
+        output->get_element_ptr<int8_t>(),
+        m_scratch_q,
         batch_size, time_steps, input_size, m_hidden_size,
         &params);
 }

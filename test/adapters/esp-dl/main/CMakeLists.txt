@@ -5,6 +5,9 @@ idf_component_register(
         "/workspace/adapters/esp-dl/mlstm_espdl.cpp"
         "/workspace/src/slstm.c"
         "/workspace/src/mlstm.c"
+        "/workspace/src/slstm_s8.c"
+        "/workspace/src/mlstm_s8.c"
+        "/workspace/src/xlstm_quant.c"
         "/workspace/src/xlstm_simd_esp.c"
     INCLUDE_DIRS
         "/workspace/include"

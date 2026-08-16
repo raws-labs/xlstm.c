@@ -29,12 +29,16 @@ COPY test/reference_data.h test/reference_data.h
 COPY test/adapters/esp-dl/ test/adapters/esp-dl/
 
 # Build as ESP-IDF project for ESP32-S3.
-# Note: QEMU in IDF v5.3 only supports esp32 (not s3), and ESP-DL only
-# supports s3+, so we verify compilation only. The successful build proves
-# our adapter links against real ESP-DL on a real cross-compilation target.
+#
+# COMPILE-ONLY SUITE. QEMU in IDF v5.3 emulates esp32 but not esp32s3, and
+# ESP-DL requires s3+, so the test binary is built and never run. A green
+# result here means the adapter compiles and links against real ESP-DL on a
+# real cross-compilation target - it says nothing about the numbers. The
+# assertions in main/test_espdl.cpp are written for a runner that does not
+# exist yet.
 WORKDIR /workspace/test/adapters/esp-dl
 RUN bash -c "source $IDF_PATH/export.sh && \
     idf.py set-target esp32s3 && \
     idf.py build"
 
-CMD ["echo", "ESP-DL adapter: build OK (esp32s3 cross-compilation verified)"]
+CMD ["echo", "ESP-DL adapter: esp32s3 cross-compilation OK. Tests were NOT run - no s3 emulator."]

@@ -18,6 +18,21 @@
  *   [0] X[B,T,I]  [1] W[4H,I]  [2] R[4H,H]  [3] b[4H]  [4] output[B,T,H]
  *
  * States (y, c, n, m) are owned by the module and persist across calls.
+ *
+ * QUANTIZATION
+ *
+ * forward() branches on quant_type, the way ESP-DL's own modules do:
+ * QUANT_TYPE_SYMM_8BIT runs slstm_eval_s8 over int8 tensors, anything else
+ * runs the f32 kernel. Scales come from each tensor's exponent
+ * (DL_SCALE(exponent) = 2^exponent) - ESP-DL quantization is symmetric
+ * power-of-two with no zero-point, so the kernel is handed zero_point 0
+ * throughout, and b is INT32 at 2^(X.exponent + W.exponent).
+ *
+ * c and n are INT16 state buffers this module owns rather than tensors it
+ * is handed, so their exponents cannot be read off a TensorBase and are
+ * supplied to the constructor instead. y takes the output tensor's
+ * exponent, which is also the scale the kernel writes output with. m is
+ * the log-space stabilizer and stays float32 at every quant_type.
  * ===========================================================================*/
 
 #ifndef SLSTM_ESPDL_HPP_
@@ -27,6 +42,7 @@
 
 extern "C" {
 #include "slstm.h"
+#include "slstm_s8.h"
 }
 
 namespace dl {
@@ -41,7 +57,9 @@ public:
            int hidden_size,
            int input_size,
            module_inplace_t inplace = MODULE_NON_INPLACE,
-           quant_type_t quant_type = QUANT_TYPE_NONE);
+           quant_type_t quant_type = QUANT_TYPE_NONE,
+           int c_exponent = 0,
+           int n_exponent = 0);
 
     ~SLSTM();
 
@@ -52,11 +70,26 @@ public:
                  runtime_mode_t mode = RUNTIME_MODE_AUTO) override;
 
 private:
+    bool quantized() const { return quant_type == QUANT_TYPE_SYMM_8BIT; }
+
+    void forward_f32(std::vector<dl::TensorBase*>& tensors);
+    void forward_s8(std::vector<dl::TensorBase*>& tensors);
+
+    /* f32 state */
     float* m_y;
     float* m_c;
     float* m_n;
-    float* m_m;
     float* m_scratch;
+    /* INT8 state - y is INT8, c/n INT16, gate accumulators INT32 */
+    int8_t* m_y_q;
+    int16_t* m_c_q;
+    int16_t* m_n_q;
+    int32_t* m_scratch_q;
+    /* m is float32 on both paths */
+    float* m_m;
+
+    int m_c_exponent;
+    int m_n_exponent;
     bool m_initialized;
 
     void init_states();

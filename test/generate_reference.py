@@ -225,44 +225,47 @@ SWEEP_SIZES = [1, 8, 16, 17, 64]
 
 
 # ============================================================================
-# INT8 per-channel tol_s8 derivation
+# INT8 tolerance derivation
 #
-# Every INT8 test assertion (RunSlstmS8Case/RunMlstmS8Case in the two
-# test/*_s8_test.cc files) checks one channel at a time against one bound,
-# so the only invariant that matters is per-channel: a bound is sound iff
+# Every INT8 assertion in test/{slstm,mlstm}_s8_test.cc checks one output
+# channel, or one exit-state element, at a time. Soundness is therefore a
+# per-channel property:
 #
 #     max(baseline_err, perturbed_err)  <  bound  <  own_range
 #
-# for that specific channel, where own_range is the largest golden value
-# that channel ever takes (across y and every stored output timestep).
-# A single case-wide bound cannot generally satisfy this for every channel
-# at once - real cases have channels spanning multiple orders of magnitude
-# - so every channel gets its own bound, computed
-# here at generation time from a from-scratch numpy simulation of the
-# exact INT8 kernel math (slstm_s8.c / mlstm_s8.c) and calibration
-# (PrepareS8 / PrepareMlstmS8 in the two test/*_s8_test.cc files,
-# including xlstm_quant_symmetric_s16's headroom=4.0 - kept in sync by hand since
-# the calibration lives in C++, not here; see those files' comments).
+# Under the floor the bound false-fails a correct kernel; at or above the
+# range it cannot tell correct output from an all-zero corruption of that
+# channel. One case-wide constant cannot hold that for channels three orders
+# of magnitude apart, so every channel gets its own bound.
 #
-# baseline_err is the whole-trajectory error against the plain kernel.
-# perturbed_err is the same, but with a persistent 1.001x multiplicative
-# perturbation applied to the pre-requantization y value at every
-# timestep - simulating a backend whose activation functions are not
-# bit-identical to this task's (e.g. CMSIS-NN's LUT-based sigmoid/tanh on
-# Cortex-M). A bound that does not clear both is not portable to that
-# class of backend, even though it looks fine against this one.
+# Both terms come from a numpy replica of the INT8 kernel math
+# (src/{slstm,mlstm}_s8.c) and of the C++ calibration (PrepareS8 /
+# PrepareMlstmS8, including xlstm_quant_symmetric_s16's headroom). That
+# calibration lives in C++ and is mirrored here by hand, so GENERATOR_HEADROOM
+# is emitted into the header for both sides to static_assert on.
 #
-# Selection rule (deliberately maximizing, not minimizing): target a
-# bound at HALF of a channel's own range (ratio ~0.5) - the invariant
-# above only requires ratio < 1.0, and a bound picked just above the
-# measured floor (the earlier, WRONG approach: ~1.5x the measured error)
-# leaves near-zero margin for legitimate backend variance, which is
-# exactly what a portability check needs room for. If the floor already
-# exceeds 0.5x the range (a channel with unusually little headroom), fall
-# back to the midpoint of (floor, range), which is the loosest bound that
-# still respects both constraints. A future maintainer: do not re-tighten
-# these bounds toward the measured error "to make the test stricter" -
-# that reintroduces the false-failure risk this rule exists to avoid.
+# The replica is not scaffolding for the bounds, it is the primary gate. Its
+# measured floors ship in reference_data.h and the runners assert the real
+# kernel against floor*1.5 (output) and floor*3.0 (state). Measured over this
+# table, that check is tighter than the per-channel bound on 224 of 232 output
+# channels and 4752 of 5198 state elements, and it is the only assertion
+# covering the 142 elements that have no usable bound at all. It is also what
+# turns this file drifting out of sync with the kernel into a loud failure.
+# The same replica supplies reference_data.json's expected_*_q integers, which
+# the four adapter suites assert bit-exactly.
+#
+# perturbed_err is the same trajectory under a persistent 1.001x factor on the
+# pre-requantization y at every timestep: a backend whose activations are not
+# bit-identical to this one's, e.g. CMSIS-NN's LUT sigmoid/tanh on Cortex-M.
+# A bound that does not clear it is not portable to that class of backend.
+#
+# Selection rule, deliberately maximizing: target 0.5 * range. The invariant
+# only needs ratio < 1.0, and a bound picked just above the floor leaves no
+# room for legitimate backend variance, which is exactly what a portability
+# check needs. When 0.5 * range is not 1.2x above the floor, fall back to the
+# midpoint of (floor, range). Do not re-tighten these toward the measured
+# error "to make the test stricter"; that is the false-failure risk the rule
+# exists to avoid.
 # ============================================================================
 
 def _quant_sym8(a):
@@ -282,12 +285,10 @@ def _quant_asym(a):
     return scale, zp
 
 
-# Must match kStateHeadroom in both test/slstm_s8_test.cc and
-# test/mlstm_s8_test.cc exactly - it is the headroom those files pass to
-# xlstm_quant_symmetric_s16 to calibrate c_quant/n_quant/C_quant, and every
-# tol_s8_per_channel bound in reference_data.h assumes that calibration. Emitted
-# into reference_data.h as XLSTM_GENERATOR_HEADROOM so both C++ files can
-# static_assert against it instead of the two copies silently drifting.
+# The headroom test/{slstm,mlstm}_s8_test.cc pass to xlstm_quant_symmetric_s16
+# when calibrating c_quant/n_quant/C_quant. Every bound here assumes it, so it
+# is emitted as XLSTM_GENERATOR_HEADROOM for both C++ files to static_assert
+# their own kStateHeadroom against rather than drift silently.
 GENERATOR_HEADROOM = 4.0
 
 
@@ -306,26 +307,37 @@ def _t2n(t):
     return t.detach().cpu().numpy().astype(np.float64)
 
 
-def _slstm_s8_calib(tc):
-    """Scales the sLSTM INT8 path is calibrated with, for one case.
+def _case_arrays(tc, cell):
+    """One case unpacked into kernel layout, float64. cell is 's' or 'm'.
 
-    This is the single definition of PrepareS8 (test/slstm_s8_test.cc) on
-    the Python side: _slstm_int8_trace derives every tolerance in
-    reference_data.h from it, and generate_json ships it so the framework
-    adapter integration tests quantize their inputs identically instead of
-    each re-deriving it and drifting."""
+    out_gold falls back to y for a T=1 case that stores no output, so the
+    y_quant calibration below has the same view either way."""
     H, T, I = tc["H"], tc["T"], tc["I"]
-    W = _t2n(tc["W"]).reshape(4 * H, I)
-    R = _t2n(tc["R"]).reshape(4 * H, H)
     y_gold = _t2n(tc["y"]).reshape(H)
-    out_gold = _t2n(tc["output"]).reshape(T, H) if tc["output"] is not None else y_gold.reshape(1, H)
+    a = {"H": H, "T": T, "I": I,
+         "W": _t2n(tc["W"]).reshape(4 * H if cell == "s" else 4 * H + 2, I),
+         "b": _t2n(tc["b"]),
+         "x": _t2n(tc["input"]).reshape(1, T, I),
+         "y_gold": y_gold,
+         "out_gold": (_t2n(tc["output"]).reshape(T, H)
+                      if tc["output"] is not None else y_gold.reshape(1, H))}
+    if cell == "s":
+        a["R"] = _t2n(tc["R"]).reshape(4 * H, H)
+    return a
 
-    w_scale, _ = _quant_sym8(W.flatten())
-    r_scale, _ = _quant_sym8(R.flatten())
-    x_scale, x_zp = _quant_asym(_t2n(tc["input"]).flatten())
-    y_scale, y_zp = _quant_asym(out_gold.flatten())
-    c_scale, _ = _quant_sym16_headroom(_t2n(tc["c"]).reshape(H))
-    n_scale, _ = _quant_sym16_headroom(_t2n(tc["n"]).reshape(H))
+
+def _slstm_s8_calib(tc):
+    """PrepareS8 (test/slstm_s8_test.cc) on the Python side, and the single
+    definition of it here: the replica derives every sLSTM tolerance from
+    these scales and generate_json ships them, so the adapter suites quantize
+    identically instead of each re-deriving and drifting."""
+    a = _case_arrays(tc, "s")
+    w_scale, _ = _quant_sym8(a["W"].flatten())
+    r_scale, _ = _quant_sym8(a["R"].flatten())
+    x_scale, x_zp = _quant_asym(a["x"].flatten())
+    y_scale, y_zp = _quant_asym(a["out_gold"].flatten())
+    c_scale, _ = _quant_sym16_headroom(_t2n(tc["c"]).reshape(a["H"]))
+    n_scale, _ = _quant_sym16_headroom(_t2n(tc["n"]).reshape(a["H"]))
     return {"W_scale": w_scale, "R_scale": r_scale,
             "x_scale": x_scale, "x_zero_point": x_zp,
             "y_scale": y_scale, "y_zero_point": y_zp,
@@ -333,17 +345,12 @@ def _slstm_s8_calib(tc):
 
 
 def _mlstm_s8_calib(tc):
-    """Scales the mLSTM INT8 path is calibrated with - the mLSTM twin of
-    _slstm_s8_calib above (PrepareMlstmS8 in test/mlstm_s8_test.cc)."""
-    H, T, I = tc["H"], tc["T"], tc["I"]
-    W = _t2n(tc["W"]).reshape(4 * H + 2, I)
-    y_gold = _t2n(tc["y"]).reshape(H)
-    out_gold = _t2n(tc["output"]).reshape(T, H) if tc["output"] is not None else y_gold.reshape(1, H)
-
-    w_scale, _ = _quant_sym8(W.flatten())
-    x_scale, x_zp = _quant_asym(_t2n(tc["input"]).flatten())
-    y_scale, y_zp = _quant_asym(out_gold.flatten())
-    n_scale, _ = _quant_sym16_headroom(_t2n(tc["n"]).reshape(H))
+    """PrepareMlstmS8 (test/mlstm_s8_test.cc), the mLSTM twin of the above."""
+    a = _case_arrays(tc, "m")
+    w_scale, _ = _quant_sym8(a["W"].flatten())
+    x_scale, x_zp = _quant_asym(a["x"].flatten())
+    y_scale, y_zp = _quant_asym(a["out_gold"].flatten())
+    n_scale, _ = _quant_sym16_headroom(_t2n(tc["n"]).reshape(a["H"]))
     C_scale, _ = _quant_sym16_headroom(_t2n(tc["c"]).flatten())
     return {"W_scale": w_scale,
             "x_scale": x_scale, "x_zero_point": x_zp,
@@ -352,25 +359,23 @@ def _mlstm_s8_calib(tc):
 
 
 def _slstm_int8_trace(tc, perturb=1.0):
-    """Numpy replica of PrepareS8 + slstm_eval_s8. Returns (out[T,H],
-    golden_output[T,H], golden_y[H], state, quantized), where state is the
-    replica's dequantized EXIT state {"state": c[H], "n": n[H], "m": m[H]}
-    - the same three buffers the C kernel leaves behind for the caller, in
-    the same dequantized units the INT8 test reads them back in. They feed
-    compute_state_tol_per_elem below.
+    """Numpy replica of PrepareS8 + slstm_eval_s8.
 
-    quantized is the same trajectory and exit state as raw integers, the
-    exact byte-level values the C kernel writes. Measured across every
-    case in this file the two agree to 0 LSB on output/y/c/n, so the
-    framework adapter integration tests assert against these directly
-    rather than against a tolerance - see generate_json."""
-    H, T, I = tc["H"], tc["T"], tc["I"]
-    W = _t2n(tc["W"]).reshape(4 * H, I)
-    R = _t2n(tc["R"]).reshape(4 * H, H)
-    b = _t2n(tc["b"])
-    x = _t2n(tc["input"]).reshape(1, T, I)
-    y_gold = _t2n(tc["y"]).reshape(H)
-    out_gold = _t2n(tc["output"]).reshape(T, H) if tc["output"] is not None else y_gold.reshape(1, H)
+    Returns (out[T,H], golden_output[T,H], golden_y[H], state, quantized).
+    `state` is the dequantized exit state {"state": c[H], "n": n[H],
+    "m": m[H]} - the buffers the C kernel leaves for the caller, in the units
+    the INT8 test reads them back in. `quantized` is the same trajectory and
+    exit state as raw integers: measured over every case here they match the
+    C kernel to 0 LSB on output/y/c/n, so the adapter suites assert them
+    directly instead of against a tolerance (see generate_json).
+
+    perturb applies a persistent multiplicative factor to y before
+    requantization, standing in for a backend with non-bit-identical
+    activations."""
+    a = _case_arrays(tc, "s")
+    H, T = a["H"], a["T"]
+    W, R, b, x = a["W"], a["R"], a["b"], a["x"]
+    y_gold, out_gold = a["y_gold"], a["out_gold"]
 
     cal = _slstm_s8_calib(tc)
     w_scale, r_scale = cal["W_scale"], cal["R_scale"]
@@ -428,17 +433,13 @@ def _slstm_int8_trace(tc, perturb=1.0):
 
 
 def _mlstm_int8_trace(tc, perturb=1.0):
-    """Numpy replica of PrepareMlstmS8 + mlstm_eval_s8. Returns (out[T,H],
-    golden_output[T,H], golden_y[H], state, quantized), where state is the
-    replica's dequantized EXIT state {"state": C[H*H], "n": n[H], "m":
-    m[1]} and quantized is the raw-integer form of the same - see
-    _slstm_int8_trace above."""
-    H, T, I = tc["H"], tc["T"], tc["I"]
-    W = _t2n(tc["W"]).reshape(4 * H + 2, I)
-    b = _t2n(tc["b"])
-    x = _t2n(tc["input"]).reshape(1, T, I)
-    y_gold = _t2n(tc["y"]).reshape(H)
-    out_gold = _t2n(tc["output"]).reshape(T, H) if tc["output"] is not None else y_gold.reshape(1, H)
+    """Numpy replica of PrepareMlstmS8 + mlstm_eval_s8, same contract as
+    _slstm_int8_trace above; the exit state is {"state": C[H*H], "n": n[H],
+    "m": m[1]}."""
+    a = _case_arrays(tc, "m")
+    H, T = a["H"], a["T"]
+    W, b, x = a["W"], a["b"], a["x"]
+    y_gold, out_gold = a["y_gold"], a["out_gold"]
 
     cal = _mlstm_s8_calib(tc)
     w_scale = cal["W_scale"]
@@ -500,27 +501,21 @@ def _round_sig(x, sig=2, up=False):
 
 
 def _derive_bound(floor, rng):
-    """Maximize toward ratio ~0.5 (see module docstring above); never
-    below floor (avoids false failures) or at/above rng (avoids vacuity
-    - an all-zero corruption of this channel would go undetected).
+    """Maximize toward 0.5 * rng (see the section comment above); never below
+    floor (a false failure) or at/above rng (vacuous - an all-zero corruption
+    of this channel would go undetected).
 
-    floor >= rng is a real, if rare, case (not a bug to round away): it
-    means this channel's own measured error already covers its own
-    dynamic range, so no interval (floor, rng) exists at all - any bound
-    that avoids vacuity (bound < rng) necessarily false-fails on the
-    correct kernel (bound < floor), and any bound that avoids a false
-    failure (bound > floor) necessarily can't distinguish correct output
-    from an all-zero corruption of that one channel (bound >= rng). Two
-    known channels are exactly floor == rng (their true value dequantizes
-    to precisely the y_quant zero-point - undecidable by any test, not
-    merely a hard-to-pick tolerance); sLSTM Test1 channel 0 is floor > rng
-    outright. In all these cases this function chooses to avoid the false
-    failure (a test that fails on correct, unmodified kernel output is
-    worse than one blind to a corruption of a single already-near-zero
-    channel) and returns a bound with headroom above floor, accepting
-    that this specific channel is not usefully guarded. See
-    The exact list and the full reasoning are recorded with the measurements
-    in full. """
+    floor >= rng is real and rare, not a bug to round away: the channel's own
+    measured error already covers its own dynamic range, so no interval
+    (floor, rng) exists and every bound is one or the other. Three channels
+    are in this state, all with a true value near zero - sLSTM Test1 ch0
+    (floor 3.7x rng), sLSTM SweepS64 ch15 and mLSTM SweepM64 ch63 (floor ==
+    rng exactly, because their true value dequantizes to precisely the
+    y_quant zero-point, so correct and all-zero output are bit-identical
+    there - undecidable by any tolerance). This picks the false-failure-free
+    side and returns 1.2x floor, leaving that one already-near-zero channel
+    unguarded rather than failing a correct kernel. sLSTM SweepS17 ch5 looks
+    like a fourth but is not: its window is narrow (ratio 0.931) and real."""
     if floor >= rng:
         return _round_sig(floor * 1.2, 2, up=True)
     target = 0.5 * rng
@@ -538,49 +533,35 @@ def _derive_bound(floor, rng):
     return bound
 
 
-def compute_tol_s8_per_channel(tc, cell):
-    """Returns (bounds, floor): two lists of H floats each, for one case
-    dict (cell is 's' or 'm'). bounds are the tol_s8_per_channel values
-    every INT8 assertion checks against. floor is what this function's
-    own numpy replica measured as each channel's worst-case error
-    (baseline vs. perturbed) - emitted into reference_data.h alongside
-    bounds so the real C kernel's measured error can be asserted against
-    it at test time (see RunSlstmS8Case/RunMlstmS8Case's floor-
-    consistency check). The replica and the real kernel
-    (src/slstm_s8.c/src/mlstm_s8.c) are two hand-synchronized
-    implementations of the same math; without that assertion, a kernel
-    edit that isn't mirrored here would silently invalidate every bound
-    in this file rather than failing loudly.
+def _trace(tc, cell, perturb=1.0):
+    """Run whichever replica this case needs. cell is 's' or 'm'."""
+    return (_slstm_int8_trace if cell == "s" else _mlstm_int8_trace)(tc, perturb)
 
-    rng per channel is the max magnitude across that channel's whole
-    trajectory (every stored output timestep, plus the final y - which
-    for T>1 is redundant with the T-1 output row, but included for T=1
-    cases that don't store output at all). Sizing the bound from that
-    trajectory-wide max is correct for catching a corruption of any one
-    (timestep, channel) cell checked against tol_s8_per_channel[channel]
-    - but there is a second, distinct class of corruption this task's
-    mutation testing checks for: destroying ONLY the final state (y),
-    leaving every stored output timestep - including the kernel's own
-    copy of that same final value into output[T-1] - untouched. A bound
-    derived from the trajectory-wide max can be safely below that max
-    (that is the point) while still being ABOVE this specific channel's
-    own final-y magnitude, if that channel's peak happens to occur at an
-    earlier timestep - which leaves the case's *entire* channel set
-    blind to a final-state-only corruption if it happens to every
-    channel. Measured concretely for SweepM8: with the trajectory-wide
-    rng, none of its 8 channels had bound < |y_final| - a real,
-    demonstrated gap, not a theoretical one.
-    Guaranteed here: if no channel's bound already comes in under its own
-    |y_final|, the channel with the largest |y_final| (most room to work
-    with) gets a second pass, deriving its bound from |y_final| alone
-    instead of the trajectory-wide max, so it always catches a
-    final-state-only corruption of the whole case."""
-    if cell == "s":
-        out0, gold, y_gold, _, _ = _slstm_int8_trace(tc, 1.0)
-        out1, _, _, _, _ = _slstm_int8_trace(tc, 1.001)
-    else:
-        out0, gold, y_gold, _, _ = _mlstm_int8_trace(tc, 1.0)
-        out1, _, _, _, _ = _mlstm_int8_trace(tc, 1.001)
+
+def compute_tol_s8_per_channel(tc, cell):
+    """(bounds, floor), H floats each, for one case dict.
+
+    bounds are the tol_s8_per_channel values the INT8 assertions check
+    against. floor is what the replica measured as each channel's worst-case
+    error over the baseline and perturbed runs; it ships in reference_data.h
+    so the real kernel's error can be asserted against floor*1.5 at test time.
+    That assertion is what makes a kernel edit not mirrored here fail loudly
+    instead of quietly invalidating every bound in the file.
+
+    rng is the channel's max magnitude over its whole trajectory (every stored
+    output timestep plus the final y, the latter mattering only for T=1 cases
+    that store no output). That is the right scale for a corruption of any one
+    (timestep, channel) cell, but it leaves a second class open: destroying
+    ONLY the final y, with every stored output timestep - including the
+    kernel's own copy of that value into output[T-1] - untouched. A bound
+    below the trajectory-wide max can still sit above that channel's own
+    |y_final| when its peak fell at an earlier timestep, and if that holds for
+    every channel the case goes blind to the whole mutation. Measured for
+    SweepM8: none of its 8 channels had bound < |y_final|. So if no channel
+    already qualifies, the one with the largest |y_final| gets a second pass
+    deriving its bound from |y_final| alone."""
+    out0, gold, y_gold, _, _ = _trace(tc, cell, 1.0)
+    out1, _, _, _, _ = _trace(tc, cell, 1.001)
     err0 = np.max(np.abs(out0 - gold), axis=0)
     err1 = np.max(np.abs(out1 - gold), axis=0)
     floor = np.maximum(err0, err1)
@@ -593,104 +574,57 @@ def compute_tol_s8_per_channel(tc, cell):
     return bounds, [float(v) for v in floor]
 
 
-# Sentinel written into a state bound array for an element that cannot be
-# given a useful bound at all. See compute_state_tol_per_elem below; the
-# INT8 runners skip these and print how many they skipped, so an unasserted
-# element is visible in the test output rather than silently absent.
+# Sentinel for a state element that can carry no useful bound at all. The
+# INT8 runners skip these and print how many, so an unasserted element shows
+# up in the test output instead of quietly not existing.
 STATE_TOL_UNASSERTABLE = -1.0
 
-# Smallest factor by which a state bound must clear that element's own
-# measured error to be worth shipping. Matches the 1.2 already used inside
-# _derive_bound to decide whether a half-of-range target sits far enough
-# above the floor. See compute_state_tol_per_elem.
+# Smallest factor by which a state bound must clear its element's own measured
+# error to be worth shipping - the same 1.2 _derive_bound uses to decide
+# whether a half-of-range target has room above the floor.
 STATE_MIN_MARGIN = 1.2
 
 
 def compute_state_tol_per_elem(tc, cell):
     """Per-ELEMENT INT8 bounds and floors for the kernel's exit state.
 
-    Returns (bounds, floors), each {"state": [...], "n": [...],
-    "m": [...]} - one value per element of each state tensor (sLSTM
-    c[H]/n[H]/m[H], mLSTM C[H*H]/n[H]/m[1]), derived exactly the way
-    compute_tol_s8_per_channel derives the output bounds and floors, and
-    for the same reasons.
+    Returns (bounds, floors), each {"state": [...], "n": [...], "m": [...]},
+    one value per element of sLSTM c[H]/n[H]/m[H] or mLSTM C[H*H]/n[H]/m[1],
+    derived the way compute_tol_s8_per_channel derives the output pair and for
+    the same reasons. The floors are asserted at test time against floor*3.0
+    (test_util.h's kStateFloorFactor), and they cover every element including
+    the ones whose bound is STATE_TOL_UNASSERTABLE - drift detection needs no
+    non-vacuous bound, so those stay unguarded for correctness and guarded
+    against divergence.
 
-    floors are what this function's own numpy replica measured as each
-    element's worst-case error, and they are emitted into
-    reference_data.h next to the bounds so the real C kernel's measured
-    state error can be asserted against floor*1.5 at test time - the
-    exit-state half of the drift detector the output path has had since
-    the tol_s8_floor_per_channel round. Without it, a kernel change that
-    moves the exit state without moving y is invisible as a replica
-    divergence: it either passes (if it stays inside the bound) or fails
-    as a bound violation with nothing pointing at the replica. That
-    matters most for a new SIMD backend, which is exactly what stresses
-    this hand-maintained C-to-Python coupling. Note the floors cover
-    EVERY element, including the ones whose bound is
-    STATE_TOL_UNASSERTABLE: drift detection does not need a non-vacuous
-    bound to exist, so those elements are unguarded for correctness but
-    still guarded against divergence.
+    Per element and not per tensor because a fraction of the tensor's own
+    maximum leaves every smaller element individually zeroable: 4063 of
+    SweepM64's 4096 C elements, 62 of its 64 n, 56 of SweepS64's 64 c. A
+    mutant zeroing exactly those after the timestep loop, where it never feeds
+    back into y, passed both INT8 suites green.
 
-    Why per element and not one bound per tensor: an earlier round bounded
-    each state tensor at a fixed fraction of that tensor's own maximum
-    magnitude. That is non-vacuous for the tensor as a whole (zeroing the
-    whole tensor fails) but leaves every element whose own magnitude is
-    below the fraction individually zeroable with nothing firing - counted
-    at the time: 4063 of SweepM64's 4096 C elements (99.2%), 62 of its 64 n
-    elements, 56 of SweepS64's 64 c elements. A mutant zeroing exactly
-    those elements after the timestep loop, so it never feeds back into y,
-    passed both INT8 suites green. The same argument that forced the output
-    bounds per channel forces these per element.
+    floor is the replica's deviation from the f32 golden, max over the
+    baseline and the 1.001x perturbed run. In sLSTM that perturbation reaches
+    the state through the recurrent y path; mLSTM has no y recurrence, so its
+    state floor is the baseline deviation alone. rng is the element's own
+    golden magnitude - one value, not a trajectory - so zeroing it errs by
+    exactly rng, which is what makes bound < rng the exact non-vacuity test.
 
-    floor is the replica's own measured deviation from the f32 golden for
-    that element, taken as the max over the baseline run and a run with the
-    same 1.001x pre-requantization perturbation the output floors use.
-    Caveat worth stating: in sLSTM that perturbation reaches the state
-    through the recurrent y path, but mLSTM has no y recurrence, so its
-    state floor is the baseline replica deviation alone. It makes little
-    practical difference because the selection rule below lands far above
-    the floor on all but a handful of elements.
+    A bound must not come from rng by a fixed relative factor: sLSTM Test1's
+    c[0] deviates 3.749x its own golden (0.03609742), so any factor tight
+    enough to mean something elsewhere false-fails there.
 
-    rng is that element's own golden magnitude - a state element has one
-    golden value, not a trajectory, so there is no trajectory-wide max to
-    take. Zeroing the element produces an error of exactly rng, which is
-    what makes `bound < rng` the precise non-vacuity condition.
-
-    Bounds must NOT come from the golden magnitude by a fixed relative
-    factor: sLSTM Test1's c[0] deviates 3.749x its own golden
-    (0.03609742), so any relative bound tight enough to be meaningful
-    elsewhere false-fails there. They come from the measured floor,
-    maximized toward 0.5 x rng by the same _derive_bound used for outputs.
-
-    An element gets STATE_TOL_UNASSERTABLE when no bound can be both
-    non-vacuous and free of false failures - rng == 0 (the golden is
-    already zero, so zeroing it is undetectable by construction) or
-    floor >= rng (the honest, measured error already covers the element's
-    whole dynamic range). Shipping a bound there would mean shipping one
-    that either cannot fail or fails on a correct kernel; both are worse
-    than an explicit, counted omission.
-
-    STATE_MIN_MARGIN extends that to the near-miss case. When floor is
-    only just below rng the surviving window is real but tiny, and
-    _derive_bound's midpoint fallback lands a hair above floor: measured
-    without this rule, mLSTM SweepM64's C[2071] got bound 0.016 against a
-    real-kernel error of 0.0157991, a margin of 1.013x. A bound that
-    close to the honest measured error is one a legitimate backend trips,
-    which is the failure mode this whole tolerance scheme exists to avoid.
-    An element whose best available bound cannot clear its floor by
-    STATE_MIN_MARGIN is therefore dropped rather than shipped tight - the
-    same 1.2 factor _derive_bound already uses to decide whether a
-    half-of-range target has enough room above the floor to be worth
-    taking. Measured cost: it moves 32 of 5085 asserted elements (0.6%)
-    into the unassertable count; measured benefit: mLSTM's state
-    assertions stop being the first thing a LUT-style gate perturbation
-    trips (see the report for the sweep)."""
-    if cell == "s":
-        _, _, _, st0, _ = _slstm_int8_trace(tc, 1.0)
-        _, _, _, st1, _ = _slstm_int8_trace(tc, 1.001)
-    else:
-        _, _, _, st0, _ = _mlstm_int8_trace(tc, 1.0)
-        _, _, _, st1, _ = _mlstm_int8_trace(tc, 1.001)
+    STATE_TOL_UNASSERTABLE covers rng == 0 (zeroing an already-zero golden is
+    undetectable) and floor >= rng (the measured error already spans the
+    element's range). STATE_MIN_MARGIN extends that to the near miss, where
+    the window is real but tiny and _derive_bound's midpoint fallback lands a
+    hair above floor: without it SweepM64's C[2071] shipped at 0.016 against a
+    real-kernel error of 0.0157991, a 1.013x margin, which is the kind of
+    bound a legitimate backend trips. It costs 32 of 5085 asserted elements
+    and stops mLSTM's state assertions being the first thing a LUT-style gate
+    perturbation fires on."""
+    _, _, _, st0, _ = _trace(tc, cell, 1.0)
+    _, _, _, st1, _ = _trace(tc, cell, 1.001)
 
     golds = {"state": _t2n(tc["c"]).flatten(),
              "n": _t2n(tc["n"]).flatten(),
@@ -728,29 +662,18 @@ def slstm_sized_case(H, seed):
     """sLSTM case at hidden size H, 3 timesteps, I = H.
 
     T=3 matters: a multi-step sequence forces the recurrent path and makes
-    state errors observable in the per-timestep output.
+    state errors observable in the per-timestep output. tol_s8 is not set
+    here; build_cases derives it per channel once every case exists.
 
-    tol_s8 is not set here: build_cases() computes a per-channel tol_s8
-    array for every case (see compute_tol_s8_per_channel above) after all
-    cases are built, because a single case-wide constant cannot safely
-    guard every channel - see that function's module docstring for the
-    full derivation.
-
-    H=17's INT8 error is elevated (~0.23 at its worst element) on a few
-    channels: with this random weight draw, those channels' pre-activation
-    lands near the zero-crossing of tanh/sigmoid, where accumulated
-    INT8xINT8 matmul rounding noise (summed over I=17 terms) gets
-    amplified by the activation's steep local slope. Verified against a
-    from-scratch numpy replica of the quantized math and reproduces
-    identically under both the sse2 and ref backends, so it is
-    quantization noise particular to this draw, not a kernel bug. This is
-    exactly the class of channel the per-channel tol_s8 array exists to
-    handle without loosening every other channel of the case - H=17 is
-    also the only sweep size with cols % 8 != 0 and cols > 8, i.e. the
-    only one that exercises xlstm_matvec_s8's scalar SIMD tail, so a
-    blanket loosening here would double as cover for an unrelated tail
-    defect.
-    """
+    H=17's INT8 error is elevated (~0.23 at worst) on a few channels: this
+    weight draw puts their pre-activation near the zero-crossing of
+    tanh/sigmoid, where INT8xINT8 matmul rounding noise summed over I=17
+    terms meets the activation's steep local slope. It reproduces identically
+    on sse2 and ref, so it is quantization noise from this draw, not a kernel
+    bug, and it is exactly what the per-channel array exists for. H=17 is also
+    the only sweep size with cols % 8 != 0 and cols > 8, so it is the only one
+    exercising xlstm_matvec_s8's scalar SIMD tail: a blanket loosening here
+    would double as cover for an unrelated tail defect."""
     torch.manual_seed(seed)
     I = H
     W = torch.randn(4 * H, I) * 0.5
@@ -769,28 +692,19 @@ def slstm_sized_case(H, seed):
 def mlstm_sized_case(H, seed):
     """mLSTM case at hidden size H, 3 timesteps, I = H.
 
-    The full C matrix is always stored (store_state defaults to True in
-    _emit_case/_emit_table), including H=64 (an extra ~4096 floats in
-    reference_data.h). An earlier version of this case capped storage at
-    H<=17 to bound header size and derived H=64's C_quant scale from an
-    empirically-tuned multiple of n's scale instead - a code review showed
-    that guess was not actually the binding constraint on H=64's INT8
-    error (scaling it across a 128x range left the error unchanged), so
-    storing C directly removes a guess without evidence behind it. What
-    H=64's residual error actually is remains undiagnosed.
-
-    tol_s8 is not set here, for the same reason as slstm_sized_case: see
-    compute_tol_s8_per_channel above.
+    The full C matrix is always stored, including H=64's extra ~4096 floats.
+    An earlier version capped storage at H<=17 and derived H=64's C_quant
+    scale from a tuned multiple of n's scale instead; scaling that guess
+    across a 128x range left the error unchanged, so it was not the binding
+    constraint and storing C directly removes a guess with no evidence behind
+    it. What H=64's residual error actually is remains undiagnosed.
 
     H=17's error is elevated (~0.73) on several channels: mLSTM's readout
-    is q^T C / max(|q^T n|, exp(-m)), which - unlike sLSTM's gated-tanh
-    cell - is not architecturally bounded, so the golden y values
-    themselves reach into the double digits for this draw. INT8/INT16
-    quantization noise in q, C and n compounds through that dot product
-    and division. Verified against a from-scratch numpy replica (matches
-    the f32 golden values when run unquantized) and reproduces identically
-    under sse2 and ref, so this is quantization noise, not a kernel bug.
-    """
+    q^T C / max(|q^T n|, exp(-m)) is not architecturally bounded the way
+    sLSTM's gated tanh is, so this draw's golden y reaches double digits and
+    INT8/INT16 noise in q, C and n compounds through the dot product and
+    division. Reproduces identically on sse2 and ref, so it is quantization
+    noise, not a kernel bug."""
     torch.manual_seed(seed)
     I = H
     W = torch.randn(4 * H + 2, I) * 0.5
@@ -1046,55 +960,18 @@ def build_cases():
     slstm_cases.append(head0)
     slstm_cases.append(head1)
 
-    # tol_s8 is computed here, per channel, for every case (both cells) -
-    # not hand-picked per case as earlier versions of this file did. A
-    # single case-wide constant is unsound in general: the invariant that
-    # actually matters is ratio = tol_s8 / max|expected value| evaluated
-    # at the granularity the tolerance is actually checked at (one
-    # channel at a time - see RunSlstmS8Case/RunMlstmS8Case in the two
-    # test/*_s8_test.cc files), and real cases have channels spanning
-    # multiple orders of magnitude, so one constant cannot keep every
-    # channel's ratio safely below 1.0. Two code reviews found this the
-    # hard way: first a case-wide blanket left small-valued channels
-    # vacuous (e.g. mLSTM SweepM1's ratio was ~32x under a flat 0.10
-    # default), then even a per-case-plus-a-few-hand-picked-overrides
-    # scheme kept missing channels (a case with 64 widely-spread channel
-    # magnitudes needs closer to 64 individually-derived bounds, not 2 or
-    # 3). See compute_tol_s8_per_channel's module docstring above for the
-    # derivation.
-    #
-    # Three individual channels (sLSTM Test1 channel 0; sLSTM SweepS64
-    # channel 15; mLSTM SweepM64 channel 63) have a true value close
-    # enough to zero that even a bound derived from that channel's own
-    # measured error cannot get below a ratio of 1 - this is not a
-    # tolerance-tuning problem, it is a representability limit of
-    # per-tensor INT8 quantization when one channel's true value is much
-    # smaller than the tensor's overall range (two of these, SweepS64
-    # ch15 and SweepM64 ch63, dequantize to exactly the y_quant
-    # zero-point, so correct and all-zero-corrupted output are
-    # bit-identical for that channel - undecidable by any tolerance, not
-    # merely a hard-to-choose one). Documented, not hidden.
-    # sLSTM SweepS17 channel 5 looked like a fourth
-    # case in an earlier round but is not one: its window is narrow
-    # (ratio 0.931) but real, and it has a normal, valid bound (0.055) -
-    # do not re-add it here.
-    #
-    # The exit state (c/n/m, C/n/m) gets the same treatment one level down,
-    # per ELEMENT rather than per channel - see compute_state_tol_per_elem
-    # for why a per-tensor fraction was not enough and what an element with
-    # no usable bound gets instead.
-    for tc in slstm_cases:
-        tc["tol_s8_per_channel"], tc["tol_s8_floor_per_channel"] = \
-            compute_tol_s8_per_channel(tc, "s")
-        tc["tol_s8"] = max(tc["tol_s8_per_channel"])
-        tc["tol_s8_state"], tc["tol_s8_state_floor"] = \
-            compute_state_tol_per_elem(tc, "s")
-    for tc in mlstm_cases:
-        tc["tol_s8_per_channel"], tc["tol_s8_floor_per_channel"] = \
-            compute_tol_s8_per_channel(tc, "m")
-        tc["tol_s8"] = max(tc["tol_s8_per_channel"])
-        tc["tol_s8_state"], tc["tol_s8_state_floor"] = \
-            compute_state_tol_per_elem(tc, "m")
+    # Every INT8 bound and floor is derived here rather than hand-picked per
+    # case: two code reviews established that a case-wide constant cannot keep
+    # every channel's ratio below 1.0 when a case spans three orders of
+    # magnitude, and that an override list converges on 55-59 of 64 channels
+    # anyway. See the INT8 tolerance derivation section above.
+    for cases, cell in ((slstm_cases, "s"), (mlstm_cases, "m")):
+        for tc in cases:
+            tc["tol_s8_per_channel"], tc["tol_s8_floor_per_channel"] = \
+                compute_tol_s8_per_channel(tc, cell)
+            tc["tol_s8"] = max(tc["tol_s8_per_channel"])
+            tc["tol_s8_state"], tc["tol_s8_state_floor"] = \
+                compute_state_tol_per_elem(tc, cell)
 
     return slstm_cases, mlstm_cases, {"head2": head2_fused}
 
@@ -1353,38 +1230,31 @@ def _to_ints(a):
 def _s8_json_block(tc, cell):
     """The INT8 block generate_json attaches to every case.
 
-    Framework adapters reach the INT8 kernels with tensors that are
-    already quantized - the framework carries the scale and zero-point,
-    the adapter only unpacks them. Their integration tests are therefore
-    handed quantized inputs here rather than calibrating their own: it
-    keeps four harnesses free of quantizer code, and it removes the one
-    way they could disagree with the C kernel without either being wrong
-    (numpy's round-half-to-even vs C's roundf rounding a weight the other
-    way at an exact .5 tie).
+    Adapters reach the INT8 kernels with tensors the framework has already
+    quantized, so their integration tests are handed quantized inputs here
+    rather than calibrating their own. That keeps four harnesses free of
+    quantizer code and removes the one way they could disagree with the C
+    kernel without either being wrong (numpy's round-half-to-even against C's
+    roundf on an exact .5 tie).
 
-    expected_*_q are what the numpy replica above computes, which is what
-    the C kernel computes: measured across every case in this file the
-    two agree on every output, y, c/C and n integer exactly, and on m to
-    within float32 rounding. A harness asserts the raw integers and needs
-    no tolerance at all. tol_per_channel is carried alongside so a harness
-    can also state the weaker but more meaningful claim - dequantized INT8
-    output stays within the calibrated per-channel bound of the f32 golden
-    - using the same bounds test/{slstm,mlstm}_s8_test.cc assert against.
-    """
+    expected_*_q are the replica's integers, which are the kernel's: measured
+    over every case here they agree exactly on output, y, c/C and n, and on m
+    to within float32 rounding, so a harness asserts raw integers and needs no
+    tolerance. tol_per_channel rides along for the weaker but more meaningful
+    claim - dequantized output within the calibrated per-channel bound of the
+    f32 golden - against the same bounds the unit suites use."""
     H, T, I = tc["H"], tc["T"], tc["I"]
     x = _t2n(tc["input"]).reshape(1, T, I)
     W = _t2n(tc["W"])
     b = _t2n(tc["b"])
 
+    cal = _slstm_s8_calib(tc) if cell == "s" else _mlstm_s8_calib(tc)
+    _, _, _, _, q = _trace(tc, cell)
     if cell == "s":
-        cal = _slstm_s8_calib(tc)
-        _, _, _, _, q = _slstm_int8_trace(tc)
         R = _t2n(tc["R"]).reshape(4 * H, H)
         blk = {"R_q": _to_ints(_qs8(R, cal["R_scale"], 0)),
                "expected_c_q": _to_ints(q["c"])}
     else:
-        cal = _mlstm_s8_calib(tc)
-        _, _, _, _, q = _mlstm_int8_trace(tc)
         blk = {"expected_C_q": _to_ints(q["C"])}
 
     wx = cal["W_scale"] * cal["x_scale"]

@@ -9,9 +9,10 @@ VENV    := .venv/bin/python3
 # --- SIMD backend selection ---
 # XLSTM_SIMD: auto (default), ref, sse2, neon, esp, cortexm
 #
-# auto never picks esp or cortexm: both need a cross toolchain and neither
-# can run on the build host, so they are opt-in and are gated from their
-# cross-compiled harnesses rather than from `make test` here.
+# auto never picks esp or cortexm: both need a cross toolchain and neither can
+# run on the build host, so they are opt-in rather than part of `make test`.
+# cortexm is gated by test-cortexm below, cross-compiled and run under an
+# emulator; esp is gated from its own cross-compiled harness.
 XLSTM_SIMD ?= auto
 
 ifeq ($(XLSTM_SIMD),auto)
@@ -35,7 +36,7 @@ else
   endif
 endif
 
-.PHONY: all test simd-info test-ref test-sse2 test-neon reference clean \
+.PHONY: all test simd-info test-ref test-sse2 test-neon test-cortexm reference clean \
         test-docker-ort test-docker-tvm test-docker-tflm test-docker-espdl \
         bench bench-ref bench-sse2 perf perf-baseline \
         check-internal-refs
@@ -124,6 +125,39 @@ test-neon:
 	@qemu-aarch64 $(BUILD)/mlstm_test
 	@qemu-aarch64 $(BUILD)/slstm_s8_test
 	@qemu-aarch64 $(BUILD)/mlstm_s8_test
+
+# The cortexm backend's DSP arithmetic, on armv7-a under emulation. SXTAB16 and
+# SMLAD are ARMv6 DSP instructions that A-profile has too, so `armv7-a+fp`
+# satisfies the backend's __ARM_FEATURE_SIMD32 guard and runs the whole suite
+# with no board and no bare-metal harness. (+fp because a bare -march=armv7-a
+# drops the FPU this hard-float toolchain needs.)
+#
+# It gates the arithmetic - the SXTAB16 + SMLAD INT8 path and the blocked f32
+# path, against the same golden vectors as every other backend - and nothing
+# else. Green here is NOT a Cortex-M gate:
+#
+#   - Alignment. armv7-a Linux permits unaligned word access, so this build
+#     defines __ARM_FEATURE_UNALIGNED and takes the memcpy spelling of the INT8
+#     matvec's unaligned group load. The byte-assembly spelling that firmware
+#     built -mno-unaligned-access takes is never compiled here, and M-profile
+#     alignment behaviour is not exercised at all. Genuine blind spot.
+#   - Numerics on FPv5. XLSTM_FPU_HAS_MINMAX_ROUND resolves to 0 here (gcc
+#     defines no __ARM_FEATURE_NUMERIC_MAXMIN for armv7-a), so this runs the
+#     portable explicit min/max/round path, as a Cortex-M4 does. The vminnm /
+#     vrinta path M7 and M33 declare is not covered.
+#   - Timing. Emulated instruction execution says nothing about cycles.
+#
+# Build only, then invoke the emulator explicitly - same reason as test-neon.
+test-cortexm:
+	@$(MAKE) clean
+	@$(MAKE) $(TEST_BINS) XLSTM_SIMD=cortexm \
+		CC=arm-linux-gnueabihf-gcc CXX=arm-linux-gnueabihf-g++ \
+		CFLAGS="-std=c99 -O2 -Wall -Wextra -static -march=armv7-a+fp" \
+		CXXFLAGS="-std=c++17 -O2 -Wall -Wextra -static -march=armv7-a+fp"
+	@qemu-arm $(BUILD)/slstm_test
+	@qemu-arm $(BUILD)/mlstm_test
+	@qemu-arm $(BUILD)/slstm_s8_test
+	@qemu-arm $(BUILD)/mlstm_s8_test
 
 # --- Docker integration tests ---
 

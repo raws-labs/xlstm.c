@@ -43,10 +43,18 @@
 #include <stdint.h>
 #include <string.h>
 
+/* The requirement is the DSP extension, which is what __ARM_FEATURE_SIMD32
+ * declares - not a core. Cortex-M4/M7/M33 are what this backend is written
+ * for, but SXTAB16 and SMLAD are ARMv6 DSP instructions that A-profile also
+ * has, so -march=armv7-a satisfies the guard as well and runs the arithmetic
+ * under an emulator (make test-cortexm). That build gates the arithmetic
+ * only: it does not reproduce M-profile alignment behaviour, the
+ * -mno-unaligned-access load path, or anything about cycles. */
 #ifndef __ARM_FEATURE_SIMD32
 #error "XLSTM_SIMD=cortexm needs the DSP extension: build with -mcpu=cortex-m4," \
-       " cortex-m7 or cortex-m33 (plus -mthumb). Cortex-M0/M0+/M23 have no DSP" \
-       " extension at all - use XLSTM_SIMD=ref there."
+       " cortex-m7 or cortex-m33 (plus -mthumb), or -march=armv7-a+fp to run it" \
+       " under emulation. Cortex-M0/M0+/M23 have no DSP extension at all - use" \
+       " XLSTM_SIMD=ref there."
 #endif
 
 #include <arm_acle.h>

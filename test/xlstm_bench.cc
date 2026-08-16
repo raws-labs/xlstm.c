@@ -4,6 +4,12 @@
  *   make bench          # auto-detect SIMD backend
  *   make bench-ref      # force scalar reference
  *   make bench-sse2     # force SSE2
+ *
+ * Fixed-work mode, used by the performance gate (`make perf`):
+ *   xlstm_bench <kernel> <H> <steps>
+ * runs exactly one case for exactly <steps> steps and prints nothing. No
+ * calibration, no clock: the work done is a function of the arguments alone,
+ * so an instruction count taken over it is reproducible.
  * =========================================================================*/
 
 #include "xlstm.h"
@@ -84,7 +90,7 @@ double measure(Fn fn, int iters) {
 // Kernel benchmarks
 // ============================================================================
 
-static void bench_slstm_f32(int H) {
+static void bench_slstm_f32(int H, int steps) {
     const int I = H;
     float* W = (float*)malloc(4 * H * I * sizeof(float));
     float* R = (float*)malloc(4 * H * H * sizeof(float));
@@ -107,7 +113,7 @@ static void bench_slstm_f32(int H) {
         slstm_step_f32(x, W, R, b, y, c, n, m, scratch, I, H, &params);
     };
 
-    int iters = calibrate(step);
+    int iters = steps > 0 ? steps : calibrate(step);
     // Reset state for clean measurement
     memset(y, 0, H * sizeof(float));
     memset(c, 0, H * sizeof(float));
@@ -115,14 +121,15 @@ static void bench_slstm_f32(int H) {
     memset(m, 0, H * sizeof(float));
 
     double total = measure(step, iters);
-    printf("slstm_f32   %5d  %8d  %10.1f  %9.3f\n",
-           H, iters, total, total * 1000.0 / iters);
+    if (steps <= 0)
+        printf("slstm_f32   %5d  %8d  %10.1f  %9.3f\n",
+               H, iters, total, total * 1000.0 / iters);
 
     free(W); free(R); free(b); free(x);
     free(y); free(c); free(n); free(m); free(scratch);
 }
 
-static void bench_mlstm_f32(int H) {
+static void bench_mlstm_f32(int H, int steps) {
     const int I = H;
     const int Wrows = 4 * H + 2;
     float* W = (float*)malloc(Wrows * I * sizeof(float));
@@ -144,21 +151,22 @@ static void bench_mlstm_f32(int H) {
         mlstm_step_f32(x, W, b, y, C, n, &m_state, scratch, I, H, &params);
     };
 
-    int iters = calibrate(step);
+    int iters = steps > 0 ? steps : calibrate(step);
     memset(y, 0, H * sizeof(float));
     memset(C, 0, H * H * sizeof(float));
     memset(n, 0, H * sizeof(float));
     m_state = 0.0f;
 
     double total = measure(step, iters);
-    printf("mlstm_f32   %5d  %8d  %10.1f  %9.3f\n",
-           H, iters, total, total * 1000.0 / iters);
+    if (steps <= 0)
+        printf("mlstm_f32   %5d  %8d  %10.1f  %9.3f\n",
+               H, iters, total, total * 1000.0 / iters);
 
     free(W); free(b); free(x);
     free(y); free(C); free(n); free(scratch);
 }
 
-static void bench_slstm_s8(int H) {
+static void bench_slstm_s8(int H, int steps) {
     const int I = H;
     int8_t*  W_q = (int8_t*)malloc(4 * H * I);
     int8_t*  R_q = (int8_t*)malloc(4 * H * H);
@@ -188,21 +196,22 @@ static void bench_slstm_s8(int H) {
         slstm_step_s8(x, W_q, R_q, b_q, y, c, n, m, scratch, I, H, &params);
     };
 
-    int iters = calibrate(step);
+    int iters = steps > 0 ? steps : calibrate(step);
     memset(y, 0, H);
     memset(c, 0, H * sizeof(int16_t));
     memset(n, 0, H * sizeof(int16_t));
     memset(m, 0, H * sizeof(float));
 
     double total = measure(step, iters);
-    printf("slstm_s8    %5d  %8d  %10.1f  %9.3f\n",
-           H, iters, total, total * 1000.0 / iters);
+    if (steps <= 0)
+        printf("slstm_s8    %5d  %8d  %10.1f  %9.3f\n",
+               H, iters, total, total * 1000.0 / iters);
 
     free(W_q); free(R_q); free(b_q); free(x);
     free(y); free(c); free(n); free(m); free(scratch);
 }
 
-static void bench_mlstm_s8(int H) {
+static void bench_mlstm_s8(int H, int steps) {
     const int I = H;
     const int Wrows = 4 * H + 2;
     int8_t*  W_q = (int8_t*)malloc(Wrows * I);
@@ -230,15 +239,16 @@ static void bench_mlstm_s8(int H) {
         mlstm_step_s8(x, W_q, b_q, y, C, n, &m_state, scratch, I, H, &params);
     };
 
-    int iters = calibrate(step);
+    int iters = steps > 0 ? steps : calibrate(step);
     memset(y, 0, H);
     memset(C, 0, H * H * sizeof(int16_t));
     memset(n, 0, H * sizeof(int16_t));
     m_state = 0.0f;
 
     double total = measure(step, iters);
-    printf("mlstm_s8    %5d  %8d  %10.1f  %9.3f\n",
-           H, iters, total, total * 1000.0 / iters);
+    if (steps <= 0)
+        printf("mlstm_s8    %5d  %8d  %10.1f  %9.3f\n",
+               H, iters, total, total * 1000.0 / iters);
 
     free(W_q); free(b_q); free(x);
     free(y); free(C); free(n); free(scratch);
@@ -248,7 +258,21 @@ static void bench_mlstm_s8(int H) {
 // Main
 // ============================================================================
 
-int main() {
+int main(int argc, char** argv) {
+    // Fixed-work mode: `xlstm_bench <kernel> <H> <steps>`.
+    if (argc == 4) {
+        const char* k = argv[1];
+        const int H = atoi(argv[2]);
+        const int steps = atoi(argv[3]);
+        if (H < 1 || steps < 1) { fprintf(stderr, "bad H or steps\n"); return 2; }
+        if      (!strcmp(k, "slstm_f32")) bench_slstm_f32(H, steps);
+        else if (!strcmp(k, "mlstm_f32")) bench_mlstm_f32(H, steps);
+        else if (!strcmp(k, "slstm_s8"))  bench_slstm_s8(H, steps);
+        else if (!strcmp(k, "mlstm_s8"))  bench_mlstm_s8(H, steps);
+        else { fprintf(stderr, "unknown kernel: %s\n", k); return 2; }
+        return 0;
+    }
+
     const int sizes[] = {16, 32, 64, 128};
     const int nsizes = sizeof(sizes) / sizeof(sizes[0]);
 
@@ -257,10 +281,10 @@ int main() {
            "kernel", "H", "iters", "total_ms", "us/step");
     printf("------------------------------------------------------\n");
 
-    for (int i = 0; i < nsizes; i++) bench_slstm_f32(sizes[i]);
-    for (int i = 0; i < nsizes; i++) bench_mlstm_f32(sizes[i]);
-    for (int i = 0; i < nsizes; i++) bench_slstm_s8(sizes[i]);
-    for (int i = 0; i < nsizes; i++) bench_mlstm_s8(sizes[i]);
+    for (int i = 0; i < nsizes; i++) bench_slstm_f32(sizes[i], 0);
+    for (int i = 0; i < nsizes; i++) bench_mlstm_f32(sizes[i], 0);
+    for (int i = 0; i < nsizes; i++) bench_slstm_s8(sizes[i], 0);
+    for (int i = 0; i < nsizes; i++) bench_mlstm_s8(sizes[i], 0);
 
     return 0;
 }

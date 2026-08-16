@@ -37,7 +37,7 @@ endif
 
 .PHONY: all test simd-info test-ref test-sse2 test-neon reference clean \
         test-docker-ort test-docker-tvm test-docker-tflm test-docker-espdl \
-        bench bench-ref bench-sse2 \
+        bench bench-ref bench-sse2 perf perf-baseline \
         check-internal-refs
 
 all: $(BUILD)/slstm.o $(BUILD)/mlstm.o \
@@ -161,6 +161,151 @@ bench-ref:
 
 bench-sse2:
 	@$(MAKE) clean && $(MAKE) bench XLSTM_SIMD=sse2
+
+# --- Performance gate ---
+#
+# `bench` prints wall-clock, which a shared CI runner cannot reproduce closely
+# enough to fail a build on. This gate counts retired instructions instead:
+# callgrind with collection toggled on the kernel entry point, so the number is
+# that kernel's inclusive cost and nothing else - no process startup, no setup,
+# no timing calls. The same binary on the same input yields the same count on
+# every run, so a 2% move is signal.
+#
+# Limits, which are real and which a green run here does NOT cover:
+#   - Instructions are a proxy for time, not time. A change that leaves the
+#     count alone and worsens cache or memory behaviour passes this gate. That
+#     is not hypothetical: a change with identical instruction counts has cost
+#     10% on a Cortex-M part, and a smaller binary has measured slower.
+#   - Host backends only (ref, sse2). cortexm and esp performance is a property
+#     of those cores and is measured on hardware, not here.
+#
+# The kernels call expf/tanhf/logf, and glibc binds those to an FMA or a plain
+# SSE implementation depending on the CPU it finds. Measured, that choice alone
+# moves a count by up to 2.8%, which is enough to fail a tight gate on nothing
+# but a change of runner. Pinning the tunable to the implementations every
+# x86-64 has makes the count independent of which machine picked up the job.
+# The counts stay inclusive of libm, so trading a libm call for hand-rolled
+# arithmetic still scores as the win or loss it actually is.
+PERF_ENV := GLIBC_TUNABLES=glibc.cpu.hwcaps=-FMA,-AVX2,-AVX
+
+# Tolerance: instruction counts are exact for a given binary, so this covers
+# toolchain drift, not measurement noise. 2% is far tighter than any wall-clock
+# gate could hold, and still wide enough to survive a compiler point release.
+
+PERF_BASELINE := test/perf_baseline.txt
+PERF_BACKENDS ?= ref sse2
+PERF_KERNELS  ?= slstm_f32 mlstm_f32 slstm_s8 mlstm_s8
+PERF_WIDTHS   ?= 16 64
+PERF_STEPS    ?= 200
+PERF_TOL      ?= 2.0
+VALGRIND      ?= valgrind
+
+# Emit "backend kernel H steps instructions" for every case. Rebuilds the bench
+# once per backend; only xlstm_simd.o actually differs, but the objects are
+# cheap and a stale one would silently measure the wrong backend.
+define perf-measure
+	command -v $(VALGRIND) >/dev/null 2>&1 || { \
+		echo "perf: $(VALGRIND) not found - apt-get install valgrind" >&2; exit 1; }; \
+	for b in $(PERF_BACKENDS); do \
+		rm -f $(BUILD)/*.o $(BUILD)/xlstm_bench; \
+		$(MAKE) --no-print-directory $(BUILD)/xlstm_bench XLSTM_SIMD=$$b >/dev/null; \
+		for k in $(PERF_KERNELS); do \
+			sym=$${k%%_*}_step_$${k#*_}; \
+			for h in $(PERF_WIDTHS); do \
+				ir=$$($(PERF_ENV) $(VALGRIND) --tool=callgrind \
+					--callgrind-out-file=/dev/null \
+					--collect-atstart=no --toggle-collect=$$sym \
+					$(BUILD)/xlstm_bench $$k $$h $(PERF_STEPS) 2>&1 \
+					| sed -n 's/.*Collected *: *//p'); \
+				test -n "$$ir" || { echo "perf: no count for $$b $$k $$h" >&2; exit 1; }; \
+				echo "$$b $$k $$h $(PERF_STEPS) $$ir"; \
+			done; \
+		done; \
+	done
+endef
+
+# The recorded toolchain is load-bearing, not decorative. gcc and clang differ
+# by up to 50% on these loops, so comparing across them measures the compiler
+# and not the change. Worse, clang against a gcc baseline reads as "faster
+# everywhere" and passes - a gate that cannot fail. Refuse rather than mislead.
+perf:
+	@mkdir -p $(BUILD)
+	@rec=$$(sed -n 's/^# toolchain: //p' $(PERF_BASELINE)); \
+	cur=$$($(CC) --version | head -1); \
+	if [ "$$rec" != "$$cur" ]; then \
+		echo "perf: toolchain differs from the one the baseline was recorded with."; \
+		echo "  baseline: $$rec"; \
+		echo "  current:  $$cur"; \
+		echo "Counts are compiler-specific, so this comparison would not mean anything."; \
+		echo "Build with the recorded compiler, or re-record with: make perf-baseline"; \
+		exit 1; \
+	fi
+	@$(perf-measure) > $(BUILD)/perf.txt
+	@awk -v tol=$(PERF_TOL) ' \
+	BEGIN { \
+	  printf "%-7s %-10s %4s %6s %14s %14s %9s\n", \
+	    "backend","kernel","H","steps","baseline","current","delta"; \
+	  printf "%s\n", "---------------------------------------------------------------------------"; \
+	} \
+	NR == FNR { if (NF == 5 && $$1 !~ /^#/) base[$$1" "$$2" "$$3" "$$4] = $$5; next } \
+	{ \
+	  key = $$1" "$$2" "$$3" "$$4; \
+	  if (!(key in base)) { \
+	    printf "%-7s %-10s %4s %6s %14s %14d    NO BASELINE\n", $$1,$$2,$$3,$$4,"-",$$5; \
+	    fail = 1; next; \
+	  } \
+	  seen[key] = 1; d = 100.0 * ($$5 - base[key]) / base[key]; \
+	  tag = (d > tol) ? "  REGRESSED" : ((d < -tol) ? "  faster" : ""); \
+	  if (d > tol) fail = 1; \
+	  printf "%-7s %-10s %4s %6s %14d %14d %+8.2f%%%s\n", \
+	    $$1,$$2,$$3,$$4,base[key],$$5,d,tag; \
+	} \
+	END { \
+	  for (k in base) if (!(k in seen)) { printf "not measured: %s\n", k; fail = 1 } \
+	  printf "\ninstructions (callgrind Ir), tolerance +%s%%\n", tol; \
+	  printf "proxy for time, blind to cache behaviour; host backends only,\n"; \
+	  printf "not cortexm or esp - those are measured on hardware.\n"; \
+	  if (fail) { \
+	    printf "\nperf: FAILED - regression beyond tolerance, or baseline out of sync.\n"; \
+	    printf "If the change is deliberate, re-record with: make perf-baseline\n"; \
+	    exit 1; \
+	  } \
+	  printf "\nperf: OK\n"; \
+	}' $(PERF_BASELINE) $(BUILD)/perf.txt
+
+# Deliberate, reviewable baseline update: one line per case, so a legitimate
+# change shows up as a readable diff rather than an opaque blob.
+perf-baseline:
+	@mkdir -p $(BUILD)
+	@$(perf-measure) > $(BUILD)/perf.txt
+	@{ \
+	  echo "# xlstm.c performance baseline - retired instruction counts (callgrind Ir)."; \
+	  echo "#"; \
+	  echo "# Regenerate deliberately with:  make perf-baseline"; \
+	  echo "# Checked by:                    make perf   (tolerance +$(PERF_TOL)%)"; \
+	  echo "#"; \
+	  echo "# Counts are the inclusive cost of one kernel entry point over $(PERF_STEPS) steps,"; \
+	  echo "# collection toggled on that symbol alone. Exact and reproducible for a given"; \
+	  echo "# binary, so any movement here is a real change in work done, not noise."; \
+	  echo "#"; \
+	  echo "# These numbers describe the HOST backends only. They say nothing about cortexm"; \
+	  echo "# or esp, whose performance is a property of those cores and is measured on"; \
+	  echo "# hardware. They are also a proxy for time and not time itself: a change that"; \
+	  echo "# holds the instruction count and worsens cache locality does not appear here."; \
+	  echo "#"; \
+	  echo "# Counts are specific to the compiler that produced them - gcc and clang differ"; \
+	  echo "# by up to 50% on these loops - so make perf refuses to compare across a change"; \
+	  echo "# of toolchain. The line below is what it checks."; \
+	  echo "#"; \
+	  echo "# toolchain: $$($(CC) --version | head -1)"; \
+	  echo "# valgrind:  $$($(VALGRIND) --version 2>/dev/null)"; \
+	  echo "# libm:      $(PERF_ENV)"; \
+	  echo "#"; \
+	  echo "# backend kernel     H steps    instructions"; \
+	  cat $(BUILD)/perf.txt; \
+	} > $(PERF_BASELINE)
+	@echo "wrote $(PERF_BASELINE):"
+	@grep -v '^#' $(PERF_BASELINE)
 
 # --- Reference data ---
 

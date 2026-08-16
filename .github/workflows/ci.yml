@@ -42,6 +42,33 @@ jobs:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cxx }}
 
+  # Efficiency is what this library is for, so a speed regression has to be able
+  # to fail a build. Wall-clock on a shared runner cannot do that job - it varies
+  # far more than the regressions worth catching - so the gate counts retired
+  # instructions under callgrind instead, which is exact and repeatable.
+  #
+  # Pinned to ubuntu-24.04 rather than ubuntu-latest on purpose: the counts are
+  # specific to the compiler that produced them, and `ubuntu-latest` silently
+  # moving to a new image would change gcc under the baseline. make perf checks
+  # the toolchain against the one recorded in test/perf_baseline.txt and refuses
+  # to compare across a mismatch, so an image bump fails loudly and is fixed by
+  # re-recording, rather than quietly measuring the compiler instead of the code.
+  #
+  # Host backends only. This says nothing about cortexm or esp performance.
+  perf:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends valgrind
+      - name: Instruction-count gate
+        run: make perf
+        env:
+          CC: gcc
+          CXX: g++
+
   # ARM NEON, cross-compiled and executed under emulation. This is the only
   # non-x86 backend the suite can execute, so it is the one gate that catches
   # ISA-specific defects (loop tails, alignment, accumulator width) before they

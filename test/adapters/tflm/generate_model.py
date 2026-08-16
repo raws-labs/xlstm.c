@@ -366,18 +366,33 @@ def main():
     dims_s = (st1["B"], st1["T"], st1["I"], st1["H"])
     dims_m = (mt1["B"], mt1["T"], mt1["I"], mt1["H"])
 
+    # test5 is H=8, T=3: the INT8 gate needs a case big enough that a small
+    # numerical drift actually moves an output integer, and one with more
+    # than a single timestep. Measured: a 1.002x drift in the kernel's
+    # pre-requantization y leaves every test1 integer unchanged but moves
+    # test5's, so a suite carrying only test1 would pass a regression that
+    # the ONNX Runtime and microTVM suites catch.
+    st5 = ref["slstm"]["test5"]
+    mt5 = ref["mlstm"]["test5"]
+    dims_s5 = (st5["B"], st5["T"], st5["I"], st5["H"])
+    dims_m5 = (mt5["B"], mt5["T"], mt5["I"], mt5["H"])
+
     for bytes_, var in [
         (generate_slstm_model(*dims_s), "slstm_model_data"),
         (generate_mlstm_model(*dims_m), "mlstm_model_data"),
         (generate_slstm_s8_model(*dims_s, st1["s8"]), "slstm_s8_model_data"),
         (generate_mlstm_s8_model(*dims_m, mt1["s8"]), "mlstm_s8_model_data"),
+        (generate_slstm_s8_model(*dims_s5, st5["s8"]), "slstm_s8_big_model_data"),
+        (generate_mlstm_s8_model(*dims_m5, mt5["s8"]), "mlstm_s8_big_model_data"),
     ]:
         write_header(bytes_, var, os.path.join(SCRIPT_DIR, var + ".h"))
 
     path = os.path.join(SCRIPT_DIR, "s8_case_data.h")
     with open(path, "w") as f:
         f.write(generate_s8_case_header([("kS8Test1", "s", st1["s8"]),
-                                         ("kMS8Test1", "m", mt1["s8"])]))
+                                         ("kMS8Test1", "m", mt1["s8"]),
+                                         ("kS8Test5", "s", st5["s8"]),
+                                         ("kMS8Test5", "m", mt5["s8"])]))
     print(f"Wrote {path}")
 
 

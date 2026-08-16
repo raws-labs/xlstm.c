@@ -20,6 +20,8 @@
 #include "mlstm_model_data.h"
 #include "slstm_s8_model_data.h"
 #include "mlstm_s8_model_data.h"
+#include "slstm_s8_big_model_data.h"
+#include "mlstm_s8_big_model_data.h"
 #include "reference_data.h"
 #include "s8_case_data.h"
 
@@ -180,13 +182,36 @@ bool TestMLstmSingleTimestep() {
 }
 
 // ---------------------------------------------------------------------------
-// sLSTM INT8: same case, quantized model. Exercises the kTfLiteInt8 branch
-// of SLstmEval and the scale/zero-point unpacking behind it.
+// INT8 cases. Both cells run test1 (H=2, T=1) and test5 (H=8, T=3): test1
+// alone leaves the gate blind to small numerical drift, since a change too
+// small to move a 2-channel single-timestep integer still moves test5's.
 // ---------------------------------------------------------------------------
-bool TestSLstmInt8() {
-    const tflite::Model* model = tflite::GetModel(slstm_s8_model_data);
+struct SLstmS8Case {
+    const char* name;
+    const unsigned char* model;
+    int T, I, H;
+    const int8_t *x_q, *W_q, *R_q;
+    const int32_t* b_q;
+    const int8_t *out_q, *y_q;
+    const int16_t *c_q, *n_q;
+    const float* m;
+};
+
+struct MLstmS8Case {
+    const char* name;
+    const unsigned char* model;
+    int T, I, H;
+    const int8_t *x_q, *W_q;
+    const int32_t* b_q;
+    const int8_t *out_q, *y_q;
+    const int16_t *C_q, *n_q;
+    const float* m;
+};
+
+bool RunSLstmS8(const SLstmS8Case& tc) {
+    const tflite::Model* model = tflite::GetModel(tc.model);
     if (model->version() != TFLITE_SCHEMA_VERSION) {
-        printf("  Model schema version mismatch\n");
+        printf("  %s: model schema version mismatch\n", tc.name);
         return false;
     }
 
@@ -196,53 +221,43 @@ bool TestSLstmInt8() {
 
     tflite::MicroInterpreter interpreter(model, resolver, arena, kArenaSize);
     if (interpreter.AllocateTensors() != kTfLiteOk) {
-        printf("  AllocateTensors failed\n");
+        printf("  %s: AllocateTensors failed\n", tc.name);
         return false;
     }
-
-    // B=1, T=1, I=2, H=2
-    const int H = 2, T = 1, I = 2;
-
     if (interpreter.input(0)->type != kTfLiteInt8) {
-        printf("  input tensor is not INT8 - model is not quantized\n");
+        printf("  %s: input tensor is not INT8 - model is not quantized\n", tc.name);
         return false;
     }
 
-    FillQuantTensor(interpreter.input(0), kS8Test1_x_q, T * I);
-    FillQuantTensor(interpreter.input(1), kS8Test1_W_q, 4 * H * I);
-    FillQuantTensor(interpreter.input(2), kS8Test1_R_q, 4 * H * H);
-    FillQuantTensor(interpreter.input(3), kS8Test1_b_q, 4 * H);
+    const int H = tc.H;
+    FillQuantTensor(interpreter.input(0), tc.x_q, tc.T * tc.I);
+    FillQuantTensor(interpreter.input(1), tc.W_q, 4 * H * tc.I);
+    FillQuantTensor(interpreter.input(2), tc.R_q, 4 * H * H);
+    FillQuantTensor(interpreter.input(3), tc.b_q, 4 * H);
     ZeroQuantTensor(interpreter.input(4), H, sizeof(int8_t));
     ZeroQuantTensor(interpreter.input(5), H, sizeof(int16_t));
     ZeroQuantTensor(interpreter.input(6), H, sizeof(int16_t));
     ZeroQuantTensor(interpreter.input(7), H, sizeof(float));
 
     if (interpreter.Invoke() != kTfLiteOk) {
-        printf("  Invoke failed\n");
+        printf("  %s: Invoke failed\n", tc.name);
         return false;
     }
 
-    bool ok = ExpectExact("output", kS8Test1_expected_output_q,
-                          interpreter.output(0)->data.int8, T * H);
-    ok &= ExpectExact("y", kS8Test1_expected_y_q,
-                      interpreter.input(4)->data.int8, H);
-    ok &= ExpectExact("c", kS8Test1_expected_c_q,
-                      interpreter.input(5)->data.i16, H);
-    ok &= ExpectExact("n", kS8Test1_expected_n_q,
-                      interpreter.input(6)->data.i16, H);
+    bool ok = ExpectExact("output", tc.out_q, interpreter.output(0)->data.int8, tc.T * H);
+    ok &= ExpectExact("y", tc.y_q, interpreter.input(4)->data.int8, H);
+    ok &= ExpectExact("c", tc.c_q, interpreter.input(5)->data.i16, H);
+    ok &= ExpectExact("n", tc.n_q, interpreter.input(6)->data.i16, H);
     // m is the log-space stabilizer: float32 even on the INT8 path.
-    ok &= ExpectNear("m", kS8Test1_expected_m,
-                     interpreter.input(7)->data.f, H, 1e-5f);
+    ok &= ExpectNear("m", tc.m, interpreter.input(7)->data.f, H, 1e-5f);
+    if (!ok) printf("  (case %s)\n", tc.name);
     return ok;
 }
 
-// ---------------------------------------------------------------------------
-// mLSTM INT8: as above, through the kTfLiteInt8 branch of MLstmEval.
-// ---------------------------------------------------------------------------
-bool TestMLstmInt8() {
-    const tflite::Model* model = tflite::GetModel(mlstm_s8_model_data);
+bool RunMLstmS8(const MLstmS8Case& tc) {
+    const tflite::Model* model = tflite::GetModel(tc.model);
     if (model->version() != TFLITE_SCHEMA_VERSION) {
-        printf("  Model schema version mismatch\n");
+        printf("  %s: model schema version mismatch\n", tc.name);
         return false;
     }
 
@@ -252,41 +267,60 @@ bool TestMLstmInt8() {
 
     tflite::MicroInterpreter interpreter(model, resolver, arena, kArenaSize);
     if (interpreter.AllocateTensors() != kTfLiteOk) {
-        printf("  AllocateTensors failed\n");
+        printf("  %s: AllocateTensors failed\n", tc.name);
         return false;
     }
-
-    // B=1, T=1, I=3, H=2
-    const int H = 2, T = 1, I = 3;
-
     if (interpreter.input(0)->type != kTfLiteInt8) {
-        printf("  input tensor is not INT8 - model is not quantized\n");
+        printf("  %s: input tensor is not INT8 - model is not quantized\n", tc.name);
         return false;
     }
 
-    FillQuantTensor(interpreter.input(0), kMS8Test1_x_q, T * I);
-    FillQuantTensor(interpreter.input(1), kMS8Test1_W_q, (4 * H + 2) * I);
-    FillQuantTensor(interpreter.input(2), kMS8Test1_b_q, 4 * H + 2);
+    const int H = tc.H;
+    FillQuantTensor(interpreter.input(0), tc.x_q, tc.T * tc.I);
+    FillQuantTensor(interpreter.input(1), tc.W_q, (4 * H + 2) * tc.I);
+    FillQuantTensor(interpreter.input(2), tc.b_q, 4 * H + 2);
     ZeroQuantTensor(interpreter.input(3), H, sizeof(int8_t));
     ZeroQuantTensor(interpreter.input(4), H * H, sizeof(int16_t));
     ZeroQuantTensor(interpreter.input(5), H, sizeof(int16_t));
     ZeroQuantTensor(interpreter.input(6), 1, sizeof(float));
 
     if (interpreter.Invoke() != kTfLiteOk) {
-        printf("  Invoke failed\n");
+        printf("  %s: Invoke failed\n", tc.name);
         return false;
     }
 
-    bool ok = ExpectExact("output", kMS8Test1_expected_output_q,
-                          interpreter.output(0)->data.int8, T * H);
-    ok &= ExpectExact("y", kMS8Test1_expected_y_q,
-                      interpreter.input(3)->data.int8, H);
-    ok &= ExpectExact("C", kMS8Test1_expected_C_q,
-                      interpreter.input(4)->data.i16, H * H);
-    ok &= ExpectExact("n", kMS8Test1_expected_n_q,
-                      interpreter.input(5)->data.i16, H);
-    ok &= ExpectNear("m", kMS8Test1_expected_m,
-                     interpreter.input(6)->data.f, 1, 1e-5f);
+    bool ok = ExpectExact("output", tc.out_q, interpreter.output(0)->data.int8, tc.T * H);
+    ok &= ExpectExact("y", tc.y_q, interpreter.input(3)->data.int8, H);
+    ok &= ExpectExact("C", tc.C_q, interpreter.input(4)->data.i16, H * H);
+    ok &= ExpectExact("n", tc.n_q, interpreter.input(5)->data.i16, H);
+    ok &= ExpectNear("m", tc.m, interpreter.input(6)->data.f, 1, 1e-5f);
+    if (!ok) printf("  (case %s)\n", tc.name);
+    return ok;
+}
+
+#define SLSTM_S8_CASE(nm, model, T, I, H, p)                              \
+    SLstmS8Case{nm, model, T, I, H, p##_x_q, p##_W_q, p##_R_q, p##_b_q,   \
+                p##_expected_output_q, p##_expected_y_q,                  \
+                p##_expected_c_q, p##_expected_n_q, p##_expected_m}
+
+#define MLSTM_S8_CASE(nm, model, T, I, H, p)                              \
+    MLstmS8Case{nm, model, T, I, H, p##_x_q, p##_W_q, p##_b_q,            \
+                p##_expected_output_q, p##_expected_y_q,                  \
+                p##_expected_C_q, p##_expected_n_q, p##_expected_m}
+
+bool TestSLstmInt8() {
+    bool ok = RunSLstmS8(SLSTM_S8_CASE("slstm test1", slstm_s8_model_data,
+                                       1, 2, 2, kS8Test1));
+    ok &= RunSLstmS8(SLSTM_S8_CASE("slstm test5", slstm_s8_big_model_data,
+                                   3, 8, 8, kS8Test5));
+    return ok;
+}
+
+bool TestMLstmInt8() {
+    bool ok = RunMLstmS8(MLSTM_S8_CASE("mlstm test1", mlstm_s8_model_data,
+                                       1, 3, 2, kMS8Test1));
+    ok &= RunMLstmS8(MLSTM_S8_CASE("mlstm test5", mlstm_s8_big_model_data,
+                                   3, 8, 8, kMS8Test5));
     return ok;
 }
 

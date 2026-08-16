@@ -19,7 +19,11 @@ extern "C" {
 
 namespace {
 
-/* Extract DLTensor* handles from TVMArgs and repack as kTVMDLTensorHandle. */
+/* Extract DLTensor* handles from TVMArgs and repack as kTVMDLTensorHandle.
+ *
+ * The quantized entry points take scalar scale/zero-point args after the
+ * tensors. Those are not NDArrays and must be forwarded untouched -
+ * converting them would reinterpret a double as a pointer. */
 void RepackAsDLTensor(tvm::runtime::TVMArgs args,
                       std::vector<TVMValue>& values,
                       std::vector<int>& type_codes) {
@@ -27,6 +31,12 @@ void RepackAsDLTensor(tvm::runtime::TVMArgs args,
     values.resize(n);
     type_codes.resize(n);
     for (int i = 0; i < n; i++) {
+        int code = args.type_codes[i];
+        if (code == kTVMArgFloat || code == kTVMArgInt) {
+            values[i] = args.values[i];
+            type_codes[i] = code;
+            continue;
+        }
         DLTensor* t = args[i].operator DLTensor*();
         values[i].v_handle = t;
         type_codes[i] = kTVMDLTensorHandle;

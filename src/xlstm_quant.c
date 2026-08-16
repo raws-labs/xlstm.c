@@ -62,6 +62,20 @@ void xlstm_quant_asymmetric(const float* data, int len, XlstmQuantParam* out) {
     out->zero_point = zp;
 }
 
+void xlstm_quant_symmetric_s16(const float* data, int len, float headroom,
+                                XlstmQuantParam* out) {
+    int i;
+    float max_abs = 0.0f;
+
+    for (i = 0; i < len; ++i) {
+        float a = fabsf(data[i]);
+        if (a > max_abs) max_abs = a;
+    }
+
+    out->scale = (max_abs > 0.0f) ? (max_abs * headroom / 32767.0f) : 1.0f;
+    out->zero_point = 0;
+}
+
 void xlstm_quantize_f32_to_s8(const float* src, int8_t* dst, int len,
                                const XlstmQuantParam* qp) {
     int i;

@@ -52,35 +52,20 @@ static void DeriveScales(const float* W, int w_len,
     xlstm_quant_asymmetric(x, x_len, x_qp);
 }
 
-/* Symmetric calibration at INT16 granularity (max_abs * headroom / 32767,
- * zero_point 0). c/n/C are stored as int16_t and the kernels read/write
- * them as strictly symmetric (no zero-point term anywhere in
- * slstm_s8.c/mlstm_s8.c) - xlstm_quant_asymmetric's scale = range/255 and
- * non-zero zero_point are an INT8-shaped calibration silently misapplied
- * to a 16-bit, symmetric tensor. That throws away about 7 bits of the
- * available range and was inflating every INT8-vs-f32 error this task
- * measures. xlstm_quant.c's existing functions are untouched; this is a
- * local, test-only helper.
+/* c/n/C are INT16 and strictly symmetric, so they are calibrated with
+ * xlstm_quant_symmetric_s16 (see its comment in include/xlstm_quant.h for
+ * why xlstm_quant_asymmetric is the wrong tool for them). It used to be a
+ * local copy here; it moved into the shared quant layer because the
+ * framework adapter integration tests need the identical calibration and
+ * a third hand-synchronized copy is one too many.
  *
  * headroom exists because calibrating from a single final-state snapshot
  * (all reference_data.h stores) can badly undershoot the true mid-
  * sequence trajectory peak: measured up to 6.2x for mLSTM SweepM1's n and
- * 3.4x for SweepM8's C (see kStateHeadroom below
- * the full per-case ratio table). Pass 1.0f for no headroom (weights/
- * inputs use plain xlstm_quant_symmetric/asymmetric instead and never
- * call this with headroom != kStateHeadroom). */
-static void QuantSymmetricS16(const float* data, int len, float headroom,
-                               XlstmQuantParam* out) {
-    float max_abs = 0.0f;
-    for (int i = 0; i < len; ++i) {
-        float a = std::abs(data[i]);
-        if (a > max_abs) max_abs = a;
-    }
-    out->scale = (max_abs > 0.0f) ? (max_abs * headroom / 32767.0f) : 1.0f;
-    out->zero_point = 0;
-}
-
-/* Headroom multiplier for c_quant/n_quant (sLSTM) and n_quant/C_quant
+ * 3.4x for SweepM8's C (see kStateHeadroom below for the full per-case
+ * ratio table).
+ *
+ * Headroom multiplier for c_quant/n_quant (sLSTM) and n_quant/C_quant
  * (mLSTM). Chosen from measurement, not trial: swept 1x-16x across every
  * case in reference_data.h and picked the point where the worst affected
  * case (mLSTM SweepM8, true/final ratio 3.37x for C) plateaus at its
@@ -117,7 +102,7 @@ static_assert(kStateHeadroom == XLSTM_GENERATOR_HEADROOM,
  * 0.01 scale independent of H saturates the INT8 y range once H grows
  * past a couple dozen. y is INT8 (asymmetric, 255 levels); c and n are
  * INT16 and consumed as strictly symmetric by the kernel, so they are
- * calibrated with QuantSymmetricS16 above, not xlstm_quant_asymmetric. */
+ * calibrated with xlstm_quant_symmetric_s16, not xlstm_quant_asymmetric. */
 static void PrepareS8(const XlstmRefCase* tc, SlstmS8Setup* s) {
     const int H = tc->H, T = tc->T, I = tc->I;
 
@@ -145,7 +130,7 @@ static void PrepareS8(const XlstmRefCase* tc, SlstmS8Setup* s) {
     int y_cal_len = tc->expected_output ? T * H : H;
     xlstm_quant_asymmetric(y_cal, y_cal_len, &s->params.y_quant);
 
-    QuantSymmetricS16(tc->expected_n, H, kStateHeadroom, &s->params.n_quant);
+    xlstm_quant_symmetric_s16(tc->expected_n, H, kStateHeadroom, &s->params.n_quant);
 
     /* expected_state (c) is normally present, but store_state is a
      * generic per-case emitter flag, not an sLSTM-specific guarantee -
@@ -157,7 +142,7 @@ static void PrepareS8(const XlstmRefCase* tc, SlstmS8Setup* s) {
      * reuse n's already-calibrated scale with no extra multiplier. This
      * path is not currently exercised by any case in reference_data.h. */
     if (tc->expected_state) {
-        QuantSymmetricS16(tc->expected_state, H, kStateHeadroom, &s->params.c_quant);
+        xlstm_quant_symmetric_s16(tc->expected_state, H, kStateHeadroom, &s->params.c_quant);
     } else {
         s->params.c_quant.scale = s->params.n_quant.scale;
         s->params.c_quant.zero_point = 0;

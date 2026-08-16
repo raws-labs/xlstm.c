@@ -43,6 +43,24 @@ void xlstm_quant_symmetric(const float* data, int len, XlstmQuantParam* out);
  * Range is expanded to include zero for proper zero-padding support. */
 void xlstm_quant_asymmetric(const float* data, int len, XlstmQuantParam* out);
 
+/* Compute symmetric quant params at INT16 granularity (scale =
+ * max_abs * headroom / 32767, zero_point 0).
+ *
+ * Use this - not xlstm_quant_asymmetric - for the INT16 state tensors
+ * (sLSTM c/n, mLSTM C/n). Those are read and written as strictly
+ * symmetric: no zero-point term appears anywhere in slstm_s8.c or
+ * mlstm_s8.c. Calibrating them with range/255 and a non-zero zero_point
+ * is an INT8-shaped calibration applied to a 16-bit symmetric tensor and
+ * throws away roughly 7 bits of the available range.
+ *
+ * headroom > 1 widens the scale so a state trajectory that peaks above
+ * the calibration sample does not clip. Calibrating from a single
+ * end-of-sequence snapshot can undershoot the true mid-sequence peak by
+ * several times; 4.0 is the value the correctness gate is calibrated
+ * against. Pass 1.0 for no headroom. */
+void xlstm_quant_symmetric_s16(const float* data, int len, float headroom,
+                                XlstmQuantParam* out);
+
 /* Quantize/dequantize helpers */
 void xlstm_quantize_f32_to_s8(const float* src, int8_t* dst, int len,
                                const XlstmQuantParam* qp);

@@ -45,6 +45,12 @@ enum MLstmOutputIndex {
 };
 
 // OpData structure for scratch buffers and precomputed values
+//
+// The INT8 path uses the same tensor indices as the float path. Only the
+// tensor types differ: X/W/y/output are kTfLiteInt8, b is kTfLiteInt32,
+// C/n are kTfLiteInt16, and m stays kTfLiteFloat32 - the log-space
+// stabilizer is not quantized. Scale and zero-point come from each
+// tensor's own TfLiteQuantizationParams; nothing is calibrated here.
 struct OpDataMLstm {
     int scratch_buffer_index;  // For gate computations [4*hidden+2]
 

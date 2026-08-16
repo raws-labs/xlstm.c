@@ -44,30 +44,17 @@ static void DeriveScales(const float* W, int w_len, const float* x, int x_len,
     xlstm_quant_asymmetric(x, x_len, x_qp);
 }
 
-/* Symmetric calibration at INT16 granularity (max_abs * headroom / 32767,
- * zero_point 0) - see the longer explanation in slstm_s8_test.cc. n and C
- * are stored as int16_t and read/written as strictly symmetric by
- * mlstm_s8.c (no zero-point term anywhere), so xlstm_quant_asymmetric's
- * range/255 + non-zero zero_point was an INT8-shaped calibration
- * misapplied to a 16-bit symmetric tensor.
+/* n and C are INT16 and read/written as strictly symmetric by mlstm_s8.c
+ * (no zero-point term anywhere), so they are calibrated with
+ * xlstm_quant_symmetric_s16 - see its comment in include/xlstm_quant.h.
  *
  * headroom exists because calibrating from a single final-state snapshot
  * (all reference_data.h stores) can badly undershoot the true mid-
  * sequence trajectory peak - measured up to 6.2x for SweepM1's n and
- * 3.4x for SweepM8's C. See kStateHeadroom below
- * the full per-case ratio table and how 4x was chosen. */
-static void QuantSymmetricS16(const float* data, int len, float headroom,
-                               XlstmQuantParam* out) {
-    float max_abs = 0.0f;
-    for (int i = 0; i < len; ++i) {
-        float a = std::abs(data[i]);
-        if (a > max_abs) max_abs = a;
-    }
-    out->scale = (max_abs > 0.0f) ? (max_abs * headroom / 32767.0f) : 1.0f;
-    out->zero_point = 0;
-}
-
-/* Headroom multiplier for n_quant/C_quant - see the fuller justification
+ * 3.4x for SweepM8's C. See kStateHeadroom below for the full per-case
+ * ratio table and how 4x was chosen.
+ *
+ * Headroom multiplier for n_quant/C_quant - see the fuller justification
  * next to slstm_s8_test.cc's copy of this constant. Chosen from a sweep
  * across every case in reference_data.h: SweepM8's error (this task's
  * worst-affected case, C's true/final ratio 3.37x) plateaus at its
@@ -96,7 +83,7 @@ static_assert(kStateHeadroom == XLSTM_GENERATOR_HEADROOM,
  * fixed literal - see the calibration note below for what
  * this oracle-calibrated setup does and does not demonstrate. y is INT8
  * (asymmetric); C and n are INT16 and consumed as strictly symmetric by
- * the kernel, so they use QuantSymmetricS16 above, not
+ * the kernel, so they use xlstm_quant_symmetric_s16, not
  * xlstm_quant_asymmetric.
  *
  * Every case in reference_data.h now stores the full C matrix
@@ -128,10 +115,10 @@ static void PrepareMlstmS8(const XlstmRefCase* tc, MlstmS8Setup* s) {
     const float* y_cal = tc->expected_output ? tc->expected_output : tc->expected_y;
     int y_cal_len = tc->expected_output ? T * H : H;
     xlstm_quant_asymmetric(y_cal, y_cal_len, &s->params.y_quant);
-    QuantSymmetricS16(tc->expected_n, H, kStateHeadroom, &s->params.n_quant);
+    xlstm_quant_symmetric_s16(tc->expected_n, H, kStateHeadroom, &s->params.n_quant);
 
     if (tc->expected_state) {
-        QuantSymmetricS16(tc->expected_state, H * H, kStateHeadroom, &s->params.C_quant);
+        xlstm_quant_symmetric_s16(tc->expected_state, H * H, kStateHeadroom, &s->params.C_quant);
     } else {
         s->params.C_quant.scale = s->params.n_quant.scale;
         s->params.C_quant.zero_point = 0;

@@ -18,6 +18,7 @@
 #include "slstm_tflm.h"
 
 #include "slstm.h"
+#include "slstm_s8.h"
 
 #include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
@@ -26,6 +27,16 @@
 
 namespace tflite {
 namespace {
+
+// TFLM carries per-tensor quantization on the tensor itself, so lifting it
+// into the kernel's own param struct is the whole of the adapter's
+// quantization work. Nothing is calibrated or rescaled here.
+XlstmQuantParam QuantOf(const TfLiteTensor* tensor) {
+    XlstmQuantParam qp;
+    qp.scale = tensor->params.scale;
+    qp.zero_point = tensor->params.zero_point;
+    return qp;
+}
 
 void* SLstmInit(TfLiteContext* context, const char* buffer, size_t length) {
     TFLITE_DCHECK(context->AllocatePersistentBuffer != nullptr);
@@ -59,10 +70,15 @@ TfLiteStatus SLstmPrepare(TfLiteContext* context, TfLiteNode* node) {
 
     op_data->cell_clip = 0.0f;
 
+    // Gate accumulators: float on the f32 path, int32 on the INT8 one.
+    // Sized for the wider of the two so Prepare does not have to care which
+    // Eval will run.
+    const size_t elem = sizeof(float) > sizeof(int32_t) ? sizeof(float)
+                                                        : sizeof(int32_t);
     TF_LITE_ENSURE_OK(
         context,
         context->RequestScratchBufferInArena(
-            context, 4 * op_data->hidden_size * sizeof(float),
+            context, 4 * op_data->hidden_size * elem,
             &op_data->scratch_buffer_index));
 
     return kTfLiteOk;
@@ -131,6 +147,84 @@ TfLiteStatus SLstmEvalFloat(TfLiteContext* context, TfLiteNode* node,
     return kTfLiteOk;
 }
 
+TfLiteStatus SLstmEvalInt8(TfLiteContext* context, TfLiteNode* node,
+                           const OpDataSLstm* op_data) {
+    MicroContext* micro_context = GetMicroContext(context);
+
+    // Unpack tensors - same indices as the float path, quantized types
+    TfLiteTensor* input =
+        micro_context->AllocateTempInputTensor(node, kSLstmInputTensor);
+    TfLiteTensor* input_weights =
+        micro_context->AllocateTempInputTensor(node, kSLstmInputWeightsTensor);
+    TfLiteTensor* recurrent_weights =
+        micro_context->AllocateTempInputTensor(node, kSLstmRecurrentWeightsTensor);
+    TfLiteTensor* bias =
+        micro_context->AllocateTempInputTensor(node, kSLstmBiasTensor);
+    TfLiteTensor* hidden_state =
+        micro_context->AllocateTempInputTensor(node, kSLstmHiddenStateTensor);
+    TfLiteTensor* cell_state =
+        micro_context->AllocateTempInputTensor(node, kSLstmCellStateTensor);
+    TfLiteTensor* normalizer_state =
+        micro_context->AllocateTempInputTensor(node, kSLstmNormalizerStateTensor);
+    TfLiteTensor* stabilizer_state =
+        micro_context->AllocateTempInputTensor(node, kSLstmStabilizerStateTensor);
+    TfLiteTensor* output =
+        micro_context->AllocateTempOutputTensor(node, kSLstmOutputTensor);
+
+    // The states the kernel keeps in wider types than INT8. m is the
+    // log-space stabilizer and stays float32 - quantizing it buys nothing
+    // and costs numerical stability.
+    TF_LITE_ENSURE_TYPES_EQ(context, bias->type, kTfLiteInt32);
+    TF_LITE_ENSURE_TYPES_EQ(context, cell_state->type, kTfLiteInt16);
+    TF_LITE_ENSURE_TYPES_EQ(context, normalizer_state->type, kTfLiteInt16);
+    TF_LITE_ENSURE_TYPES_EQ(context, stabilizer_state->type, kTfLiteFloat32);
+
+    int32_t* scratch = static_cast<int32_t*>(
+        context->GetScratchBuffer(context, op_data->scratch_buffer_index));
+
+    SlstmS8Params params;
+    params.cell_clip = op_data->cell_clip;
+    // Weights are symmetric (zero_point 0), so the kernel takes their scale
+    // alone; activations and states carry a full scale/zero-point pair.
+    params.W_scale = input_weights->params.scale;
+    params.R_scale = recurrent_weights->params.scale;
+    params.x_quant = QuantOf(input);
+    // y and output share one quantization in the kernel - it writes each
+    // timestep of output with the same scale it requantizes y with.
+    params.y_quant = QuantOf(hidden_state);
+    params.c_quant = QuantOf(cell_state);
+    params.n_quant = QuantOf(normalizer_state);
+
+    slstm_eval_s8(
+        GetTensorData<int8_t>(input),
+        GetTensorData<int8_t>(input_weights),
+        GetTensorData<int8_t>(recurrent_weights),
+        GetTensorData<int32_t>(bias),
+        GetTensorData<int8_t>(hidden_state),
+        GetTensorData<int16_t>(cell_state),
+        GetTensorData<int16_t>(normalizer_state),
+        GetTensorData<float>(stabilizer_state),
+        GetTensorData<int8_t>(output),
+        scratch,
+        op_data->batch_size,
+        op_data->time_steps,
+        op_data->input_size,
+        op_data->hidden_size,
+        &params);
+
+    micro_context->DeallocateTempTfLiteTensor(input);
+    micro_context->DeallocateTempTfLiteTensor(input_weights);
+    micro_context->DeallocateTempTfLiteTensor(recurrent_weights);
+    micro_context->DeallocateTempTfLiteTensor(bias);
+    micro_context->DeallocateTempTfLiteTensor(hidden_state);
+    micro_context->DeallocateTempTfLiteTensor(cell_state);
+    micro_context->DeallocateTempTfLiteTensor(normalizer_state);
+    micro_context->DeallocateTempTfLiteTensor(stabilizer_state);
+    micro_context->DeallocateTempTfLiteTensor(output);
+
+    return kTfLiteOk;
+}
+
 TfLiteStatus SLstmEval(TfLiteContext* context, TfLiteNode* node) {
     TFLITE_DCHECK(node->user_data != nullptr);
     const OpDataSLstm* op_data =
@@ -145,6 +239,8 @@ TfLiteStatus SLstmEval(TfLiteContext* context, TfLiteNode* node) {
     switch (input_type) {
         case kTfLiteFloat32:
             return SLstmEvalFloat(context, node, op_data);
+        case kTfLiteInt8:
+            return SLstmEvalInt8(context, node, op_data);
         default:
             MicroPrintf("Type %s (%d) not supported for sLSTM.",
                         TfLiteTypeGetName(input_type), input_type);

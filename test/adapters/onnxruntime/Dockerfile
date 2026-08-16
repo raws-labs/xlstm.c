@@ -43,6 +43,7 @@ RUN g++ -std=c++17 -shared -fPIC -O2 \
         adapters/onnxruntime/mlstm_ort.cc \
         adapters/onnxruntime/xlstm_ort_register.cc \
         src/slstm.c src/mlstm.c src/xlstm_simd_ref.c \
+        src/slstm_s8.c src/mlstm_s8.c src/xlstm_quant.c \
         -lm \
         -o libxlstm_ort.so
 

@@ -17,6 +17,7 @@
  * Build as shared library:
  *   g++ -std=c++17 -shared -fPIC -o libxlstm_ort.so \
  *       adapters/onnxruntime/*.cc src/slstm.c src/mlstm.c \
+ *       src/slstm_s8.c src/mlstm_s8.c src/xlstm_quant.c \
  *       -Iinclude -Iadapters/onnxruntime -I<onnxruntime>/include -lm
  *
  * Load in consumer:
@@ -60,6 +61,18 @@ extern "C" OrtStatus* ORT_API_CALL RegisterCustomOps(
             "MLSTM", "CPUExecutionProvider", MLstmOrtKernel)
     };
     domain.Add(mlstm_op.get());
+
+    static std::unique_ptr<OrtLiteCustomOp> slstm_s8_op{
+        Ort::Custom::CreateLiteCustomOp(
+            "SLSTM_S8", "CPUExecutionProvider", SLstmOrtKernelS8)
+    };
+    domain.Add(slstm_s8_op.get());
+
+    static std::unique_ptr<OrtLiteCustomOp> mlstm_s8_op{
+        Ort::Custom::CreateLiteCustomOp(
+            "MLSTM_S8", "CPUExecutionProvider", MLstmOrtKernelS8)
+    };
+    domain.Add(mlstm_s8_op.get());
 
     Ort::UnownedSessionOptions session_options(options);
     session_options.Add(domain);

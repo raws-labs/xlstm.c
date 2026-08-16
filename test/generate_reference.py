@@ -241,7 +241,7 @@ SWEEP_SIZES = [1, 8, 16, 17, 64]
 # here at generation time from a from-scratch numpy simulation of the
 # exact INT8 kernel math (slstm_s8.c / mlstm_s8.c) and calibration
 # (PrepareS8 / PrepareMlstmS8 in the two test/*_s8_test.cc files,
-# including QuantSymmetricS16's headroom=4.0 - kept in sync by hand since
+# including xlstm_quant_symmetric_s16's headroom=4.0 - kept in sync by hand since
 # the calibration lives in C++, not here; see those files' comments).
 #
 # baseline_err is the whole-trajectory error against the plain kernel.
@@ -283,9 +283,9 @@ def _quant_asym(a):
 
 
 # Must match kStateHeadroom in both test/slstm_s8_test.cc and
-# test/mlstm_s8_test.cc exactly - it is what those files' QuantSymmetricS16
-# uses to calibrate c_quant/n_quant/C_quant, and every tol_s8_per_channel
-# bound in reference_data.h is derived assuming that calibration. Emitted
+# test/mlstm_s8_test.cc exactly - it is the headroom those files pass to
+# xlstm_quant_symmetric_s16 to calibrate c_quant/n_quant/C_quant, and every
+# tol_s8_per_channel bound in reference_data.h assumes that calibration. Emitted
 # into reference_data.h as XLSTM_GENERATOR_HEADROOM so both C++ files can
 # static_assert against it instead of the two copies silently drifting.
 GENERATOR_HEADROOM = 4.0

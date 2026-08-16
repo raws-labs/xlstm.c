@@ -27,6 +27,7 @@ Compile the adapter alongside your TFLM project:
 #   adapters/tflm/slstm_tflm.cc
 #   adapters/tflm/mlstm_tflm.cc
 #   src/slstm.c  src/mlstm.c  src/xlstm_simd_ref.c
+#   src/slstm_s8.c  src/mlstm_s8.c  src/xlstm_quant.c   # INT8
 # Include paths: -Iinclude -Iadapters/tflm
 ```
 
@@ -41,6 +42,30 @@ Compile the adapter alongside your TFLM project:
 - Output: `output[B,T,H]`
 
 State tensors are updated in-place.
+
+## INT8
+
+Both ops dispatch on the input tensor's type: `kTfLiteFloat32` runs the f32
+kernel, `kTfLiteInt8` runs the quantized one. Same op name, same tensor
+indices - only the types change:
+
+| Tensor | INT8 model type |
+|---|---|
+| `X`, `W`, `R`, `y`, `output` | `INT8` |
+| `b` | `INT32`, scale = input scale x weight scale |
+| `c` / `C`, `n` | `INT16` |
+| `m` | `FLOAT32` - the log-space stabilizer is never quantized |
+
+Scale and zero-point are read from each tensor's own quantization
+parameters, so a normally quantized `.tflite` needs no extra inputs.
+Weights must be symmetric (zero-point 0); `output` must carry the same
+quantization as `y`.
+
+Measured on Cortex-M7, M4F and M33, INT8 is **not** a latency win for
+mLSTM: 0.64x to 0.98x, at or below parity. Only the input projection is
+quantized; the DH x DH state update stays f32, and it dominates. For
+sLSTM the speedup is 1.14x to 2.59x, growing with hidden size. For mLSTM
+choose INT8 for memory footprint, not speed.
 
 ## Test
 

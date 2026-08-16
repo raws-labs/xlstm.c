@@ -46,6 +46,12 @@ enum SLstmOutputIndex {
 };
 
 // OpData structure for scratch buffers and precomputed values
+//
+// The INT8 path uses the same tensor indices as the float path. Only the
+// tensor types differ: X/W/R/y/output are kTfLiteInt8, b is kTfLiteInt32,
+// c/n are kTfLiteInt16, and m stays kTfLiteFloat32 - the log-space
+// stabilizer is not quantized. Scale and zero-point come from each
+// tensor's own TfLiteQuantizationParams; nothing is calibrated here.
 struct OpDataSLstm {
     int scratch_buffer_index;  // For gate computations [4 * hidden]
 

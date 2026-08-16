@@ -18,7 +18,10 @@
 
 #include "slstm_model_data.h"
 #include "mlstm_model_data.h"
+#include "slstm_s8_model_data.h"
+#include "mlstm_s8_model_data.h"
 #include "reference_data.h"
+#include "s8_case_data.h"
 
 namespace {
 
@@ -41,12 +44,38 @@ bool ExpectNear(const char* name, const float* expected,
     return true;
 }
 
+// INT8 assertions are exact. The expected integers in s8_case_data.h come
+// from generate_reference.py's numpy replica of the quantized kernel, and
+// the replica reproduces the C kernel's integers bit for bit on every case
+// in reference_data.h. Any drift in the gate math, the requantization or
+// the tensor plumbing moves an integer and fails here.
+template <typename T>
+bool ExpectExact(const char* name, const T* expected, const T* actual, int len) {
+    for (int i = 0; i < len; i++) {
+        if (expected[i] != actual[i]) {
+            printf("  FAIL %s[%d]: expected %d, got %d\n",
+                   name, i, (int)expected[i], (int)actual[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
 void FillTensor(TfLiteTensor* tensor, const float* data, int count) {
     std::memcpy(tensor->data.f, data, count * sizeof(float));
 }
 
 void ZeroTensor(TfLiteTensor* tensor, int count) {
     std::memset(tensor->data.f, 0, count * sizeof(float));
+}
+
+template <typename T>
+void FillQuantTensor(TfLiteTensor* tensor, const T* data, int count) {
+    std::memcpy(tensor->data.data, data, count * sizeof(T));
+}
+
+void ZeroQuantTensor(TfLiteTensor* tensor, int count, size_t elem) {
+    std::memset(tensor->data.data, 0, count * elem);
 }
 
 // ---------------------------------------------------------------------------
@@ -150,6 +179,117 @@ bool TestMLstmSingleTimestep() {
     return ok;
 }
 
+// ---------------------------------------------------------------------------
+// sLSTM INT8: same case, quantized model. Exercises the kTfLiteInt8 branch
+// of SLstmEval and the scale/zero-point unpacking behind it.
+// ---------------------------------------------------------------------------
+bool TestSLstmInt8() {
+    const tflite::Model* model = tflite::GetModel(slstm_s8_model_data);
+    if (model->version() != TFLITE_SCHEMA_VERSION) {
+        printf("  Model schema version mismatch\n");
+        return false;
+    }
+
+    tflite::MicroMutableOpResolver<1> resolver;
+    TFLMRegistration slstm_reg = tflite::Register_SLSTM();
+    resolver.AddCustom("SLSTM", &slstm_reg);
+
+    tflite::MicroInterpreter interpreter(model, resolver, arena, kArenaSize);
+    if (interpreter.AllocateTensors() != kTfLiteOk) {
+        printf("  AllocateTensors failed\n");
+        return false;
+    }
+
+    // B=1, T=1, I=2, H=2
+    const int H = 2, T = 1, I = 2;
+
+    if (interpreter.input(0)->type != kTfLiteInt8) {
+        printf("  input tensor is not INT8 - model is not quantized\n");
+        return false;
+    }
+
+    FillQuantTensor(interpreter.input(0), kS8Test1_x_q, T * I);
+    FillQuantTensor(interpreter.input(1), kS8Test1_W_q, 4 * H * I);
+    FillQuantTensor(interpreter.input(2), kS8Test1_R_q, 4 * H * H);
+    FillQuantTensor(interpreter.input(3), kS8Test1_b_q, 4 * H);
+    ZeroQuantTensor(interpreter.input(4), H, sizeof(int8_t));
+    ZeroQuantTensor(interpreter.input(5), H, sizeof(int16_t));
+    ZeroQuantTensor(interpreter.input(6), H, sizeof(int16_t));
+    ZeroQuantTensor(interpreter.input(7), H, sizeof(float));
+
+    if (interpreter.Invoke() != kTfLiteOk) {
+        printf("  Invoke failed\n");
+        return false;
+    }
+
+    bool ok = ExpectExact("output", kS8Test1_expected_output_q,
+                          interpreter.output(0)->data.int8, T * H);
+    ok &= ExpectExact("y", kS8Test1_expected_y_q,
+                      interpreter.input(4)->data.int8, H);
+    ok &= ExpectExact("c", kS8Test1_expected_c_q,
+                      interpreter.input(5)->data.i16, H);
+    ok &= ExpectExact("n", kS8Test1_expected_n_q,
+                      interpreter.input(6)->data.i16, H);
+    // m is the log-space stabilizer: float32 even on the INT8 path.
+    ok &= ExpectNear("m", kS8Test1_expected_m,
+                     interpreter.input(7)->data.f, H, 1e-5f);
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
+// mLSTM INT8: as above, through the kTfLiteInt8 branch of MLstmEval.
+// ---------------------------------------------------------------------------
+bool TestMLstmInt8() {
+    const tflite::Model* model = tflite::GetModel(mlstm_s8_model_data);
+    if (model->version() != TFLITE_SCHEMA_VERSION) {
+        printf("  Model schema version mismatch\n");
+        return false;
+    }
+
+    tflite::MicroMutableOpResolver<1> resolver;
+    TFLMRegistration mlstm_reg = tflite::Register_MLSTM();
+    resolver.AddCustom("MLSTM", &mlstm_reg);
+
+    tflite::MicroInterpreter interpreter(model, resolver, arena, kArenaSize);
+    if (interpreter.AllocateTensors() != kTfLiteOk) {
+        printf("  AllocateTensors failed\n");
+        return false;
+    }
+
+    // B=1, T=1, I=3, H=2
+    const int H = 2, T = 1, I = 3;
+
+    if (interpreter.input(0)->type != kTfLiteInt8) {
+        printf("  input tensor is not INT8 - model is not quantized\n");
+        return false;
+    }
+
+    FillQuantTensor(interpreter.input(0), kMS8Test1_x_q, T * I);
+    FillQuantTensor(interpreter.input(1), kMS8Test1_W_q, (4 * H + 2) * I);
+    FillQuantTensor(interpreter.input(2), kMS8Test1_b_q, 4 * H + 2);
+    ZeroQuantTensor(interpreter.input(3), H, sizeof(int8_t));
+    ZeroQuantTensor(interpreter.input(4), H * H, sizeof(int16_t));
+    ZeroQuantTensor(interpreter.input(5), H, sizeof(int16_t));
+    ZeroQuantTensor(interpreter.input(6), 1, sizeof(float));
+
+    if (interpreter.Invoke() != kTfLiteOk) {
+        printf("  Invoke failed\n");
+        return false;
+    }
+
+    bool ok = ExpectExact("output", kMS8Test1_expected_output_q,
+                          interpreter.output(0)->data.int8, T * H);
+    ok &= ExpectExact("y", kMS8Test1_expected_y_q,
+                      interpreter.input(3)->data.int8, H);
+    ok &= ExpectExact("C", kMS8Test1_expected_C_q,
+                      interpreter.input(4)->data.i16, H * H);
+    ok &= ExpectExact("n", kMS8Test1_expected_n_q,
+                      interpreter.input(5)->data.i16, H);
+    ok &= ExpectNear("m", kMS8Test1_expected_m,
+                     interpreter.input(6)->data.f, 1, 1e-5f);
+    return ok;
+}
+
 }  // namespace
 
 #define RUN_TEST(fn)                                      \
@@ -169,6 +309,8 @@ int main() {
 
     RUN_TEST(TestSLstmSingleTimestep);
     RUN_TEST(TestMLstmSingleTimestep);
+    RUN_TEST(TestSLstmInt8);
+    RUN_TEST(TestMLstmInt8);
 
     printf("\n%d/%d tests passed.\n", g_tests_passed, g_tests_run);
     return (g_tests_passed == g_tests_run) ? 0 : 1;

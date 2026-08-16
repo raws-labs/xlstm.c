@@ -14,9 +14,9 @@ build/
 # Test binaries
 *_test
 
-# Generated model headers (TFLM integration test)
-test/adapters/tflm/slstm_model_data.h
-test/adapters/tflm/mlstm_model_data.h
+# Generated headers (TFLM integration test) - every .h there is emitted by
+# generate_model.py at build time
+test/adapters/tflm/*.h
 
 # Python
 __pycache__/

@@ -29,6 +29,9 @@ REF_PATH = os.path.join(ROOT_DIR, "test", "reference_data.json")
 
 class TensorType:
     FLOAT32 = 0
+    INT32 = 2
+    INT16 = 7
+    INT8 = 9
 
 class BuiltinOperator:
     CUSTOM = 32
@@ -45,20 +48,26 @@ def build_tflite_model(op_name, tensor_specs, input_indices, output_indices):
 
     Args:
         op_name: Custom op name string (e.g. "SLSTM")
-        tensor_specs: list of (name, shape, type) tuples
+        tensor_specs: list of (name, shape, type) or
+                      (name, shape, type, (scale, zero_point)) tuples.
+                      The 4-element form attaches QuantizationParameters to
+                      the tensor, which is where the INT8 adapter reads its
+                      scale and zero-point from.
         input_indices: list of tensor indices that are op inputs
         output_indices: list of tensor indices that are op outputs
 
     Returns:
         bytes: Serialized .tflite FlatBuffer
     """
+    tensor_specs = [t if len(t) == 4 else (t[0], t[1], t[2], None)
+                    for t in tensor_specs]
     builder = flatbuffers.Builder(1024)
 
     # --- Strings ---
     op_name_off = builder.CreateString(op_name)
     tensor_name_offs = []
-    for name, _, _ in tensor_specs:
-        tensor_name_offs.append(builder.CreateString(name))
+    for spec in tensor_specs:
+        tensor_name_offs.append(builder.CreateString(spec[0]))
 
     # --- OperatorCodes ---
     # Table OperatorCode { deprecated_builtin_code:byte, custom_code:string,
@@ -74,16 +83,38 @@ def build_tflite_model(op_name, tensor_specs, input_indices, output_indices):
     builder.PrependUOffsetTRelative(op_code_off)
     op_codes_vec = builder.EndVector()
 
+    # --- Quantization parameters (one table per quantized tensor) ---
+    # Table QuantizationParameters { min:[float], max:[float], scale:[float],
+    #                                zero_point:[long], details_type:ubyte,
+    #                                details:..., quantized_dimension:int }
+    # Per-tensor quantization: scale and zero_point are 1-element vectors.
+    quant_offs = []
+    for spec in tensor_specs:
+        if spec[3] is None:
+            quant_offs.append(None)
+            continue
+        scale, zero_point = spec[3]
+        builder.StartVector(4, 1, 4)
+        builder.PrependFloat32(scale)
+        scale_vec = builder.EndVector()
+        builder.StartVector(8, 1, 8)
+        builder.PrependInt64(zero_point)
+        zp_vec = builder.EndVector()
+        builder.StartObject(7)
+        builder.PrependUOffsetTRelativeSlot(2, scale_vec, 0)
+        builder.PrependUOffsetTRelativeSlot(3, zp_vec, 0)
+        quant_offs.append(builder.EndObject())
+
     # --- Tensors ---
     tensor_offs = []
     shape_vecs = []
-    for name, shape, ttype in tensor_specs:
+    for _, shape, _, _ in tensor_specs:
         builder.StartVector(4, len(shape), 4)
         for dim in reversed(shape):
             builder.PrependInt32(dim)
         shape_vecs.append(builder.EndVector())
 
-    for i, (name, shape, ttype) in enumerate(tensor_specs):
+    for i, (name, shape, ttype, _) in enumerate(tensor_specs):
         # Table Tensor { shape:[int], type:TensorType, buffer:uint,
         #                name:string, quantization:QuantizationParameters,
         #                is_variable:bool }
@@ -92,7 +123,8 @@ def build_tflite_model(op_name, tensor_specs, input_indices, output_indices):
         builder.PrependInt8Slot(1, ttype, 0)  # type
         builder.PrependUint32Slot(2, i + 1, 0)  # buffer index (0 = sentinel)
         builder.PrependUOffsetTRelativeSlot(3, tensor_name_offs[i], 0)  # name
-        # quantization: slot 4, skip (default 0)
+        if quant_offs[i] is not None:
+            builder.PrependUOffsetTRelativeSlot(4, quant_offs[i], 0)
         builder.PrependBoolSlot(5, False, False)  # is_variable
         tensor_offs.append(builder.EndObject())
 
@@ -241,26 +273,112 @@ def generate_mlstm_model(B, T, I, H):
     return build_tflite_model("MLSTM", tensors, input_indices, output_indices)
 
 
+def generate_slstm_s8_model(B, T, I, H, s8):
+    """Generate a quantized .tflite model for the sLSTM custom op.
+
+    The scales come straight from reference_data.json's s8 block, so the
+    adapter reads back exactly the calibration the expected integers were
+    produced with. Weights are symmetric (zero_point 0); b carries the
+    input*weight scale; m is the log-space stabilizer and stays float32.
+    output shares y's quantization, which is what the kernel assumes.
+    """
+    q = lambda k: (s8[k + "_scale"], s8.get(k + "_zero_point", 0))
+    tensors = [
+        ("input",  [B, T, I], TensorType.INT8,    q("x")),   # 0
+        ("W",      [4*H, I],  TensorType.INT8,    q("W")),   # 1
+        ("R",      [4*H, H],  TensorType.INT8,    q("R")),   # 2
+        ("b",      [4*H],     TensorType.INT32,   q("b")),   # 3
+        ("y",      [B, H],    TensorType.INT8,    q("y")),   # 4
+        ("c",      [B, H],    TensorType.INT16,   q("c")),   # 5
+        ("n",      [B, H],    TensorType.INT16,   q("n")),   # 6
+        ("m",      [B, H],    TensorType.FLOAT32),           # 7
+        ("output", [B, T, H], TensorType.INT8,    q("y")),   # 8
+    ]
+    return build_tflite_model("SLSTM", tensors, list(range(8)), [8])
+
+
+def generate_mlstm_s8_model(B, T, I, H, s8):
+    """Generate a quantized .tflite model for the mLSTM custom op.
+    See generate_slstm_s8_model; mLSTM has no recurrent weight."""
+    q = lambda k: (s8[k + "_scale"], s8.get(k + "_zero_point", 0))
+    tensors = [
+        ("input",  [B, T, I],  TensorType.INT8,  q("x")),   # 0
+        ("W",      [4*H+2, I], TensorType.INT8,  q("W")),   # 1
+        ("b",      [4*H+2],    TensorType.INT32, q("b")),   # 2
+        ("y",      [B, H],     TensorType.INT8,  q("y")),   # 3
+        ("C",      [B, H*H],   TensorType.INT16, q("C")),   # 4
+        ("n",      [B, H],     TensorType.INT16, q("n")),   # 5
+        ("m",      [B, 1],     TensorType.FLOAT32),         # 6
+        ("output", [B, T, H],  TensorType.INT8,  q("y")),   # 7
+    ]
+    return build_tflite_model("MLSTM", tensors, list(range(7)), [7])
+
+
+def write_header(model_bytes, var_name, path):
+    guard = var_name.upper() + "_H_"
+    with open(path, "w") as f:
+        f.write(model_to_c_header(model_bytes, var_name, guard))
+    print(f"Wrote {path} ({len(model_bytes)} bytes)")
+
+
+# Which s8 arrays each cell contributes, and the C type to emit them as.
+S8_ARRAYS = {
+    "s": [("x_q", "int8_t"), ("W_q", "int8_t"), ("R_q", "int8_t"),
+          ("b_q", "int32_t"), ("expected_output_q", "int8_t"),
+          ("expected_y_q", "int8_t"), ("expected_c_q", "int16_t"),
+          ("expected_n_q", "int16_t"), ("expected_m", "float")],
+    "m": [("x_q", "int8_t"), ("W_q", "int8_t"),
+          ("b_q", "int32_t"), ("expected_output_q", "int8_t"),
+          ("expected_y_q", "int8_t"), ("expected_C_q", "int16_t"),
+          ("expected_n_q", "int16_t"), ("expected_m", "float")],
+}
+
+
+def generate_s8_case_header(cases):
+    """Emit reference_data.json's s8 arrays as C arrays.
+
+    The TFLM test feeds these into the quantized model's tensors and
+    asserts the kernel's integers come back exactly. reference_data.h
+    carries the f32 golden values but not the quantized ones, and the
+    TFLM test is C++ with no JSON parser, so they come across here.
+    """
+    lines = ["/* Auto-generated - do not edit. */\n",
+             "#ifndef S8_CASE_DATA_H_", "#define S8_CASE_DATA_H_\n",
+             "#include <stdint.h>\n"]
+    for prefix, cell, s8 in cases:
+        for key, ctype in S8_ARRAYS[cell]:
+            vals = s8[key]
+            fmt = (lambda v: f"{v:.8f}f") if ctype == "float" else (lambda v: str(v))
+            body = ", ".join(fmt(v) for v in vals)
+            lines.append(f"const {ctype} {prefix}_{key}[] = {{{body}}};")
+        lines.append("")
+    lines.append("#endif  /* S8_CASE_DATA_H_ */\n")
+    return "\n".join(lines)
+
+
 def main():
     with open(REF_PATH) as f:
         ref = json.load(f)
 
     # Use test1 dimensions for the model (single timestep)
     st1 = ref["slstm"]["test1"]
-    slstm_bytes = generate_slstm_model(st1["B"], st1["T"], st1["I"], st1["H"])
-    header = model_to_c_header(slstm_bytes, "slstm_model_data", "SLSTM_MODEL_DATA_H_")
-    path = os.path.join(SCRIPT_DIR, "slstm_model_data.h")
-    with open(path, "w") as f:
-        f.write(header)
-    print(f"Wrote {path} ({len(slstm_bytes)} bytes)")
-
     mt1 = ref["mlstm"]["test1"]
-    mlstm_bytes = generate_mlstm_model(mt1["B"], mt1["T"], mt1["I"], mt1["H"])
-    header = model_to_c_header(mlstm_bytes, "mlstm_model_data", "MLSTM_MODEL_DATA_H_")
-    path = os.path.join(SCRIPT_DIR, "mlstm_model_data.h")
+    dims_s = (st1["B"], st1["T"], st1["I"], st1["H"])
+    dims_m = (mt1["B"], mt1["T"], mt1["I"], mt1["H"])
+
+    for bytes_, var in [
+        (generate_slstm_model(*dims_s), "slstm_model_data"),
+        (generate_mlstm_model(*dims_m), "mlstm_model_data"),
+        (generate_slstm_s8_model(*dims_s, st1["s8"]), "slstm_s8_model_data"),
+        (generate_mlstm_s8_model(*dims_m, mt1["s8"]), "mlstm_s8_model_data"),
+    ]:
+        write_header(bytes_, var, os.path.join(SCRIPT_DIR, var + ".h"))
+
+    path = os.path.join(SCRIPT_DIR, "s8_case_data.h")
     with open(path, "w") as f:
-        f.write(header)
-    print(f"Wrote {path} ({len(mlstm_bytes)} bytes)")
+        f.write(generate_s8_case_header([("kS8Test1", "s", st1["s8"]),
+                                         ("kMS8Test1", "m", mt1["s8"])]))
+    print(f"Wrote {path}")
 
 
 if __name__ == "__main__":

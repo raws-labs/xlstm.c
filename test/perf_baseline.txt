@@ -1,0 +1,39 @@
+# xlstm.c performance baseline - retired instruction counts (callgrind Ir).
+#
+# Regenerate deliberately with:  make perf-baseline
+# Checked by:                    make perf   (tolerance +2.0%)
+#
+# Counts are the inclusive cost of one kernel entry point over 200 steps,
+# collection toggled on that symbol alone. Exact and reproducible for a given
+# binary, so any movement here is a real change in work done, not noise.
+#
+# These numbers describe the HOST backends only. They say nothing about cortexm
+# or esp, whose performance is a property of those cores and is measured on
+# hardware. They are also a proxy for time and not time itself: a change that
+# holds the instruction count and worsens cache locality does not appear here.
+#
+# Counts are specific to the compiler that produced them - gcc and clang differ
+# by up to 50% on these loops - so make perf refuses to compare across a change
+# of toolchain. The line below is what it checks.
+#
+# toolchain: gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+# valgrind:  valgrind-3.22.0
+# libm:      GLIBC_TUNABLES=glibc.cpu.hwcaps=-FMA,-AVX2,-AVX
+#
+# backend kernel     H steps    instructions
+ref slstm_f32 16 200 4225080
+ref slstm_f32 64 200 46337850
+ref mlstm_f32 16 200 2731400
+ref mlstm_f32 64 200 35846200
+ref slstm_s8 16 200 5115722
+ref slstm_s8 64 200 58555296
+ref mlstm_s8 16 200 4328860
+ref mlstm_s8 64 200 60991200
+sse2 slstm_f32 16 200 2665080
+sse2 slstm_f32 64 200 19203450
+sse2 mlstm_f32 16 200 1305200
+sse2 mlstm_f32 64 200 11845600
+sse2 slstm_s8 16 200 2659722
+sse2 slstm_s8 64 200 17392096
+sse2 mlstm_s8 16 200 3062460
+sse2 mlstm_s8 64 200 40248800

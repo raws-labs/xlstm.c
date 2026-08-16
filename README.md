@@ -83,11 +83,24 @@ make test-neon           # cross-compile ARM + run via QEMU
 make bench               # benchmark all kernels (H = 16, 32, 64, 128)
 make bench-ref           # benchmark scalar backend
 make bench-sse2          # benchmark SSE2 backend
+make perf                # instruction-count regression gate (needs valgrind)
+make perf-baseline       # re-record that gate's baseline, deliberately
 make reference           # regenerate golden data from PyTorch reference
 make clean               # remove build artifacts
 ```
 
 Requires `gcc` (C99) and `g++` (C++17 for tests/bench). `make reference` requires Python with `torch` and `xlstm`.
+
+### Performance gate
+
+`make bench` prints wall-clock, which no shared CI runner reproduces closely enough to fail a build on. So `make perf` counts retired instructions under `valgrind --tool=callgrind` instead, collection toggled on one kernel entry point at a time. The same binary on the same input gives the same count every run, so a 2% move against `test/perf_baseline.txt` is a real change in work done and fails CI. A deliberate change is a `make perf-baseline` and a one-line-per-case diff.
+
+Two things it does not cover, both worth knowing before trusting a green run:
+
+- **It is a proxy for time, not time.** A change that leaves the instruction count alone and worsens cache or memory behaviour passes. That is not hypothetical here: a change with *identical* instruction counts cost 10% on one Cortex-M part, and a smaller binary measured slower on all three.
+- **It gates the host backends only** (`ref` and `sse2`). `cortexm` and `esp` performance is a property of those cores, measured on hardware, not by this gate.
+
+Counts are also specific to the compiler that produced them, so the gate refuses to compare across a toolchain it did not record.
 
 ## Adapters
 

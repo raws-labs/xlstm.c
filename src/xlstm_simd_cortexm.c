@@ -19,8 +19,9 @@
  *   xlstm_matvec_s8   SXTAB16 + SMLAD, two rows at a time. 16 instructions
  *                     per 8 MACs against the scalar body's 6 per MAC, at any
  *                     buffer alignment and any column count.
- *   xlstm_matvec_f32  two rows at a time with fmaf, which these FPUs issue
- *                     as a single VFMA.F32.
+ *   xlstm_matvec_f32  eight rows at a time with fmaf, which these FPUs issue
+ *                     as a single VFMA.F32. 9 loads per 8 MACs against the
+ *                     scalar body's 2, because v[j] is read once per block.
  *
  * xlstm_vecmat_f32 and xlstm_rank1_update_f32 defer to the scalar bodies in
  * xlstm_simd_scalar.inc - the same text xlstm_simd_ref.c compiles, not a
@@ -265,15 +266,85 @@ void xlstm_matvec_s8(const int8_t* M, const int8_t* v,
 void xlstm_matvec_f32(const float* M, const float* v,
                       float* out, int rows, int cols)
 {
-    /* Same two-row shape, for the same reason: v[j] is loaded once for two
-     * independent VFMA chains, which is what hides the FPU's multi-cycle
-     * accumulate latency. fmaf is one VFMA.F32 on FPv4-SP and FPv5, so this
-     * rounds once where the scalar body rounds twice. That is a deliberate
-     * numeric difference from ref, and it is the source of the win; the
-     * per-row summation order is otherwise identical. */
+    /* Blocked by rows, because this kernel is short of loads rather than of
+     * multiplies: v[j] is read once and consumed by every row of the block, so
+     * B rows cost B + 1 loads per B MACs - 1.5 loads/MAC at B = 2, 1.125 at
+     * B = 8. The B accumulator chains are independent, which also hides the
+     * FPU's multi-cycle accumulate latency, and fmaf is one VFMA.F32 on FPv4-SP
+     * and FPv5, so this rounds once where the scalar body rounds twice. That is
+     * a deliberate numeric difference from ref and the source of the win.
+     *
+     * B = 8 because both register files run out there at once:
+     *
+     *   Singles: a block holds 2B + 1 live - B accumulators, B weights in
+     *   flight, v[j]. AAPCS leaves 16 scratch (s0-s15), so B = 8 is the first
+     *   width that touches a callee-saved one, at one VPUSH/VPOP of d8 per
+     *   call rather than per iteration.
+     *
+     *   Cores: the inner loop needs B + 2 of the 14 usable (B row cursors, the
+     *   v cursor, its limit), leaving 4 for an outer loop that wants 5 - so one
+     *   block-invariant is reloaded per block, about 4 loads per 8 rows. B = 12
+     *   would want all 14 and start shuttling registers through the stack per
+     *   block, which on a part whose stack is uncached costs more than the
+     *   0.04 loads/MAC the deeper block saves.
+     *
+     * All three cores compile the body below to 9 loads and 19 instructions per
+     * 8 MACs with no stack reference in it at all.
+     *
+     * How rows interleave changes; summation within a row does not. Each output
+     * still starts at out[i] and accumulates ascending j through the same fmaf,
+     * and rows are independent, so this is bit-identical to the two-row shape
+     * it replaces and the golden data does not move. */
+    const size_t stride = (size_t)cols;
     int i = 0;
     int j;
 
+    /* A cols of 0 or less is not a range of addresses, so it never reaches
+     * the cursor loop below; the counted loops that follow already do nothing
+     * for it, exactly as the scalar body does. */
+    if (cols > 0) {
+        for (; i + 7 < rows; i += 8) {
+            const float* p0 = M + (size_t)i * stride;
+            const float* p1 = p0 + stride;
+            const float* p2 = p1 + stride;
+            const float* p3 = p2 + stride;
+            const float* p4 = p3 + stride;
+            const float* p5 = p4 + stride;
+            const float* p6 = p5 + stride;
+            const float* p7 = p6 + stride;
+            const float* vp = v;
+            const float* const vend = v + stride;
+            float a0 = out[i], a1 = out[i + 1];
+            float a2 = out[i + 2], a3 = out[i + 3];
+            float a4 = out[i + 4], a5 = out[i + 5];
+            float a6 = out[i + 6], a7 = out[i + 7];
+
+            /* Every cursor is walked rather than indexed: eight base pointers
+             * plus an index would not fit the core registers, and the row
+             * pointers are derived here rather than in the outer loop so that
+             * only one of them has to stay live across it. */
+            while (vp != vend) {
+                float x = *vp++;
+                a0 = fmaf(*p0++, x, a0);
+                a1 = fmaf(*p1++, x, a1);
+                a2 = fmaf(*p2++, x, a2);
+                a3 = fmaf(*p3++, x, a3);
+                a4 = fmaf(*p4++, x, a4);
+                a5 = fmaf(*p5++, x, a5);
+                a6 = fmaf(*p6++, x, a6);
+                a7 = fmaf(*p7++, x, a7);
+            }
+            out[i] = a0; out[i + 1] = a1;
+            out[i + 2] = a2; out[i + 3] = a3;
+            out[i + 4] = a4; out[i + 5] = a5;
+            out[i + 6] = a6; out[i + 7] = a7;
+        }
+    }
+
+    /* Both callers make rows a multiple of two - 4H for sLSTM, 4H + 2 for
+     * mLSTM - so what is left here is 0, 2, 4 or 6 rows and the two-row pass
+     * covers all of it. A four-row tier would only ever serve the 4 or 6, at
+     * H = 1 and H = 17, where it is a fraction of a percent of the work. */
     for (; i + 1 < rows; i += 2) {
         const float* r0 = M + (size_t)i * (size_t)cols;
         const float* r1 = r0 + cols;

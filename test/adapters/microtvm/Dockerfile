@@ -60,6 +60,7 @@ RUN g++ -std=c++17 -shared -fPIC -O2 \
         adapters/microtvm/slstm_tvm.c \
         adapters/microtvm/mlstm_tvm.c \
         src/slstm.c src/mlstm.c src/xlstm_simd_ref.c \
+        src/slstm_s8.c src/mlstm_s8.c src/xlstm_quant.c \
         -lm \
         -o libxlstm_tvm.so
 

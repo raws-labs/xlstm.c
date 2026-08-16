@@ -20,6 +20,14 @@
  *   [7] output[B,T,H]
  *
  * States y/C/n/m are updated in-place.
+ *
+ * Dispatches on X's DLDataType, exactly as slstm_tvm.h describes. The
+ * kDLInt path takes seven extra args (mLSTM has no recurrent weight):
+ *
+ *   [8]  x_scale (float)   [9]  x_zero_point (int)
+ *   [10] W_scale (float)
+ *   [11] y_scale (float)   [12] y_zero_point (int)
+ *   [13] C_scale (float)   [14] n_scale (float)
  * ===========================================================================*/
 
 #ifndef MLSTM_TVM_H_

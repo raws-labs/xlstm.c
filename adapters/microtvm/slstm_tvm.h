@@ -20,6 +20,20 @@
  *   [8] output[B,T,H]
  *
  * States y/c/n/m are updated in-place.
+ *
+ * The same entry point serves both precisions: it dispatches on X's
+ * DLDataType. kDLFloat runs the f32 kernel on the 9 args above. kDLInt
+ * runs the quantized kernel, with X/W/R/y/output int8, b int32, c/n int16
+ * and m float32, and eight more args carrying the quantization:
+ *
+ *   [9]  x_scale (float)   [10] x_zero_point (int)
+ *   [11] W_scale (float)   [12] R_scale (float)
+ *   [13] y_scale (float)   [14] y_zero_point (int)
+ *   [15] c_scale (float)   [16] n_scale (float)
+ *
+ * Weights and the INT16 states are symmetric, so they carry a scale with
+ * no zero-point. m stays float32 - the log-space stabilizer is not
+ * quantized.
  * ===========================================================================*/
 
 #ifndef SLSTM_TVM_H_

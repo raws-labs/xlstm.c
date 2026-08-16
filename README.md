@@ -8,6 +8,15 @@ Portable xLSTM kernels in C99. Implements sLSTM and mLSTM, the two custom cell t
 
 Tested against the NX-AI/xlstm PyTorch reference implementation.
 
+**`hidden_size` is the per-head width** (`DH` in the reference), not a layer width. Heads are
+the caller's outer loop: run the kernel once per head over that head's slice of the weights and
+its own state. This is the single most important thing to get right when adopting these
+kernels, and it is why the mLSTM state cost below is quadratic *per head*.
+
+These are the **cells**, not the xLSTM block. Pre-LayerNorm, causal conv1d, the up and down
+projections, output GroupNorm and the residual are the block's, and none of them are here.
+There is no multi-layer stacking and no model.
+
 ## Architecture
 
 ### Kernels

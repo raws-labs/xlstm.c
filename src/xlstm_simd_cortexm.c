@@ -131,24 +131,27 @@ static inline __attribute__((always_inline)) void
 xlstm_cm_matvec_s8(const int8_t* M, const int8_t* v, int32_t* out,
                    int rows, int cols, int32_t v_zp, int aligned)
 {
-    /* Past the last whole group; the 0 to 3 columns after it go scalar.
-     * Walking pointers to it rather than indexing off a group counter is
-     * what keeps the loop test folded into the address arithmetic, and
-     * deriving tail from ALIGNED rather than from cols is what deletes the
+    /* Whole groups fill [0, nb); the 0 to 3 columns above them go scalar.
+     * Deriving tail from ALIGNED rather than from cols is what deletes the
      * scalar remainder outright from the aligned instance. */
-    const int8_t* const vend = v + ((size_t)cols & ~(size_t)3);
+    const size_t nb = (size_t)cols & ~(size_t)3;
     const int tail = aligned ? 0 : (cols & 3);
     /* -v_zp in both halfword lanes, the addend SXTAB16 applies. */
     const int16x2_t nzp = (int16x2_t)(((uint32_t)(-v_zp) & 0xFFFFu) |
                                       ((uint32_t)(-v_zp) << 16));
     /* Both row loops run to a pointer rather than counting i: that leaves one
      * fewer value live across the inner loop, which is what keeps the row
-     * epilogue off the stack. nrows folds a non-positive rows into an empty
-     * range instead of a negative pointer offset. */
+     * epilogue off the stack. On a part whose stack is uncached that is worth
+     * far more than the instructions it saves - about 10 cycles per avoided
+     * spill on a Cortex-M7 reading its stack over the AXI bus with the data
+     * cache off, against about 1 on a core whose SRAM is single-cycle. nrows
+     * folds a non-positive rows into an empty range instead of a negative
+     * pointer offset. */
     const size_t stride = (size_t)cols;
     const size_t nrows = rows > 0 ? (size_t)rows : 0u;
     const int8_t* const rowend2 = M + (nrows & ~(size_t)1) * stride;
     const int8_t* const rowend = M + nrows * stride;
+    const int8_t* const vtop = v + nb;
     const int8_t* row = M;
     int32_t* o = out;
     int j;
@@ -157,48 +160,72 @@ xlstm_cm_matvec_s8(const int8_t* M, const int8_t* v, int32_t* out,
      * consumed twice, and the two accumulator chains are independent,
      * so neither stalls on the other's SMLAD result. */
     for (; row != rowend2; row += 2 * stride, o += 2) {
-        const int8_t* p0 = row;
-        const int8_t* p1 = row + stride;
-        const int8_t* vp = v;
+        const int8_t* p0 = row + nb;
+        const int8_t* p1 = p0 + stride;
+        const int8_t* vp = vtop;
         int32_t a0 = 0;
         int32_t a1 = 0;
 
-        for (; vp != vend; vp += 4, p0 += 4, p1 += 4) {
-            int8x4_t w = xlstm_cm_ld4(vp, aligned);
-            int16x2_t ve = __sxtab16(nzp, w);          /* v[4g+0], v[4g+2] */
-            int16x2_t vo = xlstm_cm_sxtab16_ror8(nzp, w); /* v[4g+1], v[4g+3] */
-            int8x4_t m0 = xlstm_cm_ld4(p0, aligned);
-            int8x4_t m1 = xlstm_cm_ld4(p1, aligned);
+        /* Groups are consumed from the top of the row downwards, and that
+         * choice is load-bearing rather than cosmetic: descending, every
+         * cursor advances before it is read, which is a pre-indexed
+         * LDR Rd,[Rn,#-4]!. Ascending, the same three cursors advance after
+         * the read and two of them come out as post-indexed LDR Rd,[Rn],#4.
+         * Measured, a Cortex-M4 runs the post-indexed spelling about 2 cycles
+         * per iteration slower than the otherwise byte-identical loop, and
+         * the penalty does not scale with how many of the three are
+         * post-indexed. M7 and M33 are near-indifferent to it.
+         *
+         * Order costs nothing to give up: every term is an exact integer
+         * product and the accumulator cannot overflow (see below), so a
+         * descending sum is bit-identical to an ascending one. */
+        while (p0 != row) {
+            int8x4_t w, m0, m1;
+            int16x2_t ve, vo;
+
+            vp -= 4;
+            p0 -= 4;
+            p1 -= 4;
+            w = xlstm_cm_ld4(vp, aligned);
+            ve = __sxtab16(nzp, w);              /* v[4g+0], v[4g+2] */
+            vo = xlstm_cm_sxtab16_ror8(nzp, w);  /* v[4g+1], v[4g+3] */
+            m0 = xlstm_cm_ld4(p0, aligned);
+            m1 = xlstm_cm_ld4(p1, aligned);
 
             a0 = __smlad(__sxtb16(m0), ve, a0);
             a0 = __smlad(xlstm_cm_sxtb16_ror8(m0), vo, a0);
             a1 = __smlad(__sxtb16(m1), ve, a1);
             a1 = __smlad(xlstm_cm_sxtb16_ror8(m1), vo, a1);
         }
-        /* All three pointers now sit on the first leftover column. */
+        /* All three cursors are back at column 0 of their own row, and the
+         * leftover columns are the ones above the last whole group. */
         for (j = 0; j < tail; ++j) {
-            a0 += (int32_t)p0[j] * ((int32_t)vp[j] - v_zp);
-            a1 += (int32_t)p1[j] * ((int32_t)vp[j] - v_zp);
+            a0 += (int32_t)p0[nb + j] * ((int32_t)vp[nb + j] - v_zp);
+            a1 += (int32_t)p1[nb + j] * ((int32_t)vp[nb + j] - v_zp);
         }
         o[0] = a0;
         o[1] = a1;
     }
 
     for (; row != rowend; row += stride, ++o) {
-        const int8_t* p0 = row;
-        const int8_t* vp = v;
+        const int8_t* p0 = row + nb;
+        const int8_t* vp = vtop;
         int32_t a0 = 0;
 
-        for (; vp != vend; vp += 4, p0 += 4) {
-            int8x4_t w = xlstm_cm_ld4(vp, aligned);
-            int8x4_t m0 = xlstm_cm_ld4(p0, aligned);
+        while (p0 != row) {
+            int8x4_t w, m0;
+
+            vp -= 4;
+            p0 -= 4;
+            w = xlstm_cm_ld4(vp, aligned);
+            m0 = xlstm_cm_ld4(p0, aligned);
 
             a0 = __smlad(__sxtb16(m0), __sxtab16(nzp, w), a0);
             a0 = __smlad(xlstm_cm_sxtb16_ror8(m0),
                          xlstm_cm_sxtab16_ror8(nzp, w), a0);
         }
         for (j = 0; j < tail; ++j) {
-            a0 += (int32_t)p0[j] * ((int32_t)vp[j] - v_zp);
+            a0 += (int32_t)p0[nb + j] * ((int32_t)vp[nb + j] - v_zp);
         }
         *o = a0;
     }

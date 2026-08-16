@@ -306,36 +306,83 @@ def _t2n(t):
     return t.detach().cpu().numpy().astype(np.float64)
 
 
+def _slstm_s8_calib(tc):
+    """Scales the sLSTM INT8 path is calibrated with, for one case.
+
+    This is the single definition of PrepareS8 (test/slstm_s8_test.cc) on
+    the Python side: _slstm_int8_trace derives every tolerance in
+    reference_data.h from it, and generate_json ships it so the framework
+    adapter integration tests quantize their inputs identically instead of
+    each re-deriving it and drifting."""
+    H, T, I = tc["H"], tc["T"], tc["I"]
+    W = _t2n(tc["W"]).reshape(4 * H, I)
+    R = _t2n(tc["R"]).reshape(4 * H, H)
+    y_gold = _t2n(tc["y"]).reshape(H)
+    out_gold = _t2n(tc["output"]).reshape(T, H) if tc["output"] is not None else y_gold.reshape(1, H)
+
+    w_scale, _ = _quant_sym8(W.flatten())
+    r_scale, _ = _quant_sym8(R.flatten())
+    x_scale, x_zp = _quant_asym(_t2n(tc["input"]).flatten())
+    y_scale, y_zp = _quant_asym(out_gold.flatten())
+    c_scale, _ = _quant_sym16_headroom(_t2n(tc["c"]).reshape(H))
+    n_scale, _ = _quant_sym16_headroom(_t2n(tc["n"]).reshape(H))
+    return {"W_scale": w_scale, "R_scale": r_scale,
+            "x_scale": x_scale, "x_zero_point": x_zp,
+            "y_scale": y_scale, "y_zero_point": y_zp,
+            "c_scale": c_scale, "n_scale": n_scale}
+
+
+def _mlstm_s8_calib(tc):
+    """Scales the mLSTM INT8 path is calibrated with - the mLSTM twin of
+    _slstm_s8_calib above (PrepareMlstmS8 in test/mlstm_s8_test.cc)."""
+    H, T, I = tc["H"], tc["T"], tc["I"]
+    W = _t2n(tc["W"]).reshape(4 * H + 2, I)
+    y_gold = _t2n(tc["y"]).reshape(H)
+    out_gold = _t2n(tc["output"]).reshape(T, H) if tc["output"] is not None else y_gold.reshape(1, H)
+
+    w_scale, _ = _quant_sym8(W.flatten())
+    x_scale, x_zp = _quant_asym(_t2n(tc["input"]).flatten())
+    y_scale, y_zp = _quant_asym(out_gold.flatten())
+    n_scale, _ = _quant_sym16_headroom(_t2n(tc["n"]).reshape(H))
+    C_scale, _ = _quant_sym16_headroom(_t2n(tc["c"]).flatten())
+    return {"W_scale": w_scale,
+            "x_scale": x_scale, "x_zero_point": x_zp,
+            "y_scale": y_scale, "y_zero_point": y_zp,
+            "C_scale": C_scale, "n_scale": n_scale}
+
+
 def _slstm_int8_trace(tc, perturb=1.0):
     """Numpy replica of PrepareS8 + slstm_eval_s8. Returns (out[T,H],
-    golden_output[T,H], golden_y[H], state), where state is the replica's
-    dequantized EXIT state {"state": c[H], "n": n[H], "m": m[H]} - the
-    same three buffers the C kernel leaves behind for the caller, in the
-    same dequantized units the INT8 test reads them back in. They feed
-    compute_state_tol_per_elem below; nothing else uses them."""
+    golden_output[T,H], golden_y[H], state, quantized), where state is the
+    replica's dequantized EXIT state {"state": c[H], "n": n[H], "m": m[H]}
+    - the same three buffers the C kernel leaves behind for the caller, in
+    the same dequantized units the INT8 test reads them back in. They feed
+    compute_state_tol_per_elem below.
+
+    quantized is the same trajectory and exit state as raw integers, the
+    exact byte-level values the C kernel writes. Measured across every
+    case in this file the two agree to 0 LSB on output/y/c/n, so the
+    framework adapter integration tests assert against these directly
+    rather than against a tolerance - see generate_json."""
     H, T, I = tc["H"], tc["T"], tc["I"]
     W = _t2n(tc["W"]).reshape(4 * H, I)
     R = _t2n(tc["R"]).reshape(4 * H, H)
     b = _t2n(tc["b"])
     x = _t2n(tc["input"]).reshape(1, T, I)
     y_gold = _t2n(tc["y"]).reshape(H)
-    c_gold = _t2n(tc["c"]).reshape(H)
-    n_gold = _t2n(tc["n"]).reshape(H)
     out_gold = _t2n(tc["output"]).reshape(T, H) if tc["output"] is not None else y_gold.reshape(1, H)
 
-    w_scale, _ = _quant_sym8(W.flatten())
-    r_scale, _ = _quant_sym8(R.flatten())
-    x_scale, x_zp = _quant_asym(x.flatten())
+    cal = _slstm_s8_calib(tc)
+    w_scale, r_scale = cal["W_scale"], cal["R_scale"]
+    x_scale, x_zp = cal["x_scale"], cal["x_zero_point"]
+    y_scale, y_zp = cal["y_scale"], cal["y_zero_point"]
+    c_scale, n_scale = cal["c_scale"], cal["n_scale"]
+
     Wq = _qs8(W, w_scale, 0)
     Rq = _qs8(R, r_scale, 0)
     xq = _qs8(x, x_scale, x_zp)
     b_scale = w_scale * x_scale
     bq = np.round(b / b_scale).astype(np.int64)
-
-    y_cal = out_gold.flatten()
-    y_scale, y_zp = _quant_asym(y_cal)
-    c_scale, _ = _quant_sym16_headroom(c_gold)
-    n_scale, _ = _quant_sym16_headroom(n_gold)
 
     c_q = np.zeros(H, dtype=np.int64)
     n_q = np.zeros(H, dtype=np.int64)
@@ -344,6 +391,7 @@ def _slstm_int8_trace(tc, perturb=1.0):
     wx_scale = w_scale * x_scale
     ry_scale = r_scale * y_scale
     out_computed = np.zeros((T, H))
+    out_q = np.zeros((T, H), dtype=np.int64)
     for t in range(T):
         xt = xq[0, t, :]
         acc_wx = Wq.astype(np.int64) @ (xt - x_zp)
@@ -370,39 +418,46 @@ def _slstm_int8_trace(tc, perturb=1.0):
         m_state = m_new
         y_q = np.clip(np.round(y_new / y_scale + y_zp), -128, 127).astype(np.int64)
         out_computed[t] = y_scale * (y_q - y_zp)
+        out_q[t] = y_q
     state = {"state": c_q.astype(np.float64) * c_scale,
              "n": n_q.astype(np.float64) * n_scale,
              "m": m_state.copy()}
-    return out_computed, out_gold, y_gold, state
+    quantized = {"output": out_q.flatten(), "y": y_q, "c": c_q, "n": n_q,
+                 "m": m_state.copy()}
+    return out_computed, out_gold, y_gold, state, quantized
 
 
 def _mlstm_int8_trace(tc, perturb=1.0):
     """Numpy replica of PrepareMlstmS8 + mlstm_eval_s8. Returns (out[T,H],
-    golden_output[T,H], golden_y[H], state), where state is the replica's
-    dequantized EXIT state {"state": C[H*H], "n": n[H], "m": m[1]} - see
+    golden_output[T,H], golden_y[H], state, quantized), where state is the
+    replica's dequantized EXIT state {"state": C[H*H], "n": n[H], "m":
+    m[1]} and quantized is the raw-integer form of the same - see
     _slstm_int8_trace above."""
     H, T, I = tc["H"], tc["T"], tc["I"]
     W = _t2n(tc["W"]).reshape(4 * H + 2, I)
     b = _t2n(tc["b"])
     x = _t2n(tc["input"]).reshape(1, T, I)
     y_gold = _t2n(tc["y"]).reshape(H)
-    C_gold = _t2n(tc["c"]).reshape(H, H)
-    n_gold = _t2n(tc["n"]).reshape(H)
     out_gold = _t2n(tc["output"]).reshape(T, H) if tc["output"] is not None else y_gold.reshape(1, H)
 
-    w_scale, _ = _quant_sym8(W.flatten())
-    x_scale, x_zp = _quant_asym(x.flatten())
+    cal = _mlstm_s8_calib(tc)
+    w_scale = cal["W_scale"]
+    x_scale, x_zp = cal["x_scale"], cal["x_zero_point"]
+    y_scale, y_zp = cal["y_scale"], cal["y_zero_point"]
+    C_scale, n_scale = cal["C_scale"], cal["n_scale"]
+
     Wq = _qs8(W, w_scale, 0)
     xq = _qs8(x, x_scale, x_zp)
     bq = np.round(b / (w_scale * x_scale)).astype(np.int64)
-    y_scale, y_zp = _quant_asym(out_gold.flatten())
-    n_scale, _ = _quant_sym16_headroom(n_gold)
-    C_scale, _ = _quant_sym16_headroom(C_gold.flatten())
 
     C_f = np.zeros((H, H))
     n_f = np.zeros(H)
     m_state = np.zeros(1)
     out_computed = np.zeros((T, H))
+    out_q = np.zeros((T, H), dtype=np.int64)
+    C_q = np.zeros((H, H))
+    n_q = np.zeros(H)
+    yq = np.zeros(H)
     for t in range(T):
         xt = xq[0, t, :]
         acc = Wq.astype(np.int64) @ (xt - x_zp)
@@ -429,8 +484,12 @@ def _mlstm_int8_trace(tc, perturb=1.0):
         y_new = y_new * perturb
         yq = np.clip(np.round(y_new / y_scale + y_zp), -128, 127)
         out_computed[t] = y_scale * (yq - y_zp)
+        out_q[t] = yq.astype(np.int64)
     state = {"state": C_f.flatten().copy(), "n": n_f.copy(), "m": m_state.copy()}
-    return out_computed, out_gold, y_gold, state
+    quantized = {"output": out_q.flatten(), "y": yq.astype(np.int64),
+                 "C": C_q.flatten().astype(np.int64),
+                 "n": n_q.astype(np.int64), "m": m_state.copy()}
+    return out_computed, out_gold, y_gold, state, quantized
 
 
 def _round_sig(x, sig=2, up=False):
@@ -517,11 +576,11 @@ def compute_tol_s8_per_channel(tc, cell):
     instead of the trajectory-wide max, so it always catches a
     final-state-only corruption of the whole case."""
     if cell == "s":
-        out0, gold, y_gold, _ = _slstm_int8_trace(tc, 1.0)
-        out1, _, _, _ = _slstm_int8_trace(tc, 1.001)
+        out0, gold, y_gold, _, _ = _slstm_int8_trace(tc, 1.0)
+        out1, _, _, _, _ = _slstm_int8_trace(tc, 1.001)
     else:
-        out0, gold, y_gold, _ = _mlstm_int8_trace(tc, 1.0)
-        out1, _, _, _ = _mlstm_int8_trace(tc, 1.001)
+        out0, gold, y_gold, _, _ = _mlstm_int8_trace(tc, 1.0)
+        out1, _, _, _, _ = _mlstm_int8_trace(tc, 1.001)
     err0 = np.max(np.abs(out0 - gold), axis=0)
     err1 = np.max(np.abs(out1 - gold), axis=0)
     floor = np.maximum(err0, err1)
@@ -627,11 +686,11 @@ def compute_state_tol_per_elem(tc, cell):
     assertions stop being the first thing a LUT-style gate perturbation
     trips (see the report for the sweep)."""
     if cell == "s":
-        _, _, _, st0 = _slstm_int8_trace(tc, 1.0)
-        _, _, _, st1 = _slstm_int8_trace(tc, 1.001)
+        _, _, _, st0, _ = _slstm_int8_trace(tc, 1.0)
+        _, _, _, st1, _ = _slstm_int8_trace(tc, 1.001)
     else:
-        _, _, _, st0 = _mlstm_int8_trace(tc, 1.0)
-        _, _, _, st1 = _mlstm_int8_trace(tc, 1.001)
+        _, _, _, st0, _ = _mlstm_int8_trace(tc, 1.0)
+        _, _, _, st1, _ = _mlstm_int8_trace(tc, 1.001)
 
     golds = {"state": _t2n(tc["c"]).flatten(),
              "n": _t2n(tc["n"]).flatten(),
@@ -1287,6 +1346,63 @@ def to_list(tensor):
     return [round(float(v), 8) for v in tensor.flatten().tolist()]
 
 
+def _to_ints(a):
+    return [int(v) for v in np.asarray(a).flatten().tolist()]
+
+
+def _s8_json_block(tc, cell):
+    """The INT8 block generate_json attaches to every case.
+
+    Framework adapters reach the INT8 kernels with tensors that are
+    already quantized - the framework carries the scale and zero-point,
+    the adapter only unpacks them. Their integration tests are therefore
+    handed quantized inputs here rather than calibrating their own: it
+    keeps four harnesses free of quantizer code, and it removes the one
+    way they could disagree with the C kernel without either being wrong
+    (numpy's round-half-to-even vs C's roundf rounding a weight the other
+    way at an exact .5 tie).
+
+    expected_*_q are what the numpy replica above computes, which is what
+    the C kernel computes: measured across every case in this file the
+    two agree on every output, y, c/C and n integer exactly, and on m to
+    within float32 rounding. A harness asserts the raw integers and needs
+    no tolerance at all. tol_per_channel is carried alongside so a harness
+    can also state the weaker but more meaningful claim - dequantized INT8
+    output stays within the calibrated per-channel bound of the f32 golden
+    - using the same bounds test/{slstm,mlstm}_s8_test.cc assert against.
+    """
+    H, T, I = tc["H"], tc["T"], tc["I"]
+    x = _t2n(tc["input"]).reshape(1, T, I)
+    W = _t2n(tc["W"])
+    b = _t2n(tc["b"])
+
+    if cell == "s":
+        cal = _slstm_s8_calib(tc)
+        _, _, _, _, q = _slstm_int8_trace(tc)
+        R = _t2n(tc["R"]).reshape(4 * H, H)
+        blk = {"R_q": _to_ints(_qs8(R, cal["R_scale"], 0)),
+               "expected_c_q": _to_ints(q["c"])}
+    else:
+        cal = _mlstm_s8_calib(tc)
+        _, _, _, _, q = _mlstm_int8_trace(tc)
+        blk = {"expected_C_q": _to_ints(q["C"])}
+
+    wx = cal["W_scale"] * cal["x_scale"]
+    blk.update(cal)
+    blk.update({
+        "b_scale": wx,
+        "x_q": _to_ints(_qs8(x, cal["x_scale"], cal["x_zero_point"])),
+        "W_q": _to_ints(_qs8(W.reshape(-1), cal["W_scale"], 0)),
+        "b_q": _to_ints(np.round(b / wx)),
+        "expected_output_q": _to_ints(q["output"]),
+        "expected_y_q": _to_ints(q["y"]),
+        "expected_n_q": _to_ints(q["n"]),
+        "expected_m": to_list(q["m"]),
+        "tol_per_channel": [float(v) for v in tc["tol_s8_per_channel"]],
+    })
+    return blk
+
+
 def generate_json(path):
     """Generate reference_data.json with the same values as the C header."""
     slstm_cases, mlstm_cases, extras = build_cases()
@@ -1302,6 +1418,7 @@ def generate_json(path):
         }
         if tc["output"] is not None:
             entry["expected_output"] = to_list(tc["output"])
+        entry["s8"] = _s8_json_block(tc, "s")
         data["slstm"][f"test{i}"] = entry
 
     for i, tc in enumerate(mlstm_cases, start=1):
@@ -1314,6 +1431,7 @@ def generate_json(path):
         }
         if tc["output"] is not None:
             entry["expected_output"] = to_list(tc["output"])
+        entry["s8"] = _s8_json_block(tc, "m")
         data["mlstm"][f"test{i}"] = entry
 
     # The fused 2-head tensors are not a case (see _emit_head2_fused): they

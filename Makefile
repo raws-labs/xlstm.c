@@ -125,6 +125,10 @@ test-neon:
 	@qemu-aarch64 $(BUILD)/mlstm_test
 	@qemu-aarch64 $(BUILD)/slstm_s8_test
 	@qemu-aarch64 $(BUILD)/mlstm_s8_test
+	@# Leave no foreign binaries behind. Where binfmt_misc is registered, a
+	@# later host `make test` finds these up to date and RUNS them under the
+	@# emulator, reporting a pass for a backend it never built.
+	@$(MAKE) clean
 
 # The cortexm backend's DSP arithmetic, on armv7-a under emulation. SXTAB16 and
 # SMLAD are ARMv6 DSP instructions that A-profile has too, so `armv7-a+fp`
@@ -158,6 +162,8 @@ test-cortexm:
 	@qemu-arm $(BUILD)/mlstm_test
 	@qemu-arm $(BUILD)/slstm_s8_test
 	@qemu-arm $(BUILD)/mlstm_s8_test
+	@# Same reason as test-neon above: do not leave armhf binaries in build/.
+	@$(MAKE) clean
 
 # --- Docker integration tests ---
 

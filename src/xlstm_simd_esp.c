@@ -655,14 +655,19 @@ void xlstm_matvec_s8(const int8_t* M, const int8_t* v,
  * the gate makes - this file as C, and the scalar bodies as the C++ the gate
  * inlines them into - at three settings:
  *
- *   -Og, which is what the gate builds: NOTHING contracts. Both bodies spell
- *        f*C + ik*v as MUL.S, MUL.S, ADD.S.
+ *   -Og: NOTHING contracts. Both bodies spell f*C + ik*v as MUL.S, MUL.S,
+ *        ADD.S.
  *   -O2 with a GNU dialect, which is what a tuned firmware builds: both
  *        contract, and both pick the same one - MUL.S on ik*v, then MADD.S
  *        accumulating f*C. That is not luck; it falls out of writing the
  *        multiplies in the same order, the first one in statement order
  *        being the one that becomes the madd.
- *   -O2 under -std=c99: neither contracts, on either side.
+ *   -O2 under strict ISO: the two DIALECTS split. gcc 14 defaults -std=cNN to
+ *        -ffp-contract=off and -std=c++NN to fast, so this file emits MUL.S +
+ *        ADD.S while the same scalar body compiled as C++ emits MADD.S. That
+ *        is a property of the flags and not of either body, which is why the
+ *        gate spells -ffp-contract=off on both sides rather than inheriting
+ *        it - see the Makefile's test-esp target.
  *
  * vecmat has only one multiply to place and emits the single MADD.S that
  * qi*M + out[j] has to be, in both its spellings and on both sides.

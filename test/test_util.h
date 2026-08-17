@@ -1,4 +1,10 @@
 /* Shared test utilities for xlstm.c kernel tests.
+ *
+ * Standing rule for every tolerance below, and for the floor factors the
+ * INT8 runners spell out inline: re-run `make mutants` after changing one.
+ * A loosened bound fails by making a gate quietly stop failing, which a
+ * green `make test` cannot show you - the mutation battery injects the
+ * defects these bounds exist to catch and fails if one now passes.
  * =========================================================================*/
 
 #ifndef TEST_UTIL_H_

@@ -47,6 +47,17 @@ This regenerates both `test/reference_data.h` (C tests) and
 `test/reference_data.json` (Python/Docker tests) from the NX-AI/xlstm
 reference implementation.
 
+## Changing a tolerance, a bound, or the generator
+
+```bash
+make mutants           # ~35s, edits the working tree and restores it
+```
+
+Those changes fail by making a gate quietly stop failing, which a green
+`make test` cannot show you. The mutation battery injects the defects the
+bounds exist to catch and fails if any of them now passes. It is not in CI -
+run it locally, and say in the PR that you did.
+
 ## Reporting issues
 
 Open an issue on GitHub. Include:

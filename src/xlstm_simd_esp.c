@@ -12,8 +12,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  * =========================================================================
- * ESP32-S3 backend - uses ESP-DSP dot product and PIE int8 MAC.
- * Only compiles under ESP-IDF toolchain.
+ * ESP32-S3 backend. Only compiles under the ESP-IDF toolchain.
+ *
+ * ONE of the four contract functions is accelerated: xlstm_matvec_f32 calls
+ * ESP-DSP's dot product, and only when the caller's buffers satisfy the
+ * alignment guard below. xlstm_matvec_s8, xlstm_rank1_update_f32 and
+ * xlstm_vecmat_f32 are scalar C - no Xtensa PIE instruction is issued
+ * anywhere in this file. `make test-esp` runs the golden vectors against it
+ * on an emulated ESP32-S3 and reports how many f32 matvecs reached the
+ * accelerated path; read that target's comment before quoting a green run.
  * ===========================================================================*/
 
 #include "xlstm_simd.h"
@@ -21,17 +28,28 @@
 
 #include <stdint.h>
 
-/* ESP-DSP's optimized dot products load 128 bits at a time
- * (EE.LDF.128.IP src, 16) and consume four floats per iteration, so both
- * operands must be 16-byte aligned and the length must be a multiple of 4.
- * Nothing in the ESP-DSP headers states this - it is visible only in the
- * .S sources - and violating it does not fault, it silently returns wrong
- * numbers.
+/* dsps_dotprod_f32 is a macro that resolves to dsps_dotprod_f32_aes3 on the
+ * S3 (_ae32 on the ESP32, _ansi elsewhere). The S3 body loads 128 bits at a
+ * time (EE.LDF.128.IP src, 16) and consumes four floats per iteration, so it
+ * wants both operands 16-byte aligned and the length a multiple of 4.
+ *
+ * Calling it without those is NOT undefined and does NOT silently return
+ * wrong numbers - a claim this comment used to make, and it is wrong.
+ * _aes3 opens by testing exactly those three conditions (`len & 3`, then
+ * `(src1 | src2) & 15`) and branches to the _ae32 body when any fails, so
+ * the arithmetic is right either way. That prologue is byte-identical in
+ * esp-dsp v1.2.0, v1.5.2 and v1.8.2, so it is a property of the library and
+ * not of one release.
+ *
+ * The guard below therefore buys speed rather than correctness - and one
+ * other thing. The _ae32 body it steers around reads one float past the end
+ * of src2: its inner macro loads x2[i+1] at the bottom of every iteration,
+ * including the last. The overread is real, and unreachable from here by
+ * construction, because `fast` is precisely the condition under which _aes3
+ * never enters that body.
  *
  * xlstm_matvec_f32 walks rows as M + i*cols, so row alignment depends on
- * both the base pointer and cols. Rather than assume, check, and fall back
- * to ESP-DSP's own ANSI implementation when the preconditions do not hold.
- * dsps_dotprod_f32_ansi is plain C with no alignment or length constraint.
+ * both the base pointer and cols; the guard is hoisted accordingly.
  *
  * Note also that despite the header's doc comment claiming
  * "*dest += src1[i]*src2[i]", every implementation ASSIGNS (*dest = acc;
@@ -46,6 +64,27 @@ static inline int xlstm_esp_aligned(const void* p)
     return (((uintptr_t)p) & (XLSTM_ESP_DSP_ALIGN - 1)) == 0;
 }
 
+/* Whether the accelerated path was taken is a property of the buffers the
+ * caller happened to pass, not of this file - so a build can link this
+ * backend, reproduce every golden vector, and never once execute the
+ * accelerated instruction. Nothing else here can observe that, which makes
+ * it exactly the kind of silent loss of coverage a gate has to be able to
+ * fail on. These two counters are how it does: test/esp/main/esp_gate.cc
+ * calls this function with buffers it aligns itself and asserts the split
+ * moved the way it must.
+ *
+ * Off unless XLSTM_ESP_FASTPATH_COUNTERS is defined (test/esp sets it, the
+ * ordinary build does not), so a shipping kernel carries neither the
+ * counters nor the increment. */
+#ifdef XLSTM_ESP_FASTPATH_COUNTERS
+unsigned long xlstm_esp_matvec_f32_fast = 0;
+unsigned long xlstm_esp_matvec_f32_scalar = 0;
+#define XLSTM_ESP_COUNT(fast) \
+    ((void)((fast) ? ++xlstm_esp_matvec_f32_fast : ++xlstm_esp_matvec_f32_scalar))
+#else
+#define XLSTM_ESP_COUNT(fast) ((void)0)
+#endif
+
 void xlstm_matvec_f32(const float* M, const float* v,
                       float* out, int rows, int cols)
 {
@@ -54,13 +93,14 @@ void xlstm_matvec_f32(const float* M, const float* v,
     const int fast = (cols % 4) == 0 && xlstm_esp_aligned(M) && xlstm_esp_aligned(v);
     int i;
 
+    XLSTM_ESP_COUNT(fast);
+
     for (i = 0; i < rows; ++i) {
         if (fast) {
-            /* Chip-generic macro: dispatches to _aes3 on ESP32-S3, _ae32 on
-             * ESP32, _ansi elsewhere. The previous code hardcoded _ae32, the
-             * ESP32 variant, which compiles on S3 (its guard is generic Xtensa
-             * capability flags, not a chip check) but leaves the S3-optimized
-             * path unused. */
+            /* The chip-generic macro, not _ae32. Earlier code hardcoded the
+             * ESP32 variant, which compiles on the S3 (its guard is generic
+             * Xtensa capability flags, not a chip check) and leaves the
+             * S3-optimized body unused. */
             float dot;
             dsps_dotprod_f32(M + i * cols, v, &dot, cols);
             out[i] += dot;

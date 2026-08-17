@@ -174,21 +174,22 @@ test-cortexm:
 #
 # WHAT IT EXERCISES, precisely - a green run here is a narrow claim:
 #
-#   - xlstm_matvec_f32, both of its paths. The accelerated one (ESP-DSP's
-#     dsps_dotprod_f32, which resolves to the S3's dsps_dotprod_f32_aes3) is
-#     the ONLY accelerated code in src/xlstm_simd_esp.c, and it is entered
-#     only when cols % 4 == 0 and both operands are 16-byte aligned.
-#     test/esp/main/esp_gate.cc calls the kernel with buffers it aligns
-#     itself and fails the run unless the aligned call took that path, the
-#     misaligned one did not, and both match a dot product it computes.
+#   - xlstm_matvec_f32, both of its paths. Its blocked body - four rows at a
+#     time, four columns per EE.LDF.128.IP - is the ONLY accelerated code in
+#     src/xlstm_simd_esp.c, and it is entered on rows and cols alone: 7 or
+#     more columns and at least one whole block of rows.
+#     test/esp/main/esp_gate.cc runs 15 shapes at all four alignments of each
+#     operand and fails the run unless each took the path its shape dictates
+#     and matched xlstm_scalar_matvec_f32 bit for bit.
 #   - xlstm_matvec_s8, xlstm_rank1_update_f32 and xlstm_vecmat_f32 against
 #     the golden vectors - but those three are scalar C in this backend, so
 #     what is gated there is the arithmetic, not any Xtensa instruction.
-#   - The suites' own f32 matvecs mostly run SCALAR: 70 of their 76
-#     xlstm_matvec_f32 calls, because the runners' state and scratch arrays
-#     are not 16-byte aligned. The firmware prints that split every run
-#     rather than leaving it to be assumed, and does not assert on it - it
-#     is decided by where the linker put those arrays, not by the kernel.
+#   - The suites' own f32 matvecs: 36 of their 76 xlstm_matvec_f32 calls run
+#     blocked, the other 40 being the cases whose H and I are 1 to 4, under
+#     one 128-bit group wide. The firmware prints that split every run rather
+#     than leaving it to be assumed, and does not assert on it - it is a
+#     property of the case list, and pinning it here would gate
+#     reference_data.h rather than the kernel.
 #
 # What it does NOT cover: real silicon. QEMU executes the S3's SIMD
 # instructions but does not model their timing, its Xtensa FPU is not

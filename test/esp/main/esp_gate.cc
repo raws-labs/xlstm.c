@@ -13,6 +13,10 @@
 
 #include "test_config.h"
 #include "xlstm_simd.h"
+/* The scalar bodies themselves, not a copy of them: the check below compares
+ * the accelerated matvec against the same text every backend is defined
+ * against. */
+#include "xlstm_simd_scalar.h"
 
 #include <cmath>
 #include <cstdio>
@@ -36,73 +40,78 @@ namespace {
 
 /* --- Fast-path check ----------------------------------------------------
  *
- * Everything this backend accelerates is one call - ESP-DSP's dot product
- * inside xlstm_matvec_f32 - taken only when cols is a multiple of 4 and both
- * operands are 16-byte aligned. That is a property of the buffers a caller
- * happens to pass, so the four suites can pass in full while the accelerated
- * body never executes, and very nearly do: their state and scratch arrays
- * are not 16-byte aligned, so every recurrent matvec runs scalar, and the
- * few input matvecs that do reach the fast path reach it because the linker
- * put two arrays on a 16-byte boundary. A relink moves that, and a gate
- * resting on it would go on passing with no accelerated coverage left.
+ * Everything this backend accelerates is one body - the four-row, 128-bit
+ * load blocked matvec inside xlstm_matvec_f32 - and which calls reach it is
+ * decided by rows and cols alone: at least 7 columns (a scalar prefix of up
+ * to 3, then one whole 16-byte group) and at least one whole block of four
+ * rows spaced 4 / gcd(cols, 4) apart. Where M and v landed does not enter
+ * into it, and that is the property being checked here. The guard this
+ * replaced asked for two 16-byte-aligned operands instead, and got them 6
+ * times in 76 suite calls - by linker accident, so a relink could have taken
+ * even those away and the suites would have gone on passing with no
+ * accelerated coverage at all.
  *
- * So this does not rest on the suites. It calls the kernel twice with
- * buffers it aligns itself and fails the run unless all three hold:
+ * So this does not rest on the suites. It runs every shape at all four
+ * alignments of M and of v and fails the run unless all three hold:
  *
- *   1. the aligned call takes the fast path,
- *   2. the deliberately misaligned call takes the scalar one - without this,
- *      a guard stuck at "always fast" would look identical to a correct one,
- *   3. both agree with a dot product computed here, so the accelerated
- *      result is checked and not merely counted.
+ *   1. the shapes the rule blocks took the blocked path, at every alignment,
+ *   2. the shapes it cannot took the scalar body - without this, a guard
+ *      stuck at "always fast" would look identical to a correct one,
+ *   3. every result matched xlstm_scalar_matvec_f32 BIT FOR BIT. The blocked
+ *      body reorders loads, not additions, so this is an equality and not a
+ *      tolerance; a tolerance here would hide the one thing the body is
+ *      written to avoid, and the f32 goldens have no room for it.
  */
 
-const int kRows = 8;
-const int kCols = 64; /* multiple of 4: the length half of the guard */
+const int kMaxRows = 20;
+const int kMaxCols = 64;
 
-/* +4 floats of headroom so the misaligned view (g_M + 1) still ends in
- * bounds. alignas gives the aligned view its half of the guard; the
- * misaligned view is then exactly 4 bytes off, which fails it. */
-alignas(16) float g_M[kRows * kCols + 4];
-alignas(16) float g_v[kCols];
-float g_out[kRows];
+/* 16-byte aligned, so +1, +2 and +3 floats are exactly the other three
+ * alignments, and 4 floats longer than the largest shape so those views
+ * still end in bounds. */
+alignas(16) float g_M[kMaxRows * kMaxCols + 4];
+alignas(16) float g_v[kMaxCols + 4];
+float g_out[kMaxRows];
+float g_ref[kMaxRows];
 
 /* Seed for out[], so the check also covers the contract's accumulate
- * semantics (out[i] += dot) rather than only the product. */
+ * semantics (out[i] += row . v) rather than only the product. */
 float OutSeed(int i) { return 0.25f * (float)i; }
 
-bool CheckPath(const char* what, const float* M, const float* v,
-               bool expect_fast) {
+bool CheckShape(int rows, int cols, int moff, int voff, bool expect_fast) {
+    const float* M = g_M + moff;
+    const float* v = g_v + voff;
     const unsigned long fast0 = xlstm_esp_matvec_f32_fast;
     const unsigned long scalar0 = xlstm_esp_matvec_f32_scalar;
     bool ok = true;
 
-    for (int i = 0; i < kRows; ++i) g_out[i] = OutSeed(i);
-    xlstm_matvec_f32(M, v, g_out, kRows, kCols);
+    for (int i = 0; i < rows; ++i) g_out[i] = g_ref[i] = OutSeed(i);
+    xlstm_matvec_f32(M, v, g_out, rows, cols);
+    xlstm_scalar_matvec_f32(M, v, g_ref, rows, cols);
 
     const unsigned long d_fast = xlstm_esp_matvec_f32_fast - fast0;
     const unsigned long d_scalar = xlstm_esp_matvec_f32_scalar - scalar0;
     const unsigned long want_fast = expect_fast ? 1ul : 0ul;
     if (d_fast != want_fast || d_scalar != 1ul - want_fast) {
-        std::printf("  FAIL %s: expected the %s path, got fast+%lu scalar+%lu. "
-                    "The accelerated dot product is the only thing this "
-                    "backend accelerates; a gate that cannot prove it ran "
-                    "proves nothing.\n",
-                    what, expect_fast ? "accelerated" : "scalar",
-                    d_fast, d_scalar);
+        std::printf("  FAIL rows=%d cols=%d M+%d v+%d: expected the %s path, "
+                    "got fast+%lu scalar+%lu. Which path a call takes is a "
+                    "property of its shape; a gate that cannot prove the "
+                    "128-bit load ran proves nothing.\n",
+                    rows, cols, moff, voff,
+                    expect_fast ? "blocked" : "scalar", d_fast, d_scalar);
         ok = false;
     }
 
-    for (int i = 0; i < kRows; ++i) {
-        float ref = OutSeed(i);
-        for (int j = 0; j < kCols; ++j) ref += M[i * kCols + j] * v[j];
-        /* The accelerated body sums into four partial accumulators and the
-         * reference above sums in order, so this is a float-grouping
-         * tolerance, not a correctness allowance. */
-        const float diff = std::fabs(ref - g_out[i]);
-        if (diff > 1e-5f + 1e-5f * std::fabs(ref)) {
-            std::printf("  FAIL %s[%d]: expected %.8f, got %.8f (diff %.2e)\n",
-                        what, i, ref, g_out[i], diff);
+    for (int i = 0; i < rows; ++i) {
+        if (g_out[i] != g_ref[i]) {
+            std::printf("  FAIL rows=%d cols=%d M+%d v+%d out[%d]: got %.9g, "
+                        "reference %.9g (diff %.2e). The blocked body reorders "
+                        "loads, not additions - this has to be exact.\n",
+                        rows, cols, moff, voff, i, (double)g_out[i],
+                        (double)g_ref[i],
+                        (double)std::fabs(g_out[i] - g_ref[i]));
             ok = false;
+            break;
         }
     }
     return ok;
@@ -110,14 +119,37 @@ bool CheckPath(const char* what, const float* M, const float* v,
 
 bool TestFastPath(void) {
     /* Deterministic, and neither constant nor symmetric - a lane-ordering
-     * defect in the 4-wide body has to be able to show up. */
-    for (int i = 0; i < kRows * kCols + 4; ++i)
+     * defect in the 4-wide load has to be able to show up. */
+    for (int i = 0; i < kMaxRows * kMaxCols + 4; ++i)
         g_M[i] = 0.5f - (float)((i * 37) % 71) / 70.0f;
-    for (int j = 0; j < kCols; ++j)
+    for (int j = 0; j < kMaxCols + 4; ++j)
         g_v[j] = (float)((j * 53) % 31) / 15.0f - 1.0f;
 
-    bool ok = CheckPath("aligned", g_M, g_v, true);
-    ok &= CheckPath("misaligned", g_M + 1, g_v, false);
+    /* Spelled out rather than recomputed from the kernel's own formula: a
+     * check that derives the rule the same way the kernel does cannot fail
+     * when the rule changes. cols straddles the 4-column group both ways,
+     * and the last four entries vary the row count rather than the width. */
+    static const struct { int rows, cols; bool fast; } kShapes[] = {
+        {20, 1, false}, {20, 2, false}, {20, 3, false}, /* under one group */
+        {20, 4, false}, {20, 6, false},  /* a group only at some alignments */
+        {20, 7, true},  {20, 8, true},  {20, 9, true},
+        {20, 16, true}, {20, 17, true}, {20, 64, true},
+        {8, 17, false}, /* odd cols blocks 4 rows apart: 16 rows minimum */
+        {8, 16, true},  {4, 15, false}, {4, 16, true},
+    };
+    const int kShapeCount = (int)(sizeof kShapes / sizeof kShapes[0]);
+    bool ok = true;
+
+    for (int s = 0; s < kShapeCount; ++s) {
+        for (int moff = 0; moff < 4; ++moff) {
+            for (int voff = 0; voff < 4; ++voff) {
+                ok &= CheckShape(kShapes[s].rows, kShapes[s].cols, moff, voff,
+                                 kShapes[s].fast);
+            }
+        }
+    }
+    std::printf("  %d shapes x 16 alignments, all bit-exact against "
+                "xlstm_scalar_matvec_f32\n", kShapeCount);
     return ok;
 }
 
@@ -155,17 +187,19 @@ extern "C" void app_main(void) {
         rc |= slstm_s8_test_main();
         rc |= mlstm_s8_test_main();
 
-        /* Reported, not asserted. Which suite matvecs clear the alignment
-         * guard is decided by where the linker placed the runners' arrays,
-         * so failing on this number would make the gate flake on an
-         * unrelated relink. TestFastPath above is the assertion; this is
-         * here so a reader of a green log can see how little of the run was
-         * actually accelerated. */
+        /* Reported, not asserted. This number is now a property of the case
+         * list - every call with 7 or more columns is blocked, and the rest
+         * are the H and I of 1 to 4 - so asserting it would only pin down
+         * reference_data.h, which is not what this gate is for. TestFastPath
+         * above is the assertion; this is here so a reader of a green log
+         * can see how much of the run was accelerated, and what the calls
+         * that were not have in common. */
         const unsigned long fast = xlstm_esp_matvec_f32_fast - fast0;
         const unsigned long scalar = xlstm_esp_matvec_f32_scalar - scalar0;
         std::printf("XLSTM_ESP_FASTPATH: the suites called xlstm_matvec_f32 "
-                    "%lu times, %lu of them accelerated. Every other kernel "
-                    "in this backend is scalar C.\n",
+                    "%lu times, %lu of them blocked (the rest are under 7 "
+                    "columns wide). Every other kernel in this backend is "
+                    "scalar C.\n",
                     fast + scalar, fast);
     }
 

@@ -1,18 +1,22 @@
-/* Entry point for the emulated ESP32-S3 gate (`make test-esp`).
+/* Fast-path gate for the `esp` SIMD backend, run on an emulated ESP32-S3 as
+ * the fifth binary of `make test-esp`. The other four are the ordinary
+ * golden-vector suites, cross-compiled unchanged.
  *
- * Runs the four golden-vector suites against the `esp` SIMD backend on a
- * QEMU-emulated ESP32-S3, plus the two fast-path checks below, and prints
- * one sentinel line that ../qemu_gate.sh turns into the container's exit
- * code.
+ * The suites prove the kernels compute the right numbers. They cannot prove
+ * WHICH body computed them: a dispatch condition stuck at "always scalar"
+ * passes every golden vector and accelerates nothing. That is what the four
+ * checks below assert, one per contract function - the path a call takes is
+ * a property of its shape, and every result matches the shared scalar body
+ * bit for bit.
  *
  * Deliberately thin: no UART driver takeover, no trigger-byte handshake, no
  * timing pass, no clock guard, no provenance banner. Those belong to a rig
- * driving real silicon and measuring it. Nothing here needs them - QEMU's
- * serial output is captured from the first byte, and an emulated core has
- * no cycle count worth printing.
+ * driving real silicon and measuring it. Nothing here needs them - stdout
+ * arrives on the host through semihosting from the first byte, main's return
+ * value becomes the emulator's exit status, and an emulated core has no
+ * cycle count worth printing.
  * =========================================================================*/
 
-#include "test_config.h"
 #include "xlstm_simd.h"
 /* The scalar bodies themselves, not a copy of them: the check below compares
  * the accelerated matvec against the same text every backend is defined
@@ -23,17 +27,10 @@
 #include <cstdio>
 #include <cstring>
 
-/* The four suite entry points, renamed per translation unit by
- * main/CMakeLists.txt. All five files are C++, so these link straight
- * against the renamed definitions with no header in between. */
-extern int slstm_test_main(void);
-extern int mlstm_test_main(void);
-extern int slstm_s8_test_main(void);
-extern int mlstm_s8_test_main(void);
-
 /* Defined in src/xlstm_simd_esp.c under XLSTM_ESP_FASTPATH_COUNTERS, which
- * main/CMakeLists.txt sets. Referenced unconditionally so that losing the
- * define is a link error rather than a gate that stops checking. */
+ * the Makefile's test-esp target sets. Referenced unconditionally so that
+ * losing the define is a link error rather than a gate that stops
+ * checking. */
 extern "C" unsigned long xlstm_esp_matvec_f32_fast;
 extern "C" unsigned long xlstm_esp_matvec_f32_scalar;
 extern "C" unsigned long xlstm_esp_matvec_s8_fast;
@@ -503,16 +500,18 @@ bool TestVecmat(void) {
 
 } /* namespace */
 
-extern "C" void app_main(void) {
+int main(void) {
     const char* backend = xlstm_simd_backend();
     int rc = 0;
 
-    std::printf("XLSTM_ESP_GATE: backend=%s test_max_h=%d\n",
-                backend, XLSTM_TEST_MAX_H);
+    std::printf("[==========] Running esp fast-path checks (backend=%s)\n",
+                backend);
 
-    /* An image that had silently linked src/xlstm_simd_ref.c would pass
-     * every suite below and prove nothing about this backend. Refuse before
-     * running anything, so that failure can never read as a green run. */
+    /* An image that had silently linked src/xlstm_simd_ref.c would pass every
+     * golden vector and prove nothing about this backend. The four suites are
+     * built from the same xlstm_simd object as this binary, so refusing here
+     * refuses for the whole gate - and that failure can never read as a green
+     * run. */
     if (std::strcmp(backend, "esp") != 0) {
         std::printf("FATAL: linked SIMD backend is \"%s\", not \"esp\" - "
                     "refusing to run. A pass here would be a pass for the "
@@ -551,50 +550,23 @@ extern "C" void app_main(void) {
             rc = 1;
         }
 
-        const unsigned long fast0 = xlstm_esp_matvec_f32_fast;
-        const unsigned long scalar0 = xlstm_esp_matvec_f32_scalar;
-        const unsigned long qfast0 = xlstm_esp_matvec_s8_fast;
-        const unsigned long qscalar0 = xlstm_esp_matvec_s8_scalar;
-        const unsigned long rfast0 = xlstm_esp_rank1_f32_fast;
-        const unsigned long rscalar0 = xlstm_esp_rank1_f32_scalar;
-        const unsigned long vwide0 = xlstm_esp_vecmat_f32_wide;
-        const unsigned long vblocked0 = xlstm_esp_vecmat_f32_blocked;
-
-        rc |= slstm_test_main();
-        rc |= mlstm_test_main();
-        rc |= slstm_s8_test_main();
-        rc |= mlstm_s8_test_main();
-
-        /* Reported, not asserted. This number is now a property of the case
-         * list - every call with 7 or more columns is blocked, and the rest
-         * are the H and I of 1 to 4 - so asserting it would only pin down
-         * reference_data.h, which is not what this gate is for. TestFastPath
-         * above is the assertion; this is here so a reader of a green log
-         * can see how much of the run was accelerated, and what the calls
-         * that were not have in common. */
-        const unsigned long fast = xlstm_esp_matvec_f32_fast - fast0;
-        const unsigned long scalar = xlstm_esp_matvec_f32_scalar - scalar0;
-        const unsigned long qfast = xlstm_esp_matvec_s8_fast - qfast0;
-        const unsigned long qscalar = xlstm_esp_matvec_s8_scalar - qscalar0;
-        const unsigned long rfast = xlstm_esp_rank1_f32_fast - rfast0;
-        const unsigned long rscalar = xlstm_esp_rank1_f32_scalar - rscalar0;
-        const unsigned long vwide = xlstm_esp_vecmat_f32_wide - vwide0;
-        const unsigned long vblocked = xlstm_esp_vecmat_f32_blocked - vblocked0;
-        std::printf("XLSTM_ESP_FASTPATH: the suites called xlstm_matvec_f32 "
-                    "%lu times, %lu of them blocked (the rest are under 7 "
-                    "columns wide), and xlstm_matvec_s8 %lu times, %lu of "
-                    "them on EE.VMULAS.S8.ACCX - and a vector-body INT8 call "
-                    "runs every column of every row there, at any alignment. "
-                    "xlstm_rank1_update_f32 ran %lu times, %lu of them on "
-                    "EE.LDF.128.IP + EE.STF.128.IP (the rest are H under 7), "
-                    "and xlstm_vecmat_f32 %lu times, %lu of them with a "
-                    "128-bit load of M - the other %lu keep the same column "
-                    "blocking with scalar loads, which is every width not "
-                    "divisible by four.\n",
-                    fast + scalar, fast, qfast + qscalar, qfast,
-                    rfast + rscalar, rfast, vwide + vblocked, vwide, vblocked);
+        /* Reported, not asserted - the assertions are the four checks above.
+         * This is here so a reader of a green log can see, in one line, that
+         * every one of the four vector bodies really executed, and how often
+         * each check drove it rather than the scalar body it is compared
+         * against. */
+        std::printf("XLSTM_ESP_FASTPATH: matvec_f32 %lu blocked / %lu scalar, "
+                    "matvec_s8 %lu on EE.VMULAS.S8.ACCX / %lu scalar, "
+                    "rank1_f32 %lu on EE.LDF.128.IP + EE.STF.128.IP / %lu "
+                    "scalar, vecmat_f32 %lu with a 128-bit load of M / %lu "
+                    "blocked with scalar loads.\n",
+                    xlstm_esp_matvec_f32_fast, xlstm_esp_matvec_f32_scalar,
+                    xlstm_esp_matvec_s8_fast, xlstm_esp_matvec_s8_scalar,
+                    xlstm_esp_rank1_f32_fast, xlstm_esp_rank1_f32_scalar,
+                    xlstm_esp_vecmat_f32_wide, xlstm_esp_vecmat_f32_blocked);
     }
 
-    std::printf("##xlstm-esp-gate:%d##\n", rc ? 1 : 0);
+    std::printf("[==========] esp fast-path checks %s\n", rc ? "FAILED" : "passed");
     std::fflush(stdout);
+    return rc;
 }

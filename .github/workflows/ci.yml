@@ -117,23 +117,39 @@ jobs:
   # exists because without it the backend has no gate anywhere: its only other
   # check is test/adapters/esp-dl, which compiles and never executes.
   #
-  # A container rather than a cross-compile, because this backend needs a full
-  # ESP-IDF toolchain and a chip-specific QEMU. That makes it by far the most
-  # expensive job here - it pulls the ~6.9 GB espressif/idf:v5.4 image before
-  # it can start. The alternative shapes all cost correctness: v5.3 is smaller
-  # but its QEMU has no esp32s3 machine, and a bare toolchain without the IDF
-  # cannot build a bootable image at all.
+  # System emulation rather than qemu-user, because Xtensa has no Linux
+  # userspace - that is the only way this differs from the two jobs above. Two
+  # tarballs, ~190 MB together, replace the ESP-IDF container this used to
+  # need: the bare-metal startup, linker script and semihosting stdout all come
+  # from specs files inside the toolchain, so there is no IDF project to build,
+  # no bootloader, no flash image and no Docker.
   #
-  # Green here does NOT mean the backend is accelerated end to end. Two of the
-  # four contract functions have an accelerated path - xlstm_matvec_f32 on
-  # EE.LDF.128.IP and xlstm_matvec_s8 on EE.VMULAS.S8.ACCX - and the run
-  # reports what share of each one's calls took it; xlstm_vecmat_f32 and
-  # xlstm_rank1_update_f32 are scalar C. QEMU also says nothing about the
-  # part's FPU corner cases or about cycles. See the Makefile's test-esp
-  # target.
+  # Both versions are pinned. The toolchain is the one ESP-IDF v5.4 ships, so
+  # the gate compiles the kernels with the compiler a user of that IDF gets.
+  # QEMU has to be Espressif's fork: upstream has no esp32s3 machine.
+  #
+  # Green here does NOT mean the part is covered. QEMU executes the S3's PIE
+  # instructions but models no timing, and its Xtensa FPU is not guaranteed
+  # bit-identical to silicon. See the Makefile's test-esp target for what the
+  # run does and does not assert.
   emulated-esp:
     runs-on: ubuntu-latest
+    env:
+      TOOLCHAIN: https://github.com/espressif/crosstool-NG/releases/download/esp-14.2.0_20241119/xtensa-esp-elf-14.2.0_20241119-x86_64-linux-gnu.tar.xz
+      QEMU: https://github.com/espressif/qemu/releases/download/esp-develop-9.2.2-20260417/qemu-xtensa-softmmu-esp_develop_9.2.2_20260417-x86_64-linux-gnu.tar.xz
     steps:
       - uses: actions/checkout@v4
-      - name: Build the ESP32-S3 image and run it under qemu-system-xtensa
+      - name: Install the xtensa toolchain and Espressif's qemu-system-xtensa
+        run: |
+          # The three libraries are qemu-system-xtensa's DT_NEEDED entries.
+          # SDL2 is one of them even though this runs -display none: it is
+          # linked, not dlopened, so the binary will not start without it.
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libpixman-1-0 libsdl2-2.0-0 libslirp0
+          curl -fsSL "$TOOLCHAIN" | tar -xJ -C "$RUNNER_TEMP"
+          curl -fsSL "$QEMU" | tar -xJ -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xtensa-esp-elf/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/qemu/bin" >> "$GITHUB_PATH"
+      - name: Cross-compile and run under qemu-system-xtensa
         run: make test-esp

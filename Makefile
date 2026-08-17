@@ -92,6 +92,12 @@ $(BUILD)/mlstm_s8_test: test/mlstm_s8_test.cc $(BUILD)/mlstm_s8.o $(BUILD)/xlstm
 TEST_BINS := $(BUILD)/slstm_test $(BUILD)/mlstm_test \
              $(BUILD)/slstm_s8_test $(BUILD)/mlstm_s8_test
 
+# The esp backend's fast-path checks - the fifth binary of test-esp below.
+# -Isrc so it compares the accelerated bodies against src/xlstm_simd_scalar.h
+# itself rather than a copy. Buildable only with the xtensa toolchain.
+$(BUILD)/esp_gate: test/esp_gate.cc $(BUILD)/xlstm_simd.o src/xlstm_simd_scalar.h | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -Isrc -o $@ $< $(BUILD)/xlstm_simd.o -lm
+
 test: $(TEST_BINS)
 	@$(BUILD)/slstm_test
 	@$(BUILD)/mlstm_test
@@ -165,21 +171,43 @@ test-cortexm:
 	@# Same reason as test-neon above: do not leave armhf binaries in build/.
 	@$(MAKE) clean
 
-# The esp backend, on an emulated ESP32-S3. Unlike every other backend gate
-# this one needs a full ESP-IDF toolchain and a chip-specific QEMU, so it is
-# a container rather than a cross-compile: test/esp/ is an IDF project that
-# builds the same four suites into one firmware image, and the image's CMD
-# boots it under qemu-system-xtensa and exits with the firmware's verdict.
-# ESP-IDF v5.4, because v5.3's bundled QEMU has no esp32s3 machine.
+# The esp backend, on an emulated ESP32-S3. Xtensa has no Linux userspace, so
+# this is system emulation rather than qemu-user - the only way it differs in
+# shape from the two gates above. It cross-compiles the same four suites,
+# unchanged, and runs each as its own image, plus a fifth for the fast-path
+# checks in test/esp_gate.cc.
+#
+# It carries no startup code, no linker script and no semihosting shim: two
+# specs files that ship with the xtensa toolchain supply all of it.
+#
+#   sim.elf.specs   crt1-sim.o and the esp32s3 memory-map linker scripts -
+#                   reset and window vectors, .bss, .init_array, main, exit,
+#                   and a handler that prints PANIC and exits non-zero on an
+#                   unhandled exception instead of spinning.
+#   sys.qemu.specs  libsys_qemu - newlib's _write and _exit on the Xtensa
+#                   simcall instruction. That is what makes these ordinary
+#                   test binaries: printf reaches the host, and main's return
+#                   value becomes the emulator's process exit status.
+#
+# --defsym=entire_dram_seg=1 widens the linker script's default 64 KB data
+# region to the S3's full 448 KB, which the ~170 KB of golden vectors each
+# suite pulls in needs. XLSTM_TEST_MAX_H=64 bounds the runners' own static
+# buffers (test/test_config.h): the 256 default does not fit either, and 64
+# covers every case in test/reference_data.h. Neither touches XLSTM_MAX_HIDDEN,
+# so the kernels under test are the shipping ones.
+#
+# Needs xtensa-esp32s3-elf-g++ and Espressif's qemu-system-xtensa on PATH,
+# both single tarballs from GitHub releases - no ESP-IDF and no Docker.
+# .github/workflows/ci.yml installs them and pins the versions.
 #
 # WHAT IT EXERCISES, precisely - a green run here is a narrow claim:
 #
 #   - xlstm_matvec_f32, both of its paths. Its blocked body - four rows at a
 #     time, four columns per EE.LDF.128.IP - is entered on rows and cols
 #     alone: 7 or more columns and at least one whole block of rows.
-#     test/esp/main/esp_gate.cc runs 15 shapes at all four alignments of each
-#     operand and fails the run unless each took the path its shape dictates
-#     and matched xlstm_scalar_matvec_f32 bit for bit.
+#     test/esp_gate.cc runs 15 shapes at all four alignments of each operand
+#     and fails the run unless each took the path its shape dictates and
+#     matched xlstm_scalar_matvec_f32 bit for bit.
 #   - xlstm_matvec_s8, both of its paths. Its vector body - 16 columns per
 #     EE.VMULAS.S8.ACCX, each group assembled from the two aligned blocks
 #     holding it - is entered on cols and the zero point alone, never on
@@ -201,22 +229,50 @@ test-cortexm:
 #     which is a cols divisible by four. 19 shapes at 64 alignment triples,
 #     bit-exact, with out[] seeded non-zero so that dropping the accumulator
 #     seed - the one change that moved a golden here before - cannot pass.
-#   - The suites' own calls: 36 of their 76 xlstm_matvec_f32 calls run
-#     blocked, the other 40 being the cases whose H and I are 1 to 4, under
-#     one 128-bit group wide; all 136 xlstm_matvec_s8 calls run on the vector
-#     body, which is what a formulation that never seeks alignment buys. The
-#     firmware prints all four splits every run rather than leaving them to
-#     be assumed, and does not assert on them - they are a property of the
-#     case list, and pinning them here would gate reference_data.h rather
-#     than the kernel.
+#   - The four golden-vector suites, 39 assertions, against this backend on
+#     this core. They are the same binaries the other gates run, built from
+#     the same sources with no test-side change - one image each, because
+#     each pulls in its own copy of the golden vectors and four of those do
+#     not fit in the S3's memory at once. The gate binary reports its own
+#     four fast-path splits rather than asserting them; the four checks above
+#     are the assertion.
 #
 # What it does NOT cover: real silicon. QEMU executes the S3's SIMD
 # instructions but does not model their timing, its Xtensa FPU is not
 # guaranteed bit-identical to the part, and nothing here says anything about
 # cycles.
+#
+# -ffp-contract=off is load-bearing and belongs on BOTH dialects. The gate
+# compares the accelerated bodies (C) against the scalar bodies it inlines from
+# src/xlstm_simd_scalar.h (C++), bit for bit. gcc 14 defaults the two dialects
+# differently - strict-ISO C does not contract, C++ does - so leaving it
+# implicit compiles one side with MADD.S and the other with MUL.S + ADD.S and
+# the gate fails on a last-bit difference that is the flags' doing and not the
+# kernel's. Off, not fast, because that is what the arithmetic the goldens were
+# gated against does; a contracted build also passes, and would be the setting
+# to move to if this ever needs to gate a -O2 GNU-dialect firmware.
+ESP_DEFS := -DXLSTM_TEST_MAX_H=64 -DXLSTM_ESP_FASTPATH_COUNTERS \
+            -ffp-contract=off
+ESP_LINK := -specs=sim.elf.specs -specs=sys.qemu.specs \
+            -Wl,--defsym=entire_dram_seg=1
+# timeout because an infinite loop in a system emulator never returns, unlike
+# the qemu-user gates above; a hang has to be red rather than a stuck runner.
+ESP_RUN  := timeout 300 qemu-system-xtensa -M esp32s3 -semihosting \
+            -display none -serial none -monitor none -kernel
+
 test-esp:
-	docker build -f test/esp/Dockerfile -t xlstm-test-esp .
-	docker run --rm xlstm-test-esp
+	@$(MAKE) clean
+	@$(MAKE) $(TEST_BINS) $(BUILD)/esp_gate XLSTM_SIMD=esp \
+		CC=xtensa-esp32s3-elf-gcc CXX=xtensa-esp32s3-elf-g++ \
+		CFLAGS="-std=c99 -O2 -Wall -Wextra $(ESP_DEFS)" \
+		CXXFLAGS="-std=c++17 -O2 -Wall -Wextra $(ESP_DEFS) $(ESP_LINK)"
+	@$(ESP_RUN) $(BUILD)/esp_gate
+	@$(ESP_RUN) $(BUILD)/slstm_test
+	@$(ESP_RUN) $(BUILD)/mlstm_test
+	@$(ESP_RUN) $(BUILD)/slstm_s8_test
+	@$(ESP_RUN) $(BUILD)/mlstm_s8_test
+	@# Same reason as test-neon above: do not leave foreign binaries in build/.
+	@$(MAKE) clean
 
 # --- Docker integration tests ---
 

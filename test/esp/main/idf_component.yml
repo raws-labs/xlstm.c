@@ -1,5 +1,0 @@
-# No esp-dsp. src/xlstm_simd_esp.c used to call its dsps_dotprod_f32 and now
-# issues EE.LDF.128.IP itself, so this project needs nothing but the IDF -
-# and the backend, like the rest of the library, depends on no DSP library.
-dependencies:
-  idf: ">=5.4"

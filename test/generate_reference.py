@@ -266,6 +266,11 @@ SWEEP_SIZES = [1, 8, 16, 17, 64]
 # midpoint of (floor, range). Do not re-tighten these toward the measured
 # error "to make the test stricter"; that is the false-failure risk the rule
 # exists to avoid.
+#
+# Standing rule: re-run `make mutants` after any change to a tolerance, a
+# bound, or this generator. Those changes fail by making a gate quietly stop
+# failing, which no green `make test` can show you; the mutation battery
+# injects the defects these bounds exist to catch and fails if one now passes.
 # ============================================================================
 
 def _quant_sym8(a):

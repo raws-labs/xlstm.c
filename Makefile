@@ -38,7 +38,7 @@ endif
 
 .PHONY: all test simd-info test-ref test-sse2 test-neon test-cortexm reference clean \
         test-docker-ort test-docker-tvm test-docker-tflm test-docker-espdl \
-        bench bench-ref bench-sse2 perf perf-baseline \
+        bench bench-ref bench-sse2 perf perf-baseline mutants \
         check-internal-refs
 
 all: $(BUILD)/slstm.o $(BUILD)/mlstm.o \
@@ -346,6 +346,23 @@ perf-baseline:
 	} > $(PERF_BASELINE)
 	@echo "wrote $(PERF_BASELINE):"
 	@grep -v '^#' $(PERF_BASELINE)
+
+# --- Mutation battery ---
+#
+# Injects known defects into the kernels and asserts the suites fail. The
+# failure mode a loosened tolerance produces is a gate that silently stops
+# failing, and this is the only thing here that detects it - so run it after
+# any change to tolerances, bounds, or generate_reference.py.
+#
+# Not in CI, deliberately: it edits files in the working tree, which belongs
+# in a run someone chose to start. It restores them on exit, on failure and
+# on interrupt; a run killed outright leaves .mutants-backup/, and the next
+# run restores from that before doing anything else.
+#
+# Plain python3, stdlib only - no .venv, unlike `reference` above.
+# MUTANT_BACKENDS=ref narrows it to one backend; the default runs ref and sse2.
+mutants:
+	@python3 test/mutants.py $(MUTANT_BACKENDS)
 
 # --- Reference data ---
 

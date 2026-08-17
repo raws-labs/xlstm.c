@@ -129,6 +129,7 @@ make bench-ref           # benchmark scalar backend
 make bench-sse2          # benchmark SSE2 backend
 make perf                # instruction-count regression gate (needs valgrind)
 make perf-baseline       # re-record that gate's baseline, deliberately
+make mutants             # mutation battery: prove the tests can still fail
 make reference           # regenerate golden data from PyTorch reference
 make clean               # remove build artifacts
 ```
@@ -145,6 +146,14 @@ Two things it does not cover, both worth knowing before trusting a green run:
 - **It gates the host backends only** (`ref` and `sse2`). `cortexm` and `esp` performance is a property of those cores, measured on hardware, not by this gate.
 
 Counts are also specific to the compiler that produced them, so the gate refuses to compare across a toolchain it did not record.
+
+### Mutation battery
+
+Every tolerance in this repo can fail in a direction `make test` cannot see: too wide, and the gate quietly stops failing. `make mutants` is what detects that. It injects known defects one at a time - an activation drift, a zeroed exit state, a state requantization drift, a dropped zero point, a matvec that skips its SIMD tail, a single corrupted channel - rebuilds, and asserts the suites **fail**. A defect the suites do not notice is an escape and fails the target. So: run it after any change to a tolerance, a bound, or `test/generate_reference.py`.
+
+One mutation must **pass**: a 0.1% drift on the activation output. That is the portability margin the INT8 bounds are derived with, so that a backend whose sigmoid and tanh are approximations rather than this one's libm - a CMSIS-NN lookup table, say - is admitted instead of failed. Bounds tight enough to catch it would be rejecting legitimate backends. The same drift at 0.2% must fail, which is what keeps that margin a margin rather than a hole.
+
+It covers `ref` and `sse2`, since several of the defects live in code only one of them compiles; a mutation the running backend does not compile reports `n/a`, which is distinct from an escape. The cross-compiled backends are not covered: `neon`, `cortexm` and `esp` have loop tails and zero-point handling of their own that nothing here mutates. About 35 seconds. It is deliberately not in CI: it edits files in the working tree, which belongs in a run someone chose to start. It restores them on exit, on failure and on interrupt, and a run killed outright leaves `.mutants-backup/` for the next run to restore from.
 
 ## Adapters
 

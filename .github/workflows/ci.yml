@@ -15,6 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: make check-internal-refs
+      - name: Head-slicing example stays correct
+        run: python3 test/head_slicing_example.py
 
   # Host backends. `make test` auto-detects, which resolves to sse2 on the x86
   # runners; `make test-ref` forces the scalar backend. ref is gated explicitly

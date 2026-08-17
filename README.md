@@ -88,6 +88,49 @@ Those three are checked on real parts, from a hardware-in-the-loop harness that 
 | `mlstm_*` | mLSTM-specific (kernel, params, API) |
 | `xlstm_*` | Shared infrastructure (SIMD, quantization, utilities) |
 
+## Adopting this with your own weights
+
+You supply the weights; there is no exporter or calibration tool here, by design. What
+follows is the whole recipe.
+
+**Shapes**, per head, with `H` = `hidden_size` and `I` = `input_size`:
+
+| | sLSTM | mLSTM |
+|---|---|---|
+| `W` (input) | `[4H, I]` | `[(4H+2), I]` |
+| `R` (recurrent) | `[4H, H]` | not used |
+| `b` (bias) | `[4H]` | `[(4H+2)]` |
+
+Gate rows run in the order **`i, f, z, o`**.
+
+**Head slicing is not the obvious one, and getting it wrong is silent.** The reference stores
+fused weights gate-major over `Hf = num_heads * H`, so one head's four gate blocks are strided
+across the matrix, not contiguous:
+
+```
+W_h[g*H + j][:] = W_fused[g*Hf + h*H + j][:]
+b_h[g*H + j]    = b_fused[g*Hf + h*H + j]
+R_h             = R_stack[h]          # already contiguous, no cross-head recurrence
+y_h[j]          = y_fused[h*H + j]    # c, n, m likewise
+```
+
+Slicing rows `[h*4H, (h+1)*4H)` instead - the natural guess - produces a different model that
+still runs and still looks plausible. `TestHeadComposition` in `test/slstm_test.cc` is a worked
+example, and `test/derive_multihead_layout.py` shows how the rule was established.
+
+**Calling convention.** Run the kernel once per head, over that head's slice and its own state
+buffers. Heads are your outer loop. You allocate all state and a scratch buffer of `4H` floats
+(`(4H+2)` for mLSTM); nothing here allocates.
+
+**For INT8**, quantize with the helpers in `xlstm_quant.h` - weights symmetric, activations
+asymmetric, `c` and `n` to int16, and `m` stays float32. `test/reference_data.json` carries a
+complete worked case: float `W`/`R`/`b` beside their quantized `W_q`/`R_q`/`b_q`, every scale,
+and the exact integers the kernel must produce. Match that and you are calibrated correctly.
+
+If your model already runs under ONNX Runtime, TFLM, MicroTVM or ESP-DL, the adapters in
+`adapters/` unpack that framework's tensors for you - but your graph has to call this op, which
+a stock export will not do on its own.
+
 ## Build & test
 
 ```bash

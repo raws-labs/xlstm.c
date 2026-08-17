@@ -1,0 +1,7 @@
+# The lifecycle tests can only fail by tripping something, so make the faults
+# they exist for trip: poisoning turns a double free or an overrun into a
+# panic instead of silent corruption. Halt on panic rather than reboot, so the
+# reason stays on screen instead of scrolling past in a boot loop; either way
+# the runner's timeout makes it a non-zero exit.
+CONFIG_HEAP_POISONING_COMPREHENSIVE=y
+CONFIG_ESP_SYSTEM_PANIC_PRINT_HALT=y

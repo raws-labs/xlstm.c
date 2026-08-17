@@ -112,3 +112,26 @@ jobs:
             gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf qemu-user
       - name: Cross-compile and run under qemu-arm
         run: make test-cortexm
+
+  # The esp backend on an emulated ESP32-S3. Like cross-cortexm above, this
+  # exists because without it the backend has no gate anywhere: its only other
+  # check is test/adapters/esp-dl, which compiles and never executes.
+  #
+  # A container rather than a cross-compile, because this backend needs a full
+  # ESP-IDF toolchain and a chip-specific QEMU. That makes it by far the most
+  # expensive job here - it pulls the ~6.9 GB espressif/idf:v5.4 image before
+  # it can start. The alternative shapes all cost correctness: v5.3 is smaller
+  # but its QEMU has no esp32s3 machine, and a bare toolchain without the IDF
+  # cannot build a bootable image at all.
+  #
+  # Green here does NOT mean the backend is accelerated end to end. Exactly one
+  # function has an accelerated path (xlstm_matvec_f32, via ESP-DSP's dot
+  # product) and the run reports how few of its calls take it; the other three
+  # contract functions are scalar C. QEMU also says nothing about the part's
+  # FPU corner cases or about cycles. See the Makefile's test-esp target.
+  emulated-esp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the ESP32-S3 image and run it under qemu-system-xtensa
+        run: make test-esp

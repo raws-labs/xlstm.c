@@ -11,8 +11,8 @@ VENV    := .venv/bin/python3
 #
 # auto never picks esp or cortexm: both need a cross toolchain and neither can
 # run on the build host, so they are opt-in rather than part of `make test`.
-# cortexm is gated by test-cortexm below, cross-compiled and run under an
-# emulator; esp is gated from its own cross-compiled harness.
+# Both are gated under emulation instead - cortexm by test-cortexm, esp by
+# test-esp, both below.
 XLSTM_SIMD ?= auto
 
 ifeq ($(XLSTM_SIMD),auto)
@@ -36,7 +36,7 @@ else
   endif
 endif
 
-.PHONY: all test simd-info test-ref test-sse2 test-neon test-cortexm reference clean \
+.PHONY: all test simd-info test-ref test-sse2 test-neon test-cortexm test-esp reference clean \
         test-docker-ort test-docker-tvm test-docker-tflm test-docker-espdl \
         bench bench-ref bench-sse2 perf perf-baseline mutants \
         check-internal-refs
@@ -164,6 +164,39 @@ test-cortexm:
 	@qemu-arm $(BUILD)/mlstm_s8_test
 	@# Same reason as test-neon above: do not leave armhf binaries in build/.
 	@$(MAKE) clean
+
+# The esp backend, on an emulated ESP32-S3. Unlike every other backend gate
+# this one needs a full ESP-IDF toolchain and a chip-specific QEMU, so it is
+# a container rather than a cross-compile: test/esp/ is an IDF project that
+# builds the same four suites into one firmware image, and the image's CMD
+# boots it under qemu-system-xtensa and exits with the firmware's verdict.
+# ESP-IDF v5.4, because v5.3's bundled QEMU has no esp32s3 machine.
+#
+# WHAT IT EXERCISES, precisely - a green run here is a narrow claim:
+#
+#   - xlstm_matvec_f32, both of its paths. The accelerated one (ESP-DSP's
+#     dsps_dotprod_f32, which resolves to the S3's dsps_dotprod_f32_aes3) is
+#     the ONLY accelerated code in src/xlstm_simd_esp.c, and it is entered
+#     only when cols % 4 == 0 and both operands are 16-byte aligned.
+#     test/esp/main/esp_gate.cc calls the kernel with buffers it aligns
+#     itself and fails the run unless the aligned call took that path, the
+#     misaligned one did not, and both match a dot product it computes.
+#   - xlstm_matvec_s8, xlstm_rank1_update_f32 and xlstm_vecmat_f32 against
+#     the golden vectors - but those three are scalar C in this backend, so
+#     what is gated there is the arithmetic, not any Xtensa instruction.
+#   - The suites' own f32 matvecs mostly run SCALAR: 70 of their 76
+#     xlstm_matvec_f32 calls, because the runners' state and scratch arrays
+#     are not 16-byte aligned. The firmware prints that split every run
+#     rather than leaving it to be assumed, and does not assert on it - it
+#     is decided by where the linker put those arrays, not by the kernel.
+#
+# What it does NOT cover: real silicon. QEMU executes the S3's SIMD
+# instructions but does not model their timing, its Xtensa FPU is not
+# guaranteed bit-identical to the part, and nothing here says anything about
+# cycles.
+test-esp:
+	docker build -f test/esp/Dockerfile -t xlstm-test-esp .
+	docker run --rm xlstm-test-esp
 
 # --- Docker integration tests ---
 

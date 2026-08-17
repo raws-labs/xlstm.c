@@ -61,10 +61,19 @@ idf_component_register(
 ## Test
 
 ```bash
-make test-docker-espdl
+make test-docker-espdl   # this adapter, compile-only
+make test-esp            # the esp SIMD backend underneath it, executed
 ```
 
-Compile-only: ESP-DL needs esp32s3 and ESP-IDF v5.3's QEMU emulates esp32
-only, so the suite cross-compiles the adapter and stops. The INT8 path here
-is therefore build-verified, not numerically verified - unlike the ONNX
-Runtime, microTVM and TFLM adapters, whose suites execute.
+`test-docker-espdl` is compile-only: it pins ESP-IDF v5.3, whose bundled QEMU
+has an esp32 machine and no esp32s3, and ESP-DL needs esp32s3. So it
+cross-compiles the adapter and stops - this adapter's own dispatch, f32 and
+INT8, is build-verified and not numerically verified, unlike the ONNX Runtime,
+microTVM and TFLM adapters, whose suites execute.
+
+The kernels and the `esp` SIMD backend these classes call are a separate
+question, and are executed: `make test-esp` builds them into an ESP32-S3 image
+on ESP-IDF v5.4, whose QEMU does have that machine, and runs the full golden
+vector set (f32 and INT8, both cells) under it. See `CONTRIBUTING.md` for what
+that gate does and does not cover - the backend accelerates one of its four
+contract functions, and only for aligned buffers.

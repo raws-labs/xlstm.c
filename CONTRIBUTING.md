@@ -11,7 +11,7 @@ make test              # core sLSTM + mLSTM tests (requires gcc, g++)
 make test-docker-ort   # ONNX Runtime integration test
 make test-docker-tvm   # Apache TVM integration test
 make test-docker-tflm  # TensorFlow Lite Micro integration test
-make test-docker-espdl # ESP-DL integration test (QEMU)
+make test-docker-espdl # ESP-DL integration test (compile-only)
 ```
 
 `make test` is fast (seconds). Docker integration tests are slower and require
@@ -54,9 +54,10 @@ make test-ref          # scalar baseline
 make test-sse2         # x86
 make test-neon         # cross-compile aarch64, run under QEMU
 make test-cortexm      # cross-compile armv7-a, run under QEMU (the DSP path)
+make test-esp          # build an ESP32-S3 image, run it under QEMU (needs Docker)
 ```
 
-All four run the same golden vectors. `test-cortexm` gates the Cortex-M
+All five run the same golden vectors. `test-cortexm` gates the Cortex-M
 backend without a board: `SXTAB16` and `SMLAD` are ARMv6 DSP instructions that
 A-profile also has, so the kernels cross-compile for `armv7-a`. It gates the
 arithmetic and only the arithmetic:
@@ -70,6 +71,26 @@ arithmetic and only the arithmetic:
 
 Those three are checked on real parts, from a hardware-in-the-loop harness in
 a separate repository.
+
+`test-esp` does the same job for the `esp` backend, as a container: ESP-IDF
+v5.4 builds the four suites into one ESP32-S3 firmware image and boots it under
+`qemu-system-xtensa` (v5.3's bundled QEMU has no `esp32s3` machine, which is
+why the older `test-docker-espdl` suite can only compile). It is the most
+expensive gate here - the base image is ~6.9 GB.
+
+Read what it covers before quoting it. `src/xlstm_simd_esp.c` accelerates one
+of the four contract functions, `xlstm_matvec_f32`, and only when the caller's
+buffers happen to be 16-byte aligned with a column count divisible by 4;
+`xlstm_matvec_s8`, `xlstm_rank1_update_f32` and `xlstm_vecmat_f32` are scalar C
+there. Whether that one path is entered is decided by the caller's buffers, not
+by the kernel, so the suites alone can pass with no accelerated code executed
+at all - measured: 6 of their 76 `xlstm_matvec_f32` calls take it, and a relink
+could take that to zero. `test/esp/main/esp_gate.cc` therefore calls the kernel
+with buffers it aligns itself and fails the run unless the aligned call took
+the accelerated path, a deliberately misaligned one did not, and both match a
+dot product it computes. Every run prints the split it measured, so a green log
+cannot be read as "accelerated end to end". Emulation says nothing about the
+part's FPU corner cases or about cycles.
 
 ## The performance gate
 

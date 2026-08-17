@@ -30,12 +30,18 @@ COPY test/adapters/esp-dl/ test/adapters/esp-dl/
 
 # Build as ESP-IDF project for ESP32-S3.
 #
-# COMPILE-ONLY SUITE. QEMU in IDF v5.3 emulates esp32 but not esp32s3, and
-# ESP-DL requires s3+, so the test binary is built and never run. A green
-# result here means the adapter compiles and links against real ESP-DL on a
-# real cross-compilation target - it says nothing about the numbers. The
-# assertions in main/test_espdl.cpp are written for a runner that does not
-# exist yet.
+# COMPILE-ONLY SUITE. The QEMU bundled with IDF v5.3 has an esp32 machine and
+# no esp32s3, and ESP-DL requires s3+, so the test binary is built and never
+# run. A green result here means the adapter compiles and links against real
+# ESP-DL on a real cross-compilation target - it says nothing about the
+# numbers. The assertions in main/test_espdl.cpp are written for a runner that
+# does not exist yet.
+#
+# That limit is this image's, not the platform's: test/esp/ pins IDF v5.4,
+# whose QEMU does have an esp32s3 machine, and executes the full golden vector
+# set against the kernels and the esp SIMD backend (`make test-esp`). What is
+# still unexecuted is this adapter's own ESP-DL dispatch, which is what needs
+# ESP-DL and therefore this image.
 WORKDIR /workspace/test/adapters/esp-dl
 RUN bash -c "source $IDF_PATH/export.sh && \
     idf.py set-target esp32s3 && \

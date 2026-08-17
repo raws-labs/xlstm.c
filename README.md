@@ -77,7 +77,7 @@ make clean
 
 Requires `gcc` (C99) and `g++` (C++17, for tests and bench).
 
-Each backend has its own gate, including the cross-compiled ones: `make test-ref`, `make test-sse2`, `make test-neon` and `make test-cortexm` run the same golden vectors, the last two under QEMU with no hardware. See [CONTRIBUTING.md](CONTRIBUTING.md) for those and for the regression gates.
+Each backend has its own gate, including the cross-compiled ones: `make test-ref`, `make test-sse2`, `make test-neon`, `make test-cortexm` and `make test-esp` run the same golden vectors, the last three under emulation with no hardware. See [CONTRIBUTING.md](CONTRIBUTING.md) for those and for the regression gates.
 
 ## Adapters
 

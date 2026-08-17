@@ -70,7 +70,7 @@ Compute-intensive primitives (matvec, rank-1 update) dispatch to a SIMD backend 
 
 Auto-detection probes the compiler's predefined macros. Override with `XLSTM_SIMD=ref|sse2|neon|esp|cortexm`.
 
-A backend need not accelerate everything. `cortexm` implements the two matrix-vector kernels (`SXTAB16` + `SMLAD` for INT8; fused `VFMA` for f32) and defers the other two to the scalar bodies in `src/xlstm_simd_scalar.inc`, which is the same text `ref` compiles rather than a copy of it.
+A backend need not accelerate everything. `cortexm` implements the two matrix-vector kernels (`SXTAB16` + `SMLAD` for INT8; fused `VFMA` for f32) and defers the other two to the scalar bodies in `src/xlstm_simd_scalar.h`, which is the same text `ref` compiles rather than a copy of it.
 
 `make test-cortexm` gates that backend without a board. `SXTAB16` and `SMLAD` are ARMv6 DSP instructions that A-profile also has, so the kernels cross-compile for `armv7-a` and run the full suite under `qemu-arm`, against the same golden vectors as every other backend. It gates the arithmetic and only the arithmetic:
 

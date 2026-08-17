@@ -14,13 +14,13 @@
  * =========================================================================
  * Scalar C99 reference backend - portable fallback for all platforms.
  *
- * The kernels themselves live in xlstm_simd_scalar.inc so that a partial
+ * The kernels themselves live in xlstm_simd_scalar.h so that a partial
  * backend can defer to this exact text rather than copy it.
  * ===========================================================================*/
 
 #include "xlstm_simd.h"
 
-#include "xlstm_simd_scalar.inc"
+#include "xlstm_simd_scalar.h"
 
 void xlstm_matvec_f32(const float* M, const float* v,
                       float* out, int rows, int cols)

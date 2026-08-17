@@ -51,7 +51,7 @@ $(BUILD):
 # --- SIMD kernel object ---
 
 $(BUILD)/xlstm_simd.o: src/xlstm_simd_$(XLSTM_SIMD_IMPL).c include/xlstm_simd.h \
-    src/xlstm_simd_scalar.inc | $(BUILD)
+    src/xlstm_simd_scalar.h | $(BUILD)
 	@$(CC) $(CFLAGS) $(SIMD_CFLAGS) -Iinclude -c $< -o $@
 
 # --- Core objects ---

@@ -24,7 +24,7 @@
  *                     scalar body's 2, because v[j] is read once per block.
  *
  * xlstm_vecmat_f32 and xlstm_rank1_update_f32 defer to the scalar bodies in
- * xlstm_simd_scalar.inc - the same text xlstm_simd_ref.c compiles, not a
+ * xlstm_simd_scalar.h - the same text xlstm_simd_ref.c compiles, not a
  * copy of it. There is no f32 SIMD on these cores, and rank-1 update is
  * bandwidth-bound rather than issue-bound, so an honest measurement is all
  * either would produce.
@@ -36,7 +36,7 @@
 
 #include "xlstm_simd.h"
 
-#include "xlstm_simd_scalar.inc"
+#include "xlstm_simd_scalar.h"
 
 #include <math.h>
 #include <stddef.h>

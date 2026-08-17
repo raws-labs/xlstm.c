@@ -124,11 +124,13 @@ jobs:
   # but its QEMU has no esp32s3 machine, and a bare toolchain without the IDF
   # cannot build a bootable image at all.
   #
-  # Green here does NOT mean the backend is accelerated end to end. Exactly one
-  # function has an accelerated path (xlstm_matvec_f32, via ESP-DSP's dot
-  # product) and the run reports how few of its calls take it; the other three
-  # contract functions are scalar C. QEMU also says nothing about the part's
-  # FPU corner cases or about cycles. See the Makefile's test-esp target.
+  # Green here does NOT mean the backend is accelerated end to end. Two of the
+  # four contract functions have an accelerated path - xlstm_matvec_f32 on
+  # EE.LDF.128.IP and xlstm_matvec_s8 on EE.VMULAS.S8.ACCX - and the run
+  # reports what share of each one's calls took it; xlstm_vecmat_f32 and
+  # xlstm_rank1_update_f32 are scalar C. QEMU also says nothing about the
+  # part's FPU corner cases or about cycles. See the Makefile's test-esp
+  # target.
   emulated-esp:
     runs-on: ubuntu-latest
     steps:

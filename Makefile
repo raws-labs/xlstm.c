@@ -175,21 +175,29 @@ test-cortexm:
 # WHAT IT EXERCISES, precisely - a green run here is a narrow claim:
 #
 #   - xlstm_matvec_f32, both of its paths. Its blocked body - four rows at a
-#     time, four columns per EE.LDF.128.IP - is the ONLY accelerated code in
-#     src/xlstm_simd_esp.c, and it is entered on rows and cols alone: 7 or
-#     more columns and at least one whole block of rows.
+#     time, four columns per EE.LDF.128.IP - is entered on rows and cols
+#     alone: 7 or more columns and at least one whole block of rows.
 #     test/esp/main/esp_gate.cc runs 15 shapes at all four alignments of each
 #     operand and fails the run unless each took the path its shape dictates
 #     and matched xlstm_scalar_matvec_f32 bit for bit.
-#   - xlstm_matvec_s8, xlstm_rank1_update_f32 and xlstm_vecmat_f32 against
-#     the golden vectors - but those three are scalar C in this backend, so
-#     what is gated there is the arithmetic, not any Xtensa instruction.
-#   - The suites' own f32 matvecs: 36 of their 76 xlstm_matvec_f32 calls run
+#   - xlstm_matvec_s8, both of its paths. Its vector body - 16 columns per
+#     EE.VMULAS.S8.ACCX, each group assembled from the two aligned blocks
+#     holding it - is entered on cols and the zero point alone, never on
+#     alignment, so a vector-body call runs every column of every row there.
+#     The gate runs 23 cases at all 256 pairings of the two operands'
+#     alignments and demands bit-identical int32 output, which for integers
+#     is the whole of correctness - there is no tolerance to hide in.
+#   - xlstm_rank1_update_f32 and xlstm_vecmat_f32 against the golden vectors
+#     - but those two are scalar C in this backend, so what is gated there is
+#     the arithmetic, not any Xtensa instruction.
+#   - The suites' own matvecs: 36 of their 76 xlstm_matvec_f32 calls run
 #     blocked, the other 40 being the cases whose H and I are 1 to 4, under
-#     one 128-bit group wide. The firmware prints that split every run rather
-#     than leaving it to be assumed, and does not assert on it - it is a
-#     property of the case list, and pinning it here would gate
-#     reference_data.h rather than the kernel.
+#     one 128-bit group wide; all 136 xlstm_matvec_s8 calls run on the vector
+#     body, which is what a formulation that never seeks alignment buys. The
+#     firmware prints both splits every run rather than leaving them to be
+#     assumed, and does not assert on them - they are a property of the case
+#     list, and pinning them here would gate reference_data.h rather than the
+#     kernel.
 #
 # What it does NOT cover: real silicon. QEMU executes the S3's SIMD
 # instructions but does not model their timing, its Xtensa FPU is not

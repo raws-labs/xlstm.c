@@ -61,19 +61,40 @@ idf_component_register(
 ## Test
 
 ```bash
-make test-docker-espdl   # this adapter, compile-only
-make test-esp            # the esp SIMD backend underneath it, executed
+make test-docker-espdl   # this adapter, executed on an emulated ESP32-S3
+make test-esp            # the kernels and esp SIMD backend underneath it
 ```
 
-`test-docker-espdl` is compile-only: it pins ESP-IDF v5.3, whose bundled QEMU
-has an esp32 machine and no esp32s3, and ESP-DL needs esp32s3. So it
-cross-compiles the adapter and stops - this adapter's own dispatch, f32 and
-INT8, is build-verified and not numerically verified, unlike the ONNX Runtime,
-microTVM and TFLM adapters, whose suites execute.
+`test-docker-espdl` builds these classes into an ESP-IDF v5.4 project for
+ESP32-S3 against real ESP-DL and runs it under the QEMU that image ships,
+which does have an esp32s3 machine. The firmware exits the emulator with its
+own verdict, so a failure is a non-zero exit status rather than a line in a
+log.
 
-The kernels and the `esp` SIMD backend these classes call are a separate
-question, and are executed: `make test-esp` builds them into an ESP32-S3 image
-on ESP-IDF v5.4, whose QEMU does have that machine, and runs the full golden
-vector set (f32 and INT8, both cells) under it. See `CONTRIBUTING.md` for what
-that gate does and does not cover - the backend accelerates one of its four
-contract functions, and only for aligned buffers.
+**What it checks.** This adapter's own dispatch: that `forward()` reads the
+tensors it was handed in the documented order, turns each tensor's exponent
+into the scale the kernel expects, and carries its states across calls. The
+INT8 tests require the module's output to equal, exactly, what
+`slstm_eval_s8` / `mlstm_eval_s8` produce when driven with the scales
+`DL_SCALE` derives from the same exponents.
+
+**What it cannot check.** It is not the golden-value gate the ONNX Runtime,
+microTVM and TFLM suites run, and cannot be made into one. ESP-DL
+quantization is power-of-two symmetric with no zero point, structurally: the
+`.espdl` FlatBuffers schema carries an `exponents` field and has no scale or
+zero-point field at all, and the exporter discards the float scale as
+`exponent = int(log2(scale))`. The reference vectors were produced with
+arbitrary scales and an asymmetric input zero point, which this framework
+cannot represent. Checking the adapter against the core kernels at matching
+scales is exactly the claim Espressif make for their own operators, and it is
+the claim here. Read a green run as "wired correctly", not as "numerically
+verified against PyTorch".
+
+Bit-exactness is also per target rather than per framework: ESP-DL rounds
+`ROUND_HALF_UP` on ESP32 and ESP32-S3 and `ROUND_HALF_EVEN` on ESP32-P4.
+
+The kernels and the `esp` SIMD backend these classes call are gated
+separately, against the golden vectors: `make test-esp` builds them into an
+ESP32-S3 image and runs the full vector set (f32 and INT8, both cells) under
+the same emulated part. See `CONTRIBUTING.md` for what that gate does and does
+not cover.

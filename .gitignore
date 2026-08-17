@@ -18,6 +18,12 @@ build/
 # generate_model.py at build time
 test/adapters/tflm/*.h
 
+# ESP-IDF project artifacts, if the esp-dl suite is built outside its image
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+
 # Python
 __pycache__/
 *.pyc

@@ -11,7 +11,7 @@ make test              # core sLSTM + mLSTM tests (requires gcc, g++)
 make test-docker-ort   # ONNX Runtime integration test
 make test-docker-tvm   # Apache TVM integration test
 make test-docker-tflm  # TensorFlow Lite Micro integration test
-make test-docker-espdl # ESP-DL integration test (compile-only)
+make test-docker-espdl # ESP-DL integration test (runs on an emulated ESP32-S3)
 ```
 
 `make test` is fast (seconds). Docker integration tests are slower and require

@@ -1,8 +1,9 @@
 /* Entry point for the emulated ESP32-S3 gate (`make test-esp`).
  *
  * Runs the four golden-vector suites against the `esp` SIMD backend on a
- * QEMU-emulated ESP32-S3, plus the fast-path check below, and prints one
- * sentinel line that ../qemu_gate.sh turns into the container's exit code.
+ * QEMU-emulated ESP32-S3, plus the two fast-path checks below, and prints
+ * one sentinel line that ../qemu_gate.sh turns into the container's exit
+ * code.
  *
  * Deliberately thin: no UART driver takeover, no trigger-byte handshake, no
  * timing pass, no clock guard, no provenance banner. Those belong to a rig
@@ -35,14 +36,16 @@ extern int mlstm_s8_test_main(void);
  * define is a link error rather than a gate that stops checking. */
 extern "C" unsigned long xlstm_esp_matvec_f32_fast;
 extern "C" unsigned long xlstm_esp_matvec_f32_scalar;
+extern "C" unsigned long xlstm_esp_matvec_s8_fast;
+extern "C" unsigned long xlstm_esp_matvec_s8_scalar;
 
 namespace {
 
-/* --- Fast-path check ----------------------------------------------------
+/* --- f32 fast-path check -------------------------------------------------
  *
- * Everything this backend accelerates is one body - the four-row, 128-bit
- * load blocked matvec inside xlstm_matvec_f32 - and which calls reach it is
- * decided by rows and cols alone: at least 7 columns (a scalar prefix of up
+ * The first of the two bodies this backend accelerates: the four-row,
+ * 128-bit load blocked matvec inside xlstm_matvec_f32. Which calls reach it
+ * is decided by rows and cols alone: at least 7 columns (a scalar prefix of up
  * to 3, then one whole 16-byte group) and at least one whole block of four
  * rows spaced 4 / gcd(cols, 4) apart. Where M and v landed does not enter
  * into it, and that is the property being checked here. The guard this
@@ -153,6 +156,121 @@ bool TestFastPath(void) {
     return ok;
 }
 
+/* --- INT8 fast-path check ------------------------------------------------
+ *
+ * Same three assertions as above, for the kernel that assembles each
+ * 16-column group out of the two aligned blocks holding it and multiplies it
+ * with EE.VMULAS.S8.ACCX. Two things differ from the f32 case and both are
+ * worth being explicit about:
+ *
+ *   - Alignment does not enter the dispatch at all, so the expectation is
+ *     the same at all 256 pairings of M and v. The f32 body has to block
+ *     rows to share one scalar prefix; this one never seeks alignment, so a
+ *     16-byte group does not cost it the odd sizes. Every column of every
+ *     row of a vector-body call runs on the 16-lane MAC, H = 17 included.
+ *   - What leaves the vector body is a cols of 0 or less, or a zero point
+ *     two int8 lanes cannot carry (|v_zp| > 254). The zero point is folded
+ *     into a constant vector rather than subtracted from v, so it is part of
+ *     the dispatch here in a way it never is for f32.
+ *
+ * Bit-exactness is again an equality and not a tolerance, and here there is
+ * not even a rounding argument to have: these are integers. The vector body
+ * regroups an exact sum of exact products, so any difference at all is a
+ * defect.
+ */
+
+alignas(16) int8_t g_Mi[kMaxRows * kMaxCols + 16];
+alignas(16) int8_t g_vi[kMaxCols + 16];
+int32_t g_outi[kMaxRows];
+int32_t g_refi[kMaxRows];
+
+bool CheckShapeS8(int rows, int cols, int32_t zp, int moff, int voff,
+                  bool expect_fast) {
+    const int8_t* M = g_Mi + moff;
+    const int8_t* v = g_vi + voff;
+    const unsigned long fast0 = xlstm_esp_matvec_s8_fast;
+    const unsigned long scalar0 = xlstm_esp_matvec_s8_scalar;
+    bool ok = true;
+
+    /* A sentinel rather than zero: this contract overwrites out[] instead of
+     * accumulating into it, so a row the kernel never wrote has to show up
+     * as a mismatch and not as a plausible-looking 0. */
+    for (int i = 0; i < rows; ++i) g_outi[i] = g_refi[i] = 0x5A5A5A5A;
+    xlstm_matvec_s8(M, v, g_outi, rows, cols, zp);
+    xlstm_scalar_matvec_s8(M, v, g_refi, rows, cols, zp);
+
+    const unsigned long d_fast = xlstm_esp_matvec_s8_fast - fast0;
+    const unsigned long d_scalar = xlstm_esp_matvec_s8_scalar - scalar0;
+    const unsigned long want_fast = expect_fast ? 1ul : 0ul;
+    if (d_fast != want_fast || d_scalar != 1ul - want_fast) {
+        std::printf("  FAIL s8 rows=%d cols=%d zp=%ld M+%d v+%d: expected the "
+                    "%s path, got fast+%lu scalar+%lu. Which path a call takes "
+                    "is a property of its cols and zero point; a gate that "
+                    "cannot prove EE.VMULAS.S8.ACCX ran proves nothing.\n",
+                    rows, cols, (long)zp, moff, voff,
+                    expect_fast ? "vector" : "scalar", d_fast, d_scalar);
+        ok = false;
+    }
+
+    for (int i = 0; i < rows; ++i) {
+        if (g_outi[i] != g_refi[i]) {
+            std::printf("  FAIL s8 rows=%d cols=%d zp=%ld M+%d v+%d out[%d]: "
+                        "got %ld, reference %ld. These are integers - the "
+                        "vector body regroups an exact sum of exact products, "
+                        "so any difference at all is a defect.\n",
+                        rows, cols, (long)zp, moff, voff, i,
+                        (long)g_outi[i], (long)g_refi[i]);
+            ok = false;
+            break;
+        }
+    }
+    return ok;
+}
+
+bool TestFastPathS8(void) {
+    /* Deterministic, asymmetric, and reaching both int8 extremes: -128 has
+     * no positive counterpart, and a lane-ordering or sign defect has to be
+     * able to show up. */
+    for (int i = 0; i < kMaxRows * kMaxCols + 16; ++i)
+        g_Mi[i] = (int8_t)(((i * 37) % 255) - 128);
+    for (int j = 0; j < kMaxCols + 16; ++j)
+        g_vi[j] = (int8_t)(((j * 53) % 255) - 128);
+
+    /* Spelled out rather than recomputed from the kernel's own rule. cols
+     * straddles the 16-column group both ways; the zero points straddle the
+     * two-lane fold bound and include -128, which is what a tensor with no
+     * negative values calibrates to and the one int8 value needing the
+     * second lane. */
+    static const struct { int rows, cols; long zp; bool fast; } kCases[] = {
+        {20, 0, 0, false},           /* no columns at all */
+        {20, 1, 0, true},   {20, 2, 0, true},   {20, 8, 0, true},
+        {20, 15, 0, true},  {20, 16, 0, true},  {20, 17, 0, true},
+        {20, 31, 0, true},  {20, 32, 0, true},  {20, 64, 0, true},
+        {1, 17, 0, true},   {3, 17, 0, true},   /* fewer rows than a block */
+        {20, 17, -128, true},        /* the split zero point */
+        {20, 17, 127, true},  {20, 17, -127, true},
+        {20, 64, -128, true}, {20, 16, -128, true}, {20, 1, -128, true},
+        {20, 17, 254, true},  {20, 17, -254, true},  /* the fold bound */
+        {20, 17, 255, false}, {20, 17, -255, false}, /* just outside it */
+        {20, 17, 1000, false},
+    };
+    const int kCaseCount = (int)(sizeof kCases / sizeof kCases[0]);
+    bool ok = true;
+
+    for (int s = 0; s < kCaseCount; ++s) {
+        for (int moff = 0; moff < 16; ++moff) {
+            for (int voff = 0; voff < 16; ++voff) {
+                ok &= CheckShapeS8(kCases[s].rows, kCases[s].cols,
+                                   (int32_t)kCases[s].zp, moff, voff,
+                                   kCases[s].fast);
+            }
+        }
+    }
+    std::printf("  %d cases x 256 alignment pairings, all bit-exact against "
+                "xlstm_scalar_matvec_s8\n", kCaseCount);
+    return ok;
+}
+
 } /* namespace */
 
 extern "C" void app_main(void) {
@@ -179,8 +297,18 @@ extern "C" void app_main(void) {
             rc = 1;
         }
 
+        std::printf("[ RUN      ] esp fast path (int8)\n");
+        if (TestFastPathS8()) {
+            std::printf("[       OK ] esp fast path (int8)\n");
+        } else {
+            std::printf("[  FAILED  ] esp fast path (int8)\n");
+            rc = 1;
+        }
+
         const unsigned long fast0 = xlstm_esp_matvec_f32_fast;
         const unsigned long scalar0 = xlstm_esp_matvec_f32_scalar;
+        const unsigned long qfast0 = xlstm_esp_matvec_s8_fast;
+        const unsigned long qscalar0 = xlstm_esp_matvec_s8_scalar;
 
         rc |= slstm_test_main();
         rc |= mlstm_test_main();
@@ -196,11 +324,16 @@ extern "C" void app_main(void) {
          * that were not have in common. */
         const unsigned long fast = xlstm_esp_matvec_f32_fast - fast0;
         const unsigned long scalar = xlstm_esp_matvec_f32_scalar - scalar0;
+        const unsigned long qfast = xlstm_esp_matvec_s8_fast - qfast0;
+        const unsigned long qscalar = xlstm_esp_matvec_s8_scalar - qscalar0;
         std::printf("XLSTM_ESP_FASTPATH: the suites called xlstm_matvec_f32 "
                     "%lu times, %lu of them blocked (the rest are under 7 "
-                    "columns wide). Every other kernel in this backend is "
-                    "scalar C.\n",
-                    fast + scalar, fast);
+                    "columns wide), and xlstm_matvec_s8 %lu times, %lu of "
+                    "them on EE.VMULAS.S8.ACCX - and a vector-body INT8 call "
+                    "runs every column of every row there, at any alignment. "
+                    "xlstm_vecmat_f32 and xlstm_rank1_update_f32 are scalar C "
+                    "in this backend.\n",
+                    fast + scalar, fast, qfast + qscalar, qfast);
     }
 
     std::printf("##xlstm-esp-gate:%d##\n", rc ? 1 : 0);

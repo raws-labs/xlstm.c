@@ -18,10 +18,10 @@ FROM espressif/idf:v5.4
 
 WORKDIR /workspace
 
-# Only what main/CMakeLists.txt names and what those sources include. No
-# ESP-DL here: the backend needs esp-dsp and nothing else, and esp-dsp comes
-# from the component registry (main/idf_component.yml), so unlike
-# test/adapters/esp-dl/Dockerfile there is nothing to clone.
+# Only what main/CMakeLists.txt names and what those sources include. The
+# backend issues its own 128-bit loads and calls no DSP library, so unlike
+# test/adapters/esp-dl/Dockerfile there is nothing to clone and nothing to
+# pull from the component registry either - just the IDF.
 COPY include/ include/
 COPY src/ src/
 COPY test/test_config.h test/test_util.h test/reference_data.h test/

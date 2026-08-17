@@ -26,8 +26,9 @@ idf_component_register(
     INCLUDE_DIRS
         "${XLSTM_ROOT}/include"
         "${XLSTM_ROOT}/test"
-    REQUIRES
-        esp-dsp
+        # src/ for xlstm_simd_scalar.h: esp_gate.cc checks the accelerated
+        # matvec against the scalar bodies themselves rather than a copy.
+        "${XLSTM_ROOT}/src"
 )
 
 # XLSTM_TEST_MAX_H bounds the four runners' own static buffers

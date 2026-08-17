@@ -16,15 +16,24 @@
  *
  * ONE of the four contract functions is accelerated: xlstm_matvec_f32 calls
  * ESP-DSP's dot product, and only when the caller's buffers satisfy the
- * alignment guard below. xlstm_matvec_s8, xlstm_rank1_update_f32 and
- * xlstm_vecmat_f32 are scalar C - no Xtensa PIE instruction is issued
- * anywhere in this file. `make test-esp` runs the golden vectors against it
- * on an emulated ESP32-S3 and reports how many f32 matvecs reached the
+ * alignment guard below. No Xtensa PIE instruction is issued anywhere in
+ * this file.
+ *
+ * xlstm_matvec_s8, xlstm_rank1_update_f32 and xlstm_vecmat_f32 - and the
+ * unaccelerated half of xlstm_matvec_f32 - defer to the scalar bodies in
+ * xlstm_simd_scalar.h, the same text xlstm_simd_ref.c compiles rather than
+ * a copy of it. Copies here would be a second reference free to drift from
+ * the one every backend is defined against.
+ *
+ * `make test-esp` runs the golden vectors against this backend on an
+ * emulated ESP32-S3 and reports how many f32 matvecs reached the
  * accelerated path; read that target's comment before quoting a green run.
  * ===========================================================================*/
 
 #include "xlstm_simd.h"
 #include "dsps_dotprod.h"
+
+#include "xlstm_simd_scalar.h"
 
 #include <stdint.h>
 
@@ -95,36 +104,33 @@ void xlstm_matvec_f32(const float* M, const float* v,
 
     XLSTM_ESP_COUNT(fast);
 
+    /* The guard is loop-invariant, so the unaccelerated case is the whole
+     * call and hands off to the shared body rather than to a per-row copy
+     * of it.
+     *
+     * Deliberately NOT dsps_dotprod_f32_ansi. That computes the dot into a
+     * fresh accumulator and leaves the caller to do out[i] += dot, whereas
+     * the scalar body seeds one running accumulator from out[i]. The
+     * mathematics is identical but the float grouping is not, and on a
+     * cancellation-sensitive case it moves the result: mLSTM SweepM17 y[0]
+     * came out 4.20e-05 from the golden value against a ~3.98e-05 bound,
+     * failing the gate on the esp backend's first end-to-end run.
+     *
+     * The fallback is plain C either way, so there is nothing to gain from
+     * ESP-DSP here and a real divergence to lose. */
+    if (!fast) {
+        xlstm_scalar_matvec_f32(M, v, out, rows, cols);
+        return;
+    }
+
     for (i = 0; i < rows; ++i) {
-        if (fast) {
-            /* The chip-generic macro, not _ae32. Earlier code hardcoded the
-             * ESP32 variant, which compiles on the S3 (its guard is generic
-             * Xtensa capability flags, not a chip check) and leaves the
-             * S3-optimized body unused. */
-            float dot;
-            dsps_dotprod_f32(M + i * cols, v, &dot, cols);
-            out[i] += dot;
-        } else {
-            /* Deliberately NOT dsps_dotprod_f32_ansi. That computes the dot
-             * into a fresh accumulator and leaves the caller to do
-             * out[i] += dot, whereas xlstm_simd_ref.c seeds one running
-             * accumulator from out[i]. The mathematics is identical but the
-             * float grouping is not, and on a cancellation-sensitive case it
-             * moves the result: mLSTM SweepM17 y[0] came out 4.20e-05 from the
-             * golden value against a ~3.98e-05 bound, failing the gate on the
-             * esp backend's first end-to-end run.
-             *
-             * The fallback is plain C either way, so there is nothing to gain
-             * from ESP-DSP here and a real divergence to lose. Match ref
-             * exactly - it is the baseline every other backend is defined
-             * against. */
-            int j;
-            float acc = out[i];
-            for (j = 0; j < cols; ++j) {
-                acc += M[i * cols + j] * v[j];
-            }
-            out[i] = acc;
-        }
+        /* The chip-generic macro, not _ae32. Earlier code hardcoded the
+         * ESP32 variant, which compiles on the S3 (its guard is generic
+         * Xtensa capability flags, not a chip check) and leaves the
+         * S3-optimized body unused. */
+        float dot;
+        dsps_dotprod_f32(M + i * cols, v, &dot, cols);
+        out[i] += dot;
     }
 }
 
@@ -133,40 +139,19 @@ void xlstm_matvec_s8(const int8_t* M, const int8_t* v,
 {
     /* TODO: PIE EE.VMULAS.S8.ACCX for 16-way int8 MAC.
      * Scalar fallback until PIE intrinsics are available. */
-    int i, j;
-    for (i = 0; i < rows; ++i) {
-        int32_t acc = 0;
-        for (j = 0; j < cols; ++j) {
-            acc += (int32_t)M[i * cols + j] * ((int32_t)v[j] - v_zp);
-        }
-        out[i] = acc;
-    }
+    xlstm_scalar_matvec_s8(M, v, out, rows, cols, v_zp);
 }
 
 void xlstm_rank1_update_f32(float* C, float f_gate, float i_gate,
                             const float* k, const float* v, int H)
 {
-    int r, c;
-    for (r = 0; r < H; ++r) {
-        float ik_r = i_gate * k[r];
-        /* Row-wise: use dsps_dotprod for read, but update is in-place.
-         * Element-wise for now. */
-        for (c = 0; c < H; ++c) {
-            C[r * H + c] = f_gate * C[r * H + c] + ik_r * v[c];
-        }
-    }
+    xlstm_scalar_rank1_update_f32(C, f_gate, i_gate, k, v, H);
 }
 
 void xlstm_vecmat_f32(const float* q, const float* M,
                       float* out, int rows, int cols)
 {
-    int i, j;
-    for (i = 0; i < rows; ++i) {
-        float qi = q[i];
-        for (j = 0; j < cols; ++j) {
-            out[j] += qi * M[i * cols + j];
-        }
-    }
+    xlstm_scalar_vecmat_f32(q, M, out, rows, cols);
 }
 
 const char* xlstm_simd_backend(void)

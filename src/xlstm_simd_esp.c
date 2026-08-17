@@ -14,27 +14,35 @@
  * =========================================================================
  * ESP32-S3 backend. Only compiles under the ESP-IDF toolchain.
  *
- * TWO of the four contract functions are accelerated:
+ * All four contract functions are accelerated:
  *
  *   xlstm_matvec_f32  four rows at a time, four columns per EE.LDF.128.IP -
  *                     the S3 has no f32 vector ALU, so the width is in the
  *                     load and the arithmetic stays scalar.
  *   xlstm_matvec_s8   16 columns per EE.VMULAS.S8.ACCX, the PIE's 16-lane
  *                     int8 multiply-accumulate into a 40-bit accumulator.
+ *   xlstm_rank1_update_f32
+ *                     four rows at a time, four columns per EE.LDF.128.IP
+ *                     and EE.STF.128.IP. This one reads AND writes the whole
+ *                     H x H state every timestep, so the move width is the
+ *                     whole point.
+ *   xlstm_vecmat_f32  four columns of out[] held in registers across the row
+ *                     loop, and four of M per EE.LDF.128.IP wherever one
+ *                     column boundary can be aligned for every row at once.
  *
  * Which path a call takes is decided by its shape and, for INT8, its zero
  * point - never by where the caller's buffers happened to land, which is all
  * the alignment guard the f32 body once carried ever measured.
  *
- * xlstm_rank1_update_f32 and xlstm_vecmat_f32 - and the f32 rows the blocked
- * body cannot cover - defer to the scalar bodies in xlstm_simd_scalar.h, the
- * same text xlstm_simd_ref.c compiles rather than a copy of it. Copies here
- * would be a second reference free to drift from the one every backend is
- * defined against.
+ * What still defers to the scalar bodies in xlstm_simd_scalar.h - the f32
+ * rows the blocked matvec cannot cover, an INT8 zero point two lanes cannot
+ * carry, a rank-1 update under seven columns - defers to that shared text
+ * rather than to a copy of it. Copies here would be a second reference free
+ * to drift from the one every backend is defined against.
  *
  * `make test-esp` runs the golden vectors against this backend on an
- * emulated ESP32-S3 and reports how much of each matvec reached the vector
- * body; read that target's comment before quoting a green run.
+ * emulated ESP32-S3 and reports how much of each of the four reached the
+ * vector body; read that target's comment before quoting a green run.
  * ===========================================================================*/
 
 #include "xlstm_simd.h"
@@ -129,6 +137,30 @@
             : "=f"(x0), "=f"(x1), "=f"(x2), "=f"(x3), "+r"(p)     \
             : "m"(*(const float(*)[4])(p)))
 
+/* The same load with a post-increment of zero, for the two bodies whose
+ * cursor does not move by 16 bytes next: rank1_update stores back to the
+ * address it just read and lets the STORE carry the cursor, and vecmat walks
+ * M by rows, whose stride is a runtime cols and not an immediate. */
+#define XLSTM_ESP_LDF128_AT(x0, x1, x2, x3, p)                    \
+    __asm__("ee.ldf.128.ip %3, %2, %1, %0, %4, 0"                 \
+            : "=f"(x0), "=f"(x1), "=f"(x2), "=f"(x3), "+r"(p)     \
+            : "m"(*(const float(*)[4])(p)))
+
+/* The store side of the same 128-bit move, cursor advanced 16 bytes. Operand
+ * order mirrors the load - fq is the LOWEST address - so the template again
+ * lists the caller's ascending x0..x3 backwards. A wrong order here does not
+ * fault, it writes the four floats reversed, which is why the gate compares
+ * rank1_update against the scalar body element by element.
+ *
+ * "=m" where the load has "m", and volatile besides: these 16 bytes are
+ * WRITTEN, and rank1_update writes the same address its load just read. The
+ * pair of memory operands is what stops the next iteration's load from
+ * crossing this store. */
+#define XLSTM_ESP_STF128(x0, x1, x2, x3, p)                       \
+    __asm__ volatile("ee.stf.128.ip %5, %4, %3, %2, %0, 16"       \
+                     : "+r"(p), "=m"(*(float(*)[4])(p))           \
+                     : "f"(x0), "f"(x1), "f"(x2), "f"(x3))
+
 /* Whether the widened path was taken is now a property of the call's shape,
  * but a build can still link this backend, reproduce every golden vector,
  * and execute the wide instructions rarely or never - the shapes decide, and
@@ -146,13 +178,26 @@ unsigned long xlstm_esp_matvec_f32_fast = 0;
 unsigned long xlstm_esp_matvec_f32_scalar = 0;
 unsigned long xlstm_esp_matvec_s8_fast = 0;
 unsigned long xlstm_esp_matvec_s8_scalar = 0;
+unsigned long xlstm_esp_rank1_f32_fast = 0;
+unsigned long xlstm_esp_rank1_f32_scalar = 0;
+/* vecmat has no scalar-body outcome: its column-blocked body is better than
+ * the reference at every shape, so what the counters separate is whether the
+ * 128-bit load ran on top of the blocking or not. */
+unsigned long xlstm_esp_vecmat_f32_wide = 0;
+unsigned long xlstm_esp_vecmat_f32_blocked = 0;
 #define XLSTM_ESP_COUNT(fast) \
     ((void)((fast) ? ++xlstm_esp_matvec_f32_fast : ++xlstm_esp_matvec_f32_scalar))
 #define XLSTM_ESP_COUNT_S8(fast) \
     ((void)((fast) ? ++xlstm_esp_matvec_s8_fast : ++xlstm_esp_matvec_s8_scalar))
+#define XLSTM_ESP_COUNT_RANK1(fast) \
+    ((void)((fast) ? ++xlstm_esp_rank1_f32_fast : ++xlstm_esp_rank1_f32_scalar))
+#define XLSTM_ESP_COUNT_VECMAT(wide) \
+    ((void)((wide) ? ++xlstm_esp_vecmat_f32_wide : ++xlstm_esp_vecmat_f32_blocked))
 #else
 #define XLSTM_ESP_COUNT(fast) ((void)0)
 #define XLSTM_ESP_COUNT_S8(fast) ((void)0)
+#define XLSTM_ESP_COUNT_RANK1(fast) ((void)0)
+#define XLSTM_ESP_COUNT_VECMAT(wide) ((void)0)
 #endif
 
 /* Four rows, rstep floats apart so that they share an alignment, and their
@@ -562,16 +607,334 @@ void xlstm_matvec_s8(const int8_t* M, const int8_t* v,
     }
 }
 
+/* ====================== THE mLSTM STATE, BOTH PRECISIONS ==================
+ *
+ * The two bodies below are what an mLSTM timestep spends its DH x DH work on,
+ * in f32 and in INT8 alike - the INT8 cell quantizes its input projection and
+ * runs the state in f32 through exactly these. Neither has any arithmetic the
+ * S3 can widen, for the same reason the f32 matvec does not: there is no f32
+ * vector ALU. What there is, is a 128-bit move, and both of these are memory
+ * bound by construction - rank1_update reads and writes the entire matrix
+ * every timestep, and vecmat streams it - so the move is where the win is.
+ *
+ * No speed claim is attached to any of this. QEMU models no timing, this
+ * repository has no cycle data for the part, and nothing here has run on
+ * silicon - so what follows is instructions counted off the emitted image at
+ * -O2, which is a proxy and not time. Per matrix element, innermost loop:
+ *
+ *   rank1_update   7 scalar -> 3.00 four rows at a time, 4.25 one row
+ *   vecmat         6 scalar -> 2.50 wide, 2.75 blocked
+ *
+ * The memory traffic under those numbers is the actual argument. Scalar
+ * rank1_update spends three memory instructions per element - read C, read v,
+ * write C - and the four-row form spends twelve per sixteen elements, because
+ * one EE.LDF.128.IP and one EE.STF.128.IP carry four floats and one set of
+ * four v loads serves four rows. Scalar vecmat spends three per element too,
+ * two of them on an out[] that never had to leave a register.
+ *
+ * NEITHER NEEDS TO REASSOCIATE ANYTHING
+ *
+ * rank1_update is pure elementwise - C[r][c] is a function of C[r][c] alone -
+ * so any order over elements gives the same bits. vecmat accumulates over i
+ * only; blocking it over j leaves every out[j] summed in ascending i from its
+ * own seed, which is exactly the scalar body's order. So both are written to
+ * be bit-identical to xlstm_simd_scalar.h and the gate asserts equality, not
+ * a tolerance.
+ *
+ * CONTRACTION, WHICH IS THE ONE THING THAT COULD MOVE THEM
+ *
+ * MADD.S on this part is FUSED: it does not round the product before adding.
+ * That makes "which multiply became the madd" a numerically visible choice,
+ * and rank1_update's f*C + ik*v has two multiplies to choose between. Get a
+ * different one here than the scalar body gets and the results differ in the
+ * last bit, with nothing about the loop structure to blame.
+ *
+ * The defence is not to reason about it but to write the identical
+ * expression, in the identical statement order, and then read the emitted
+ * code. Read on gcc 14.2 for xtensa-esp32s3, on both sides of the comparison
+ * the gate makes - this file as C, and the scalar bodies as the C++ the gate
+ * inlines them into - at three settings:
+ *
+ *   -Og, which is what the gate builds: NOTHING contracts. Both bodies spell
+ *        f*C + ik*v as MUL.S, MUL.S, ADD.S.
+ *   -O2 with a GNU dialect, which is what a tuned firmware builds: both
+ *        contract, and both pick the same one - MUL.S on ik*v, then MADD.S
+ *        accumulating f*C. That is not luck; it falls out of writing the
+ *        multiplies in the same order, the first one in statement order
+ *        being the one that becomes the madd.
+ *   -O2 under -std=c99: neither contracts, on either side.
+ *
+ * vecmat has only one multiply to place and emits the single MADD.S that
+ * qi*M + out[j] has to be, in both its spellings and on both sides.
+ *
+ * So the two bodies agree at every setting tried, and if a future toolchain
+ * ever splits them the gate's element-by-element comparison goes red rather
+ * than the goldens quietly drifting. That check is not theoretical: forcing
+ * the other multiply to contract here moves rank1_update's output by 3e-08
+ * and the gate fails on it.
+ */
+
+/* Up to four rows of C, rstep rows apart so that they share an alignment,
+ * updated in place. nrows is a compile-time 1 or 4 (always_inline, as with
+ * the INT8 body's `split`) so the row fan-out is unrolled and the one-row
+ * form carries no trace of the other three.
+ *
+ * ALIGNMENT: the same scalar prefix as the f32 matvec, for the same reason -
+ * C belongs to the caller, so the kernel reaches alignment itself rather than
+ * demanding it. At most three columns of prefix bring a row to a 16-byte
+ * boundary and every group after it is aligned by construction; one prefix
+ * serves all four rows because they are 4 / gcd(H, 4) rows apart.
+ *
+ * v is read scalar, and that is what the four-row form buys: one set of four
+ * v loads covers four rows. Widening v instead would tie the instruction
+ * sequence to v's own alignment, which is independent of C's. */
+static inline __attribute__((always_inline)) void
+xlstm_esp_rank1_block(float* C, float f_gate, float i_gate, const float* k,
+                      const float* v, int H, int r0, int rstep, int nrows)
+{
+    const size_t d = (size_t)rstep * (size_t)H;
+    float* p0 = C + (size_t)r0 * (size_t)H;
+    float* p1 = (nrows > 1) ? p0 + d : p0;
+    float* p2 = (nrows > 1) ? p1 + d : p0;
+    float* p3 = (nrows > 1) ? p2 + d : p0;
+    const float ik0 = i_gate * k[r0];
+    const float ik1 = (nrows > 1) ? i_gate * k[r0 + rstep] : 0.0f;
+    const float ik2 = (nrows > 1) ? i_gate * k[r0 + 2 * rstep] : 0.0f;
+    const float ik3 = (nrows > 1) ? i_gate * k[r0 + 3 * rstep] : 0.0f;
+    /* Floats to skip before p0 - and therefore p1, p2 and p3 - is 16-byte
+     * aligned. A float* is already 4-byte aligned, so this is 0 to 3. */
+    const int pre = (int)(((16u - ((uintptr_t)p0 & 15u)) & 15u) >> 2);
+    float* q0 = p0 + pre;
+    float* q1 = p1 + pre;
+    float* q2 = p2 + pre;
+    float* q3 = p3 + pre;
+    int c;
+
+    for (c = 0; c < pre; ++c) {
+        float x = v[c];
+        p0[c] = f_gate * p0[c] + ik0 * x;
+        if (nrows > 1) {
+            p1[c] = f_gate * p1[c] + ik1 * x;
+            p2[c] = f_gate * p2[c] + ik2 * x;
+            p3[c] = f_gate * p3[c] + ik3 * x;
+        }
+    }
+
+    /* q0..q3 are aligned here and stay aligned: the load leaves the cursor
+     * alone and the store to the same address advances it one group. */
+    for (; c + 3 < H; c += 4) {
+        float x0 = v[c];
+        float x1 = v[c + 1];
+        float x2 = v[c + 2];
+        float x3 = v[c + 3];
+        float b0, b1, b2, b3;
+
+        XLSTM_ESP_LDF128_AT(b0, b1, b2, b3, q0);
+        b0 = f_gate * b0 + ik0 * x0;
+        b1 = f_gate * b1 + ik0 * x1;
+        b2 = f_gate * b2 + ik0 * x2;
+        b3 = f_gate * b3 + ik0 * x3;
+        XLSTM_ESP_STF128(b0, b1, b2, b3, q0);
+
+        if (nrows > 1) {
+            XLSTM_ESP_LDF128_AT(b0, b1, b2, b3, q1);
+            b0 = f_gate * b0 + ik1 * x0;
+            b1 = f_gate * b1 + ik1 * x1;
+            b2 = f_gate * b2 + ik1 * x2;
+            b3 = f_gate * b3 + ik1 * x3;
+            XLSTM_ESP_STF128(b0, b1, b2, b3, q1);
+
+            XLSTM_ESP_LDF128_AT(b0, b1, b2, b3, q2);
+            b0 = f_gate * b0 + ik2 * x0;
+            b1 = f_gate * b1 + ik2 * x1;
+            b2 = f_gate * b2 + ik2 * x2;
+            b3 = f_gate * b3 + ik2 * x3;
+            XLSTM_ESP_STF128(b0, b1, b2, b3, q2);
+
+            XLSTM_ESP_LDF128_AT(b0, b1, b2, b3, q3);
+            b0 = f_gate * b0 + ik3 * x0;
+            b1 = f_gate * b1 + ik3 * x1;
+            b2 = f_gate * b2 + ik3 * x2;
+            b3 = f_gate * b3 + ik3 * x3;
+            XLSTM_ESP_STF128(b0, b1, b2, b3, q3);
+        }
+    }
+
+    for (; c < H; ++c) {
+        float x = v[c];
+        p0[c] = f_gate * p0[c] + ik0 * x;
+        if (nrows > 1) {
+            p1[c] = f_gate * p1[c] + ik1 * x;
+            p2[c] = f_gate * p2[c] + ik2 * x;
+            p3[c] = f_gate * p3[c] + ik3 * x;
+        }
+    }
+}
+
 void xlstm_rank1_update_f32(float* C, float f_gate, float i_gate,
                             const float* k, const float* v, int H)
 {
-    xlstm_scalar_rank1_update_f32(C, f_gate, i_gate, k, v, H);
+    /* Rows r and r + step agree modulo a 16-byte group exactly when
+     * step * H is a multiple of 4 floats, so step = 4 / gcd(H, 4): 1 for an H
+     * divisible by four, 2 for an even one, 4 for an odd one. */
+    const int step = (H % 4 == 0) ? 1 : ((H % 2 == 0) ? 2 : 4);
+    const int tile = 4 * step;
+    /* Seven columns is the whole dispatch: a prefix of up to 3 plus one group
+     * of 4 needs that many to be certain of fitting, and certain is the point
+     * - at 4 to 6 whether a group fits would depend on where the caller's C
+     * landed. Nothing else is asked, because the one-row form covers any row
+     * a four-row block cannot reach, so every row of every H >= 7 runs on the
+     * vector body. */
+    const int fast = H >= 7;
+    int base = 0;
+    int r;
+
+    /* Counted after the empty case, not before it: an H of 0 runs neither
+     * body, and a counter that ticked for it would let "the wide path was
+     * entered" mean "a call with that shape arrived". The gate asserts the
+     * stronger reading - every fast tick executed at least one 128-bit move,
+     * which H >= 7 with one row guarantees. */
+    if (H <= 0) {
+        return;
+    }
+
+    XLSTM_ESP_COUNT_RANK1(fast);
+
+    if (!fast) {
+        xlstm_scalar_rank1_update_f32(C, f_gate, i_gate, k, v, H);
+        return;
+    }
+
+    for (; base + tile <= H; base += tile) {
+        int q;
+        /* The step blocks starting at base + 0 .. base + step - 1 cover rows
+         * base .. base + tile - 1 between them, each taking every step'th. */
+        for (q = 0; q < step; ++q) {
+            xlstm_esp_rank1_block(C, f_gate, i_gate, k, v, H,
+                                  base + q, step, 4);
+        }
+    }
+
+    /* Fewer rows left than a block. Each takes its own prefix, which is what
+     * lets the leftovers stay on the 128-bit path instead of falling back to
+     * a second definition of the arithmetic - at H = 17 that is 1 row, and at
+     * an odd H below 16 it is all of them. */
+    for (r = base; r < H; ++r) {
+        xlstm_esp_rank1_block(C, f_gate, i_gate, k, v, H, r, 1, 1);
+    }
+}
+
+/* Four columns of out[] carried in registers across the whole row loop, so
+ * out is read once and written once per group instead of once per element.
+ * That is the larger of this body's two savings and it needs no alignment at
+ * all; `wide` adds the 128-bit load of M on top where the shape allows it,
+ * and is a compile-time 1 or 0 so neither spelling carries the other's test.
+ *
+ * The row loop stays ascending i and every accumulator is seeded from its own
+ * out[j], so the sequence of adds into each element is the scalar body's,
+ * unchanged.
+ *
+ * pre is 0 unless wide, where it is the columns before M's first 16-byte
+ * boundary. Those, and the tail past the last whole group, run one column at
+ * a time - still blocked, just not four wide. */
+static inline __attribute__((always_inline)) void
+xlstm_esp_vecmat_body(const float* q, const float* M, float* out,
+                      int rows, int cols, int pre, int wide)
+{
+    const size_t stride = (size_t)cols;
+    int i, j;
+
+    for (j = 0; j < pre; ++j) {
+        float a = out[j];
+        for (i = 0; i < rows; ++i) {
+            a += q[i] * M[(size_t)i * stride + j];
+        }
+        out[j] = a;
+    }
+
+    for (; j + 3 < cols; j += 4) {
+        float a0 = out[j];
+        float a1 = out[j + 1];
+        float a2 = out[j + 2];
+        float a3 = out[j + 3];
+        const float* p = M + j;
+
+        for (i = 0; i < rows; ++i) {
+            float qi = q[i];
+            float b0, b1, b2, b3;
+
+            if (wide) {
+                XLSTM_ESP_LDF128_AT(b0, b1, b2, b3, p);
+            } else {
+                b0 = p[0];
+                b1 = p[1];
+                b2 = p[2];
+                b3 = p[3];
+            }
+            a0 += qi * b0;
+            a1 += qi * b1;
+            a2 += qi * b2;
+            a3 += qi * b3;
+            p += stride;
+        }
+
+        out[j] = a0;
+        out[j + 1] = a1;
+        out[j + 2] = a2;
+        out[j + 3] = a3;
+    }
+
+    for (; j < cols; ++j) {
+        float a = out[j];
+        for (i = 0; i < rows; ++i) {
+            a += q[i] * M[(size_t)i * stride + j];
+        }
+        out[j] = a;
+    }
 }
 
 void xlstm_vecmat_f32(const float* q, const float* M,
                       float* out, int rows, int cols)
 {
-    xlstm_scalar_vecmat_f32(q, M, out, rows, cols);
+    /* One column boundary has to serve every row here - the accumulators are
+     * fixed columns and the row loop cannot be reordered - so the 128-bit
+     * load is available exactly when consecutive rows agree modulo a 16-byte
+     * group, which is a cols divisible by four. The f32 matvec escapes that
+     * by blocking rows 4 / gcd(cols, 4) apart; this one cannot, because that
+     * would visit rows out of order and out[] accumulates over rows.
+     *
+     * The alternative for the other widths is to unroll the row loop by
+     * 4 / gcd(cols, 4) and widen the one row in each group that is aligned.
+     * It is not worth it, and the emitted image says why: the blocked inner
+     * loop below is 11 instructions per row per four columns and the wide one
+     * is 10, because the four scalar loads the wide form removes are partly
+     * paid back - an asm of unknown length costs GCC the zero-overhead LOOP
+     * and buys a compare and a branch instead. One instruction in eleven, on
+     * a quarter of the rows at an odd cols, before the unrolled loop's own
+     * overhead. The blocking is where this body's factor of two lives; the
+     * width adds about a tenth on top of it, and only where it is free.
+     *
+     * Seven columns for the same reason as everywhere else here: a prefix of
+     * up to 3 plus a whole group of 4. With cols divisible by four that means
+     * eight. */
+    const int wide = (cols % 4 == 0) && cols >= 7;
+
+    /* rows <= 0 writes nothing at all, which is not the same as writing out[]
+     * back unchanged: the scalar body this is defined against never touches
+     * out for an empty row range. Counted after it, for the same reason
+     * rank1_update is - a wide tick has to mean a wide move ran. */
+    if (rows <= 0 || cols <= 0) {
+        return;
+    }
+
+    XLSTM_ESP_COUNT_VECMAT(wide);
+
+    if (wide) {
+        const int pre = (int)(((16u - ((uintptr_t)M & 15u)) & 15u) >> 2);
+        xlstm_esp_vecmat_body(q, M, out, rows, cols, pre, 1);
+    } else {
+        xlstm_esp_vecmat_body(q, M, out, rows, cols, 0, 0);
+    }
 }
 
 const char* xlstm_simd_backend(void)

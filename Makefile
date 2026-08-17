@@ -187,17 +187,28 @@ test-cortexm:
 #     The gate runs 23 cases at all 256 pairings of the two operands'
 #     alignments and demands bit-identical int32 output, which for integers
 #     is the whole of correctness - there is no tolerance to hide in.
-#   - xlstm_rank1_update_f32 and xlstm_vecmat_f32 against the golden vectors
-#     - but those two are scalar C in this backend, so what is gated there is
-#     the arithmetic, not any Xtensa instruction.
-#   - The suites' own matvecs: 36 of their 76 xlstm_matvec_f32 calls run
+#   - xlstm_rank1_update_f32, both of its paths. Four rows at a time through
+#     EE.LDF.128.IP and EE.STF.128.IP, entered on H alone: seven columns, no
+#     alignment condition, because a row a four-row block cannot reach takes
+#     its own prefix as a block of one. The gate runs 15 shapes at 64
+#     alignment triples and two gate pairs and demands bit-identical output.
+#     MADD.S does not round the product it adds, so equality here is what
+#     detects the vector body and the scalar body contracting differently -
+#     a tolerance would swallow precisely that.
+#   - xlstm_vecmat_f32, both of its spellings. Four columns of out[] held in
+#     registers across the row loop either way; the 128-bit load of M on top
+#     wherever one column boundary can be aligned for every row at once,
+#     which is a cols divisible by four. 19 shapes at 64 alignment triples,
+#     bit-exact, with out[] seeded non-zero so that dropping the accumulator
+#     seed - the one change that moved a golden here before - cannot pass.
+#   - The suites' own calls: 36 of their 76 xlstm_matvec_f32 calls run
 #     blocked, the other 40 being the cases whose H and I are 1 to 4, under
 #     one 128-bit group wide; all 136 xlstm_matvec_s8 calls run on the vector
 #     body, which is what a formulation that never seeks alignment buys. The
-#     firmware prints both splits every run rather than leaving them to be
-#     assumed, and does not assert on them - they are a property of the case
-#     list, and pinning them here would gate reference_data.h rather than the
-#     kernel.
+#     firmware prints all four splits every run rather than leaving them to
+#     be assumed, and does not assert on them - they are a property of the
+#     case list, and pinning them here would gate reference_data.h rather
+#     than the kernel.
 #
 # What it does NOT cover: real silicon. QEMU executes the S3's SIMD
 # instructions but does not model their timing, its Xtensa FPU is not

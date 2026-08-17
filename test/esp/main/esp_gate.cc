@@ -38,6 +38,10 @@ extern "C" unsigned long xlstm_esp_matvec_f32_fast;
 extern "C" unsigned long xlstm_esp_matvec_f32_scalar;
 extern "C" unsigned long xlstm_esp_matvec_s8_fast;
 extern "C" unsigned long xlstm_esp_matvec_s8_scalar;
+extern "C" unsigned long xlstm_esp_rank1_f32_fast;
+extern "C" unsigned long xlstm_esp_rank1_f32_scalar;
+extern "C" unsigned long xlstm_esp_vecmat_f32_wide;
+extern "C" unsigned long xlstm_esp_vecmat_f32_blocked;
 
 namespace {
 
@@ -271,6 +275,232 @@ bool TestFastPathS8(void) {
     return ok;
 }
 
+/* --- rank-1 update fast-path check ---------------------------------------
+ *
+ * The mLSTM state update, C = f*C + i*k^T v, four rows at a time with
+ * EE.LDF.128.IP and EE.STF.128.IP. Same three assertions as the two matvecs,
+ * and two things about this one are worth stating outright:
+ *
+ *   - The dispatch is one number, H >= 7 - a prefix of up to three columns
+ *     plus one whole group of four. Every row of every H at or above that
+ *     runs on the 128-bit path, because a row a four-row block cannot reach
+ *     takes its own prefix as a block of one. So the counters are checked
+ *     against a rule with no alignment in it, and H = 0 must tick NEITHER
+ *     counter: a fast tick is meant to say a wide move ran, not that a call
+ *     with a large enough H arrived.
+ *   - Exactness here is not about summation order, because nothing sums:
+ *     every element is its own f*C + ik*v. What it IS about is CONTRACTION.
+ *     MADD.S does not round the product it adds, so "which of the two
+ *     multiplies became the madd" changes the last bit, and the vector body
+ *     and the scalar body must make the same choice. Element-by-element
+ *     equality is what detects it if they ever stop agreeing - a tolerance
+ *     would swallow exactly this and nothing else.
+ *
+ * The store side gets its own reason to be checked by value: EE.STF.128.IP's
+ * operand order is asserted, not documented, and getting it backwards writes
+ * the four floats reversed rather than faulting.
+ */
+
+const int kMaxH = 64;
+
+alignas(16) float g_C[kMaxH * kMaxH + 4];
+float g_Cref[kMaxH * kMaxH];
+alignas(16) float g_k[kMaxH + 4];
+alignas(16) float g_kv[kMaxH + 4];
+
+/* Mantissas with no short binary form, so that f*C + ik*v is not exactly
+ * representable and a contraction difference has somewhere to show up. */
+float CSeed(int i) { return 0.75f - (float)((i * 29) % 97) / 96.0f; }
+
+bool CheckRank1(int H, int coff, int koff, int voff, float f_gate,
+                float i_gate, unsigned long want_fast,
+                unsigned long want_scalar) {
+  float* C = g_C + coff;
+  const float* k = g_k + koff;
+  const float* v = g_kv + voff;
+  const unsigned long fast0 = xlstm_esp_rank1_f32_fast;
+  const unsigned long scalar0 = xlstm_esp_rank1_f32_scalar;
+  bool ok = true;
+
+  for (int i = 0; i < H * H; ++i) C[i] = g_Cref[i] = CSeed(i);
+  xlstm_rank1_update_f32(C, f_gate, i_gate, k, v, H);
+  xlstm_scalar_rank1_update_f32(g_Cref, f_gate, i_gate, k, v, H);
+
+  const unsigned long d_fast = xlstm_esp_rank1_f32_fast - fast0;
+  const unsigned long d_scalar = xlstm_esp_rank1_f32_scalar - scalar0;
+  if (d_fast != want_fast || d_scalar != want_scalar) {
+    std::printf("  FAIL rank1 H=%d C+%d k+%d v+%d: expected fast+%lu "
+                "scalar+%lu, got fast+%lu scalar+%lu. Which path a call takes "
+                "is a property of H alone; a gate that cannot prove "
+                "EE.STF.128.IP ran proves nothing.\n",
+                H, coff, koff, voff, want_fast, want_scalar, d_fast, d_scalar);
+    ok = false;
+  }
+
+  for (int i = 0; i < H * H; ++i) {
+    if (C[i] != g_Cref[i]) {
+      std::printf("  FAIL rank1 H=%d C+%d k+%d v+%d C[%d] (row %d col %d): "
+                  "got %.9g, reference %.9g (diff %.2e). Nothing here sums "
+                  "across elements - a difference is a lane order or a "
+                  "contraction that stopped matching the scalar body.\n",
+                  H, coff, koff, voff, i, i / H, i % H, (double)C[i],
+                  (double)g_Cref[i], (double)std::fabs(C[i] - g_Cref[i]));
+      ok = false;
+      break;
+    }
+  }
+  return ok;
+}
+
+bool TestRank1(void) {
+  for (int i = 0; i < kMaxH + 4; ++i) {
+    g_k[i] = 0.5f - (float)((i * 41) % 83) / 82.0f;
+    g_kv[i] = (float)((i * 59) % 61) / 30.0f - 1.0f;
+  }
+
+  /* Spelled out, not recomputed from the kernel's own rule. H straddles the
+   * seven-column dispatch both ways and covers the three step classes an
+   * odd, an even and a multiple-of-four H put the four-row block into. */
+  static const struct { int H; unsigned long fast, scalar; } kCases[] = {
+      {0, 0, 0},                                    /* neither body runs */
+      {1, 0, 1}, {2, 0, 1}, {3, 0, 1}, {6, 0, 1},   /* under one group */
+      {7, 1, 0},  {8, 1, 0},  {9, 1, 0},  {10, 1, 0},
+      {15, 1, 0}, {16, 1, 0}, {17, 1, 0}, {20, 1, 0},
+      {32, 1, 0}, {64, 1, 0},
+  };
+  /* One pair with both gates ordinary, one with a tiny i_gate, so the two
+   * products differ in exponent by enough that the order they are combined
+   * in matters. */
+  static const struct { float f, i; } kGates[] = {
+      {0.91371f, 0.13793f}, {0.99993f, 3.0517578e-05f},
+  };
+  const int kCaseCount = (int)(sizeof kCases / sizeof kCases[0]);
+  const int kGateCount = (int)(sizeof kGates / sizeof kGates[0]);
+  bool ok = true;
+
+  for (int s = 0; s < kCaseCount; ++s) {
+    for (int g = 0; g < kGateCount; ++g) {
+      for (int coff = 0; coff < 4; ++coff) {
+        for (int koff = 0; koff < 4; ++koff) {
+          for (int voff = 0; voff < 4; ++voff) {
+            ok &= CheckRank1(kCases[s].H, coff, koff, voff, kGates[g].f,
+                             kGates[g].i, kCases[s].fast, kCases[s].scalar);
+          }
+        }
+      }
+    }
+  }
+  std::printf("  %d shapes x 2 gate pairs x 64 alignment triples, all "
+              "bit-exact against xlstm_scalar_rank1_update_f32\n", kCaseCount);
+  return ok;
+}
+
+/* --- vecmat fast-path check ----------------------------------------------
+ *
+ * q^T C, the other half of an mLSTM timestep. This body has two spellings
+ * rather than a fast one and a fallback, so the counters name what they are:
+ *
+ *   wide     four columns of out[] in registers across the row loop AND four
+ *            of M per EE.LDF.128.IP. Reachable when one column boundary can
+ *            be aligned for every row at once, which is a cols divisible by
+ *            four - and at least seven of them, so a group is certain to fit
+ *            behind a prefix of up to three.
+ *   blocked  the same column blocking with scalar loads of M. Every other
+ *            shape, at any alignment. It is not the shared scalar body and
+ *            is not a fallback: it does the same work in fewer instructions,
+ *            it just does not use a vector instruction to do it.
+ *
+ * An empty call - no rows or no columns - ticks neither, so a wide tick
+ * always means a 128-bit load executed.
+ *
+ * Exactness here IS about summation order, unlike rank1 above: out[] is
+ * read-modify-write and the blocking moves it into a register for the whole
+ * row loop. Every accumulator still starts at its own out[j] and runs
+ * ascending i, which is the scalar body's order exactly. Seeding out[] with
+ * something other than zero is what makes that checkable - the contract's
+ * own callers zero it, so a body that dropped the seed would pass every
+ * suite and fail only here.
+ */
+
+alignas(16) float g_vout[kMaxCols + 4];
+float g_vref[kMaxCols + 4];
+
+bool CheckVecmat(int rows, int cols, int moff, int qoff, int ooff,
+                 unsigned long want_wide, unsigned long want_blocked) {
+  const float* M = g_M + moff;
+  const float* qv = g_v + qoff;
+  float* out = g_vout + ooff;
+  const unsigned long wide0 = xlstm_esp_vecmat_f32_wide;
+  const unsigned long blocked0 = xlstm_esp_vecmat_f32_blocked;
+  bool ok = true;
+
+  for (int j = 0; j < cols; ++j) out[j] = g_vref[j] = OutSeed(j);
+  xlstm_vecmat_f32(qv, M, out, rows, cols);
+  xlstm_scalar_vecmat_f32(qv, M, g_vref, rows, cols);
+
+  const unsigned long d_wide = xlstm_esp_vecmat_f32_wide - wide0;
+  const unsigned long d_blocked = xlstm_esp_vecmat_f32_blocked - blocked0;
+  if (d_wide != want_wide || d_blocked != want_blocked) {
+    std::printf("  FAIL vecmat rows=%d cols=%d M+%d q+%d out+%d: expected "
+                "wide+%lu blocked+%lu, got wide+%lu blocked+%lu. Which "
+                "spelling a call takes is a property of cols alone; a gate "
+                "that cannot prove EE.LDF.128.IP ran proves nothing.\n",
+                rows, cols, moff, qoff, ooff, want_wide, want_blocked,
+                d_wide, d_blocked);
+    ok = false;
+  }
+
+  for (int j = 0; j < cols; ++j) {
+    if (out[j] != g_vref[j]) {
+      std::printf("  FAIL vecmat rows=%d cols=%d M+%d q+%d out+%d out[%d]: "
+                  "got %.9g, reference %.9g (diff %.2e). Blocking moves out[j] "
+                  "into a register, it does not regroup the adds into it - "
+                  "this has to be exact.\n",
+                  rows, cols, moff, qoff, ooff, j, (double)out[j],
+                  (double)g_vref[j], (double)std::fabs(out[j] - g_vref[j]));
+      ok = false;
+      break;
+    }
+  }
+  return ok;
+}
+
+bool TestVecmat(void) {
+  /* Re-seeded rather than inherited from TestFastPath, so this check does not
+   * depend on the order the three run in. */
+  for (int i = 0; i < kMaxRows * kMaxCols + 4; ++i)
+    g_M[i] = 0.5f - (float)((i * 37) % 71) / 70.0f;
+  for (int j = 0; j < kMaxCols + 4; ++j)
+    g_v[j] = (float)((j * 53) % 31) / 15.0f - 1.0f;
+
+  static const struct { int rows, cols; unsigned long wide, blocked; }
+      kCases[] = {
+      {20, 0, 0, 0}, {0, 8, 0, 0},   /* empty: neither spelling runs */
+      {20, 1, 0, 1},  {20, 2, 0, 1},  {20, 3, 0, 1},
+      {20, 4, 0, 1},  {20, 5, 0, 1},  {20, 6, 0, 1},  /* mult of 4, under 7 */
+      {20, 7, 0, 1},  {20, 17, 0, 1}, {20, 31, 0, 1}, /* not a mult of 4 */
+      {20, 8, 1, 0},  {20, 12, 1, 0}, {20, 16, 1, 0},
+      {20, 32, 1, 0}, {20, 64, 1, 0},
+      {1, 8, 1, 0},   {3, 8, 1, 0},   {1, 17, 0, 1},  /* fewer rows than 4 */
+  };
+  const int kCaseCount = (int)(sizeof kCases / sizeof kCases[0]);
+  bool ok = true;
+
+  for (int s = 0; s < kCaseCount; ++s) {
+    for (int moff = 0; moff < 4; ++moff) {
+      for (int qoff = 0; qoff < 4; ++qoff) {
+        for (int ooff = 0; ooff < 4; ++ooff) {
+          ok &= CheckVecmat(kCases[s].rows, kCases[s].cols, moff, qoff, ooff,
+                            kCases[s].wide, kCases[s].blocked);
+        }
+      }
+    }
+  }
+  std::printf("  %d shapes x 64 alignment triples, all bit-exact against "
+              "xlstm_scalar_vecmat_f32\n", kCaseCount);
+  return ok;
+}
+
 } /* namespace */
 
 extern "C" void app_main(void) {
@@ -305,10 +535,30 @@ extern "C" void app_main(void) {
             rc = 1;
         }
 
+        std::printf("[ RUN      ] esp fast path (rank-1 update)\n");
+        if (TestRank1()) {
+            std::printf("[       OK ] esp fast path (rank-1 update)\n");
+        } else {
+            std::printf("[  FAILED  ] esp fast path (rank-1 update)\n");
+            rc = 1;
+        }
+
+        std::printf("[ RUN      ] esp fast path (vecmat)\n");
+        if (TestVecmat()) {
+            std::printf("[       OK ] esp fast path (vecmat)\n");
+        } else {
+            std::printf("[  FAILED  ] esp fast path (vecmat)\n");
+            rc = 1;
+        }
+
         const unsigned long fast0 = xlstm_esp_matvec_f32_fast;
         const unsigned long scalar0 = xlstm_esp_matvec_f32_scalar;
         const unsigned long qfast0 = xlstm_esp_matvec_s8_fast;
         const unsigned long qscalar0 = xlstm_esp_matvec_s8_scalar;
+        const unsigned long rfast0 = xlstm_esp_rank1_f32_fast;
+        const unsigned long rscalar0 = xlstm_esp_rank1_f32_scalar;
+        const unsigned long vwide0 = xlstm_esp_vecmat_f32_wide;
+        const unsigned long vblocked0 = xlstm_esp_vecmat_f32_blocked;
 
         rc |= slstm_test_main();
         rc |= mlstm_test_main();
@@ -326,14 +576,23 @@ extern "C" void app_main(void) {
         const unsigned long scalar = xlstm_esp_matvec_f32_scalar - scalar0;
         const unsigned long qfast = xlstm_esp_matvec_s8_fast - qfast0;
         const unsigned long qscalar = xlstm_esp_matvec_s8_scalar - qscalar0;
+        const unsigned long rfast = xlstm_esp_rank1_f32_fast - rfast0;
+        const unsigned long rscalar = xlstm_esp_rank1_f32_scalar - rscalar0;
+        const unsigned long vwide = xlstm_esp_vecmat_f32_wide - vwide0;
+        const unsigned long vblocked = xlstm_esp_vecmat_f32_blocked - vblocked0;
         std::printf("XLSTM_ESP_FASTPATH: the suites called xlstm_matvec_f32 "
                     "%lu times, %lu of them blocked (the rest are under 7 "
                     "columns wide), and xlstm_matvec_s8 %lu times, %lu of "
                     "them on EE.VMULAS.S8.ACCX - and a vector-body INT8 call "
                     "runs every column of every row there, at any alignment. "
-                    "xlstm_vecmat_f32 and xlstm_rank1_update_f32 are scalar C "
-                    "in this backend.\n",
-                    fast + scalar, fast, qfast + qscalar, qfast);
+                    "xlstm_rank1_update_f32 ran %lu times, %lu of them on "
+                    "EE.LDF.128.IP + EE.STF.128.IP (the rest are H under 7), "
+                    "and xlstm_vecmat_f32 %lu times, %lu of them with a "
+                    "128-bit load of M - the other %lu keep the same column "
+                    "blocking with scalar loads, which is every width not "
+                    "divisible by four.\n",
+                    fast + scalar, fast, qfast + qscalar, qfast,
+                    rfast + rscalar, rfast, vwide + vblocked, vwide, vblocked);
     }
 
     std::printf("##xlstm-esp-gate:%d##\n", rc ? 1 : 0);

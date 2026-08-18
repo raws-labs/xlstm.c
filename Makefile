@@ -39,7 +39,7 @@ endif
 .PHONY: all test simd-info test-ref test-sse2 test-neon test-cortexm test-esp reference clean \
         test-docker-ort test-docker-tvm test-docker-tflm test-docker-espdl \
         bench bench-ref bench-sse2 perf perf-baseline mutants \
-        check-internal-refs
+        check-internal-refs check-tools
 
 all: $(BUILD)/slstm.o $(BUILD)/mlstm.o \
      $(BUILD)/xlstm_quant.o $(BUILD)/slstm_s8.o $(BUILD)/mlstm_s8.o \
@@ -557,6 +557,20 @@ check-internal-refs:
 		exit 1; \
 	fi; \
 	echo "check-internal-refs: OK"
+
+# --- Adoption helpers ---
+#
+# tools/ holds worked examples for the first hour with this library: head
+# slicing, INT8 calibration, and whether a configuration fits the part. They
+# are not a supported exporter and promise no format. What earns them a place
+# is that each one re-derives its claim from test/reference_data.json and
+# exits non-zero if it drifts - documentation about an index expression cannot
+# be checked, a script can. Standard library only, so this needs no .venv and
+# runs in the same job as the other hygiene checks.
+check-tools:
+	@python3 tools/extract_heads.py
+	@python3 tools/calibrate_int8.py
+	@python3 tools/footprint.py
 
 # --- Cleanup ---
 

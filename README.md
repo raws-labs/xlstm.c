@@ -33,7 +33,7 @@ Per head, with `H` = `hidden_size`:
 | f32 | `16H` bytes | `4H^2 + 4H + 4` bytes |
 | INT8 | `9H` bytes | `2H^2 + 2H + 4` bytes |
 
-For mLSTM that is 16.3 KB at `H` = 64 and 64.5 KB at `H` = 128 in f32, halved in INT8. Multiply by the head count: an 8-head mLSTM layer at `H` = 64 needs 130 KB of f32 state before any weights, which does not fit a 128 KB part.
+For mLSTM that is 16.3 KB at `H` = 64 and 64.5 KB at `H` = 128 in f32, halved in INT8. Multiply by the head count: an 8-head mLSTM layer at `H` = 64 needs 130 KB of f32 state before any weights, which does not fit a 128 KB part. `python3 tools/footprint.py 64 32 8` prints state and weight bytes for a configuration, both cells and both precisions.
 
 ## SIMD backends
 
@@ -53,7 +53,15 @@ A backend need not accelerate everything. `cortexm` implements the two matrix-ve
 
 ## Using your own weights
 
-You supply the weights; there is no exporter or calibration tool here, by design.
+You supply the weights. There is no exporter, no weight format and no compatibility promise, by design - but the three steps that cost a first afternoon are worked examples in `tools/`, each of which re-derives its claim from `test/reference_data.json` and fails the build if it drifts:
+
+```bash
+python3 tools/extract_heads.py       # fused reference weights -> per-head W, R, b
+python3 tools/calibrate_int8.py      # float tensors -> the INT8 scales and zero points
+python3 tools/footprint.py 64 32 8   # bytes of state and weights, f32 and INT8
+```
+
+Standard library only, apart from one function that reads tensors out of a live PyTorch module. Copy them into your own pipeline; they are examples, not an interface.
 
 Per head, with `H` = `hidden_size` and `I` = `input_size`: sLSTM takes `W [4H, I]`, `R [4H, H]` and `b [4H]`; mLSTM takes `W [(4H+2), I]` and `b [(4H+2)]`, and no `R`. Gate rows run `i, f, z, o`.
 

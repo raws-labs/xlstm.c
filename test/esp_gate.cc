@@ -498,6 +498,133 @@ bool TestVecmat(void) {
   return ok;
 }
 
+/* --- no access past an operand's end -------------------------------------
+ *
+ * Everything above compares values, and there is one class of defect no
+ * comparison can reach. The INT8 body assembles each 16-column window from
+ * the two aligned blocks holding it, and its last group loads the upper block
+ * only when the row's final byte falls in it. Load it unconditionally and the
+ * ANSWERS ARE STILL RIGHT - the lanes above the row are multiplied by the
+ * zero-padded constants and contribute nothing - while the kernel reads up to
+ * 16 bytes past the end of what the caller gave it. That is the claim under
+ * "NOTHING IS READ THAT CANNOT BE READ" in src/xlstm_simd_esp.c, and until
+ * this check existed nothing tested it.
+ *
+ * So this check does not compare anything. It places one operand at a time
+ * hard against the end of mapped memory and runs the kernel: an access past
+ * the end is unmapped, which faults, which the toolchain's handler turns into
+ * PANIC and a non-zero exit. Ported from test/helium_gate.cc, where the same
+ * technique found two defects nothing else could.
+ *
+ * kEdgeTop is where the emulator's RAM ends, not where the chip's does:
+ * Espressif's qemu-system-xtensa maps the esp32s3's data bus up to
+ * 0x3FDF0000 and faults at or above it. The linker's DRAM window ends at
+ * 0x3FCF0000 (its script's own limit, widened to the S3's 448 KB by
+ * --defsym=entire_dram_seg=1), a megabyte below, so the top of that RAM holds
+ * nothing this image put there and operands can be butted against it.
+ *
+ * What proves the constant is right is the mutation battery, not this file:
+ * a kEdgeTop below the true end would leave every call below reading ordinary
+ * RAM and passing, and test/mutants.py injects exactly that unconditional
+ * upper-block load and fails if this check does not catch it.
+ */
+
+const uintptr_t kEdgeTop = 0x3FDF0000u;
+
+void* Edge(int bytes) {
+  return (void*)(kEdgeTop - (uintptr_t)bytes);
+}
+
+/* Destinations that are NOT at the edge. Their own arrays rather than the
+ * checks' g_out and g_outi, which are sized for those checks' shapes. */
+const int kEdgeMax = 32;
+float g_eout[kEdgeMax];
+int32_t g_eouti[kEdgeMax];
+
+bool TestEdge(void) {
+  /* Sizes that straddle the 16-column group in every residue, plus the two
+   * multiples of it: a row whose last byte lands exactly on a block boundary
+   * is the case where the upper block is the one place a load here could
+   * leave the caller's buffer. */
+  static const int kSizes[] = {1, 2, 3, 5, 7, 15, 16, 17, 31, 32};
+  const int kSizeCount = (int)(sizeof kSizes / sizeof kSizes[0]);
+
+  for (int i = 0; i < kMaxRows * kMaxCols + 4; ++i)
+    g_M[i] = 0.5f - (float)((i * 37) % 71) / 70.0f;
+  for (int j = 0; j < kMaxCols + 4; ++j)
+    g_v[j] = (float)((j * 53) % 31) / 15.0f - 1.0f;
+  for (int i = 0; i < kMaxRows * kMaxCols + 16; ++i)
+    g_Mi[i] = (int8_t)(((i * 37) % 255) - 128);
+  for (int j = 0; j < kMaxCols + 16; ++j)
+    g_vi[j] = (int8_t)(((j * 53) % 255) - 128);
+
+  for (int s = 0; s < kSizeCount; ++s) {
+    const int n = kSizes[s];
+    const int nn = n * n;
+
+    /* INT8 matvec: M's last group and v's last group are both 16 columns
+     * wide, and each is assembled from two blocks. */
+    {
+      int8_t* eM = (int8_t*)Edge(nn);
+      int8_t* ev = (int8_t*)Edge(n);
+
+      for (int i = 0; i < nn; ++i) eM[i] = (int8_t)(i - 60);
+      xlstm_matvec_s8(eM, g_vi, g_eouti, n, n, -128);
+
+      for (int i = 0; i < n; ++i) ev[i] = (int8_t)(i - 60);
+      xlstm_matvec_s8(g_Mi, ev, g_eouti, n, n, -128);
+
+      xlstm_matvec_s8(g_Mi, g_vi, (int32_t*)Edge(n * (int)sizeof(int32_t)),
+                      n, n, -128);
+    }
+
+    /* f32 matvec: a scalar prefix to a 16-byte boundary and then whole
+     * groups, so the last group is the one that could overrun. */
+    {
+      float* eM = (float*)Edge(nn * (int)sizeof(float));
+      float* eout = (float*)Edge(n * (int)sizeof(float));
+
+      for (int i = 0; i < nn; ++i) eM[i] = 0.5f - (float)(i % 7);
+      for (int i = 0; i < n; ++i) g_eout[i] = OutSeed(i);
+      xlstm_matvec_f32(eM, g_v, g_eout, n, n);
+
+      for (int i = 0; i < n; ++i) eout[i] = OutSeed(i);
+      xlstm_matvec_f32(g_M, g_v, eout, n, n);
+    }
+
+    /* Rank-1 update reads AND writes C in whole groups, so C at the edge
+     * covers the store side and v at the edge the load. */
+    {
+      float* eC = (float*)Edge(nn * (int)sizeof(float));
+      float* ev = (float*)Edge(n * (int)sizeof(float));
+
+      for (int i = 0; i < nn; ++i) eC[i] = 0.25f * (float)(i % 11);
+      xlstm_rank1_update_f32(eC, 0.9f, 0.1f, g_k, g_kv, n);
+
+      for (int i = 0; i < n; ++i) ev[i] = 0.5f - (float)(i % 5);
+      xlstm_rank1_update_f32(g_C, 0.9f, 0.1f, g_k, ev, n);
+    }
+
+    /* vecmat holds four columns of out[] in registers across the row loop,
+     * and on the final row those columns are the end of M. */
+    {
+      float* eM = (float*)Edge(nn * (int)sizeof(float));
+      float* eout = (float*)Edge(n * (int)sizeof(float));
+
+      for (int i = 0; i < nn; ++i) eM[i] = 0.5f - (float)(i % 7);
+      for (int j = 0; j < n; ++j) g_eout[j] = OutSeed(j);
+      xlstm_vecmat_f32(g_v, eM, g_eout, n, n);
+
+      for (int j = 0; j < n; ++j) eout[j] = OutSeed(j);
+      xlstm_vecmat_f32(g_v, g_M, eout, n, n);
+    }
+  }
+
+  std::printf("  %d sizes x 4 kernels, each operand in turn at the edge, no "
+              "access past the end of mapped memory\n", kSizeCount);
+  return true; /* reaching here at all is the result: nothing faulted */
+}
+
 } /* namespace */
 
 int main(void) {
@@ -547,6 +674,15 @@ int main(void) {
             std::printf("[       OK ] esp fast path (vecmat)\n");
         } else {
             std::printf("[  FAILED  ] esp fast path (vecmat)\n");
+            rc = 1;
+        }
+
+        std::printf("[ RUN      ] esp no access past an operand's end\n");
+        std::fflush(stdout);
+        if (TestEdge()) {
+            std::printf("[       OK ] esp no access past an operand's end\n");
+        } else {
+            std::printf("[  FAILED  ] esp no access past an operand's end\n");
             rc = 1;
         }
 

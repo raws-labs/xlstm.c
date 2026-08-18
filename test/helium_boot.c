@@ -61,12 +61,26 @@ void Reset_Handler(void)
     semi_exit(main());
 }
 
+/* Semihosting SYS_WRITE0: one instruction and a pointer to a NUL-terminated
+ * string, touching no library state at all. */
+static void semi_write0(const char* s)
+{
+    __asm__ volatile("mov r0, %0\n\tmov r1, %1\n\tbkpt 0xAB\n"
+                     :
+                     : "r"(0x04u), "r"(s)
+                     : "r0", "r1", "memory");
+}
+
 static void Fault_Handler(void)
 {
-    /* Deliberately silent: a fault may have arrived through a wrecked C
-     * environment, and printf from here can hang instead of reporting. A
-     * distinctive exit status is the signal, and any non-zero status fails
-     * the gate. */
+    /* Still no printf: a fault may have arrived through a wrecked C
+     * environment, and printf from here can hang instead of reporting. But an
+     * exit status alone cannot say WHICH check died, and the out-of-bounds
+     * check is meant to fail by faulting - so the one line below goes out
+     * through semihosting directly, which is as safe as the exit call under
+     * it. Any non-zero status still fails the gate. */
+    semi_write0("FAIL fault: the image faulted. The check it was running is "
+                "the last [ RUN ] line above.\n");
     semi_exit(70);
 }
 

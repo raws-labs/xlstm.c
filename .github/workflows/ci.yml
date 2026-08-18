@@ -97,12 +97,15 @@ jobs:
   # harness that needs physical parts.
   #
   # Green here does NOT mean the Cortex-M targets are covered. It gates the
-  # arithmetic against the same golden vectors as every other backend, and
-  # nothing else: armv7-a Linux permits unaligned word access, so the INT8
-  # matvec's -mno-unaligned-access load path is not compiled and M-profile
-  # alignment behaviour is not exercised; XLSTM_FPU_HAS_MINMAX_ROUND resolves to
-  # 0 here, so the FPv5 vminnm/vrinta path M7 and M33 declare is not covered;
-  # and emulated execution says nothing about cycles. See the make target.
+  # arithmetic against the same golden vectors as every other backend, plus one
+  # thing those cannot see - test/cortexm_gate.cc puts each operand in turn
+  # against a guard page, so a group load that stepped past a row faults rather
+  # than passing with the right answer. Nothing else: armv7-a Linux permits
+  # unaligned word access, so the INT8 matvec's -mno-unaligned-access load path
+  # is not compiled and M-profile alignment behaviour is not exercised;
+  # XLSTM_FPU_HAS_MINMAX_ROUND resolves to 0 here, so the FPv5 vminnm/vrinta
+  # path M7 and M33 declare is not covered; and emulated execution says nothing
+  # about cycles. See the make target.
   cross-cortexm:
     runs-on: ubuntu-latest
     steps:

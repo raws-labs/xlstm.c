@@ -302,14 +302,35 @@ $(BUILD)/xlstm_bench: test/xlstm_bench.cc $(BUILD)/slstm.o $(BUILD)/mlstm.o \
 		$(BUILD)/slstm_s8.o $(BUILD)/mlstm_s8.o \
 		$(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o -lm
 
-bench: $(BUILD)/xlstm_bench
-	@$(BUILD)/xlstm_bench
+# Objects are backend-specific; their names are not. build/xlstm_simd.o is
+# compiled from src/xlstm_simd_$(impl).c, so one left behind by `make test-ref`
+# is newer than src/xlstm_simd_sse2.c and make finds it up to date: an
+# auto-detected `make bench` then links ref and reports ref while everything
+# else in this file says sse2. Measured, not suspected. perf-measure already
+# rebuilds from scratch for exactly this reason - do the same here, since bench
+# is the target a human runs when they want a number.
+#
+# Then check it rather than trust it: the binary names its own backend, so a
+# number is only printed once that name matches the backend just built. Via a
+# file rather than a pipe, so the run's own exit status survives - `| tee` would
+# report success for a benchmark that died halfway with its header already out.
+bench: | $(BUILD)
+	@rm -f $(BUILD)/*.o $(BUILD)/xlstm_bench
+	@$(MAKE) --no-print-directory $(BUILD)/xlstm_bench XLSTM_SIMD=$(XLSTM_SIMD_IMPL)
+	@$(BUILD)/xlstm_bench > $(BUILD)/bench.txt; rc=$$?; \
+	cat $(BUILD)/bench.txt; \
+	[ $$rc -eq 0 ] || { echo "bench: the benchmark exited $$rc" >&2; exit $$rc; }; \
+	grep -q 'backend: $(XLSTM_SIMD_IMPL)$$' $(BUILD)/bench.txt || { \
+		echo "bench: built $(XLSTM_SIMD_IMPL), but the binary reports:" >&2; \
+		head -1 $(BUILD)/bench.txt >&2; \
+		echo "Refusing to report a number for a backend that did not run." >&2; \
+		exit 1; }
 
 bench-ref:
-	@$(MAKE) clean && $(MAKE) bench XLSTM_SIMD=ref
+	@$(MAKE) bench XLSTM_SIMD=ref
 
 bench-sse2:
-	@$(MAKE) clean && $(MAKE) bench XLSTM_SIMD=sse2
+	@$(MAKE) bench XLSTM_SIMD=sse2
 
 # --- Performance gate ---
 #
@@ -337,9 +358,24 @@ bench-sse2:
 # arithmetic still scores as the win or loss it actually is.
 PERF_ENV := GLIBC_TUNABLES=glibc.cpu.hwcaps=-FMA,-AVX2,-AVX
 
-# Tolerance: instruction counts are exact for a given binary, so this covers
-# toolchain drift, not measurement noise. 2% is far tighter than any wall-clock
-# gate could hold, and still wide enough to survive a compiler point release.
+# Two bounds, and the gate fails on either. Instruction counts are exact for a
+# given binary, so neither covers measurement noise - there is none. What is
+# left to absorb is drift the toolchain check above cannot see: it compares
+# `gcc --version` only, so a glibc update that reshapes expf/tanhf moves these
+# counts, inclusive of libm as they are, with the recorded line still matching.
+#
+# PERF_TOL, on the regression side, stays at 2%.
+#
+# PERF_TOL_FAST bounds the other direction, because a gate that only fails
+# upward loosens itself: an unrecorded win leaves an over-generous baseline
+# that a later regression can hide under. 5% is chosen against the one
+# environment effect ever measured on these loops - the libm implementation
+# choice PERF_ENV now pins, worth up to 2.8% - so no drift of that scale can
+# fire it on its own, while every real win here is far larger: sse2 against ref
+# is 34% to 59% across this table, and nothing smaller than 5% is worth the
+# re-record it asks for. Asymmetric on purpose: a false regression blocks work
+# that did nothing wrong, whereas a false improvement costs one
+# `make perf-baseline`, which is the right action whenever counts truly moved.
 
 PERF_BASELINE := test/perf_baseline.txt
 PERF_BACKENDS ?= ref sse2
@@ -347,6 +383,7 @@ PERF_KERNELS  ?= slstm_f32 mlstm_f32 slstm_s8 mlstm_s8
 PERF_WIDTHS   ?= 16 64
 PERF_STEPS    ?= 200
 PERF_TOL      ?= 2.0
+PERF_TOL_FAST ?= 5.0
 VALGRIND      ?= valgrind
 
 # Emit "backend kernel H steps instructions" for every case. Rebuilds the bench
@@ -390,7 +427,7 @@ perf:
 		exit 1; \
 	fi
 	@$(perf-measure) > $(BUILD)/perf.txt
-	@awk -v tol=$(PERF_TOL) ' \
+	@awk -v tol=$(PERF_TOL) -v fast=$(PERF_TOL_FAST) ' \
 	BEGIN { \
 	  printf "%-7s %-10s %4s %6s %14s %14s %9s\n", \
 	    "backend","kernel","H","steps","baseline","current","delta"; \
@@ -404,18 +441,22 @@ perf:
 	    fail = 1; next; \
 	  } \
 	  seen[key] = 1; d = 100.0 * ($$5 - base[key]) / base[key]; \
-	  tag = (d > tol) ? "  REGRESSED" : ((d < -tol) ? "  faster" : ""); \
-	  if (d > tol) fail = 1; \
+	  tag = (d > tol) ? "  REGRESSED" \
+	      : ((d < -fast) ? "  IMPROVED - RE-RECORD" \
+	      : ((d < -tol) ? "  faster" : "")); \
+	  if (d > tol || d < -fast) fail = 1; \
 	  printf "%-7s %-10s %4s %6s %14d %14d %+8.2f%%%s\n", \
 	    $$1,$$2,$$3,$$4,base[key],$$5,d,tag; \
 	} \
 	END { \
 	  for (k in base) if (!(k in seen)) { printf "not measured: %s\n", k; fail = 1 } \
-	  printf "\ninstructions (callgrind Ir), tolerance +%s%%\n", tol; \
+	  printf "\ninstructions (callgrind Ir), tolerance +%s%% / -%s%%\n", tol, fast; \
 	  printf "proxy for time, blind to cache behaviour; host backends only,\n"; \
 	  printf "not cortexm or esp - those are measured on hardware.\n"; \
 	  if (fail) { \
-	    printf "\nperf: FAILED - regression beyond tolerance, or baseline out of sync.\n"; \
+	    printf "\nperf: FAILED - moved beyond tolerance, or baseline out of sync.\n"; \
+	    printf "A large improvement fails too, deliberately: an unrecorded win leaves\n"; \
+	    printf "an over-generous baseline for a later regression to hide under.\n"; \
 	    printf "If the change is deliberate, re-record with: make perf-baseline\n"; \
 	    exit 1; \
 	  } \
@@ -431,11 +472,13 @@ perf-baseline:
 	  echo "# xlstm.c performance baseline - retired instruction counts (callgrind Ir)."; \
 	  echo "#"; \
 	  echo "# Regenerate deliberately with:  make perf-baseline"; \
-	  echo "# Checked by:                    make perf   (tolerance +$(PERF_TOL)%)"; \
+	  echo "# Checked by:                    make perf   (tolerance +$(PERF_TOL)% / -$(PERF_TOL_FAST)%)"; \
 	  echo "#"; \
 	  echo "# Counts are the inclusive cost of one kernel entry point over $(PERF_STEPS) steps,"; \
 	  echo "# collection toggled on that symbol alone. Exact and reproducible for a given"; \
 	  echo "# binary, so any movement here is a real change in work done, not noise."; \
+	  echo "# That cuts both ways: make perf fails on a large improvement too, because an"; \
+	  echo "# unrecorded win leaves a baseline generous enough to hide a later regression."; \
 	  echo "#"; \
 	  echo "# These numbers describe the HOST backends only. They say nothing about cortexm"; \
 	  echo "# or esp, whose performance is a property of those cores and is measured on"; \

@@ -1,11 +1,13 @@
 # xlstm.c performance baseline - retired instruction counts (callgrind Ir).
 #
 # Regenerate deliberately with:  make perf-baseline
-# Checked by:                    make perf   (tolerance +2.0%)
+# Checked by:                    make perf   (tolerance +2.0% / -5.0%)
 #
 # Counts are the inclusive cost of one kernel entry point over 200 steps,
 # collection toggled on that symbol alone. Exact and reproducible for a given
 # binary, so any movement here is a real change in work done, not noise.
+# That cuts both ways: make perf fails on a large improvement too, because an
+# unrecorded win leaves a baseline generous enough to hide a later regression.
 #
 # These numbers describe the HOST backends only. They say nothing about cortexm
 # or esp, whose performance is a property of those cores and is measured on

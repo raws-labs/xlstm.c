@@ -28,11 +28,57 @@ static inline float hsum_ps(__m128 v)
     return _mm_cvtss_f32(sums);
 }
 
+/* Which body a call actually ran, for test/simd_gate.cc.
+ *
+ * Nothing here dispatches - the vector loop's own bound decides - so a build
+ * can link this backend, reproduce every golden vector, and execute no vector
+ * instruction at all with nothing able to see it. That makes it exactly the
+ * kind of silent loss of coverage a gate has to be able to fail on. The flags
+ * below are therefore set FROM the loop's own cursor AFTER the loop, never
+ * re-derived from cols before it: a guard added around a vector body would
+ * have to move the count with it.
+ *
+ * Three outcomes per kernel, and the third is the opposite of the helium
+ * backend's. `tail` counts calls that left work OUTSIDE the vector body for a
+ * scalar remainder, because SSE2 has no predication and a width that is not a
+ * multiple of the vector's cannot stay in the vector loop; helium counts the
+ * narrowed pass that keeps it there.
+ *
+ * Off unless XLSTM_SSE2_FASTPATH_COUNTERS is defined - the Makefile sets it
+ * for the object the tests link and for nothing else - so a shipping kernel
+ * carries neither the counters nor the flags. */
+#ifdef XLSTM_SSE2_FASTPATH_COUNTERS
+unsigned long xlstm_sse2_matvec_f32_vector = 0;
+unsigned long xlstm_sse2_matvec_f32_scalar = 0;
+unsigned long xlstm_sse2_matvec_f32_tail = 0;
+unsigned long xlstm_sse2_matvec_s8_vector = 0;
+unsigned long xlstm_sse2_matvec_s8_scalar = 0;
+unsigned long xlstm_sse2_matvec_s8_tail = 0;
+unsigned long xlstm_sse2_rank1_f32_vector = 0;
+unsigned long xlstm_sse2_rank1_f32_scalar = 0;
+unsigned long xlstm_sse2_rank1_f32_tail = 0;
+unsigned long xlstm_sse2_vecmat_f32_vector = 0;
+unsigned long xlstm_sse2_vecmat_f32_scalar = 0;
+unsigned long xlstm_sse2_vecmat_f32_tail = 0;
+#define XLSTM_SSE2_FLAGS int seen_vec_ = 0, seen_tail_ = 0
+#define XLSTM_SSE2_SEEN(vec, tail)                                    \
+    ((void)(seen_vec_ |= (vec) != 0, seen_tail_ |= (tail) != 0))
+#define XLSTM_SSE2_COUNT(name)                                        \
+    ((void)(seen_vec_ ? ++xlstm_sse2_##name##_vector                  \
+                      : ++xlstm_sse2_##name##_scalar),                \
+     (void)(seen_tail_ ? ++xlstm_sse2_##name##_tail : 0ul))
+#else
+#define XLSTM_SSE2_FLAGS ((void)0)
+#define XLSTM_SSE2_SEEN(vec, tail) ((void)0)
+#define XLSTM_SSE2_COUNT(name) ((void)0)
+#endif
+
 void xlstm_matvec_f32(const float* M, const float* v,
                       float* out, int rows, int cols)
 {
     int i, j;
     int cols4 = cols & ~3;
+    XLSTM_SSE2_FLAGS;
 
     for (i = 0; i < rows; ++i) {
         __m128 acc = _mm_setzero_ps();
@@ -43,6 +89,8 @@ void xlstm_matvec_f32(const float* M, const float* v,
             __m128 x = _mm_loadu_ps(v + j);
             acc = _mm_add_ps(acc, _mm_mul_ps(m, x));
         }
+        /* j has advanced iff a vector pass ran; short of cols is remainder. */
+        XLSTM_SSE2_SEEN(j > 0, j < cols);
 
         float s = hsum_ps(acc);
         for (; j < cols; ++j) {
@@ -50,6 +98,7 @@ void xlstm_matvec_f32(const float* M, const float* v,
         }
         out[i] += s;
     }
+    XLSTM_SSE2_COUNT(matvec_f32);
 }
 
 void xlstm_matvec_s8(const int8_t* M, const int8_t* v,
@@ -57,8 +106,15 @@ void xlstm_matvec_s8(const int8_t* M, const int8_t* v,
 {
     int i, j;
     int cols8 = cols & ~7;
+    XLSTM_SSE2_FLAGS;
 
-    /* SSE2 s8 dot: widen int8 to int16, use _mm_madd_epi16 for int16*int16->int32. */
+    /* SSE2 s8 dot: widen int8 to int16, use _mm_madd_epi16 for int16*int16->int32.
+     *
+     * The zero point is subtracted in int16, so this is bit-exact against the
+     * scalar body for every |v_zp| <= 32640 and no further: at that point
+     * v[j] - v_zp stops fitting an int16 lane for some int8 v[j] and the lane
+     * wraps where the scalar body's int32 does not. Every caller passes an
+     * int8 zero point, three orders inside that. */
     __m128i vzp = _mm_set1_epi16((int16_t)v_zp);
 
     for (i = 0; i < rows; ++i) {
@@ -80,6 +136,8 @@ void xlstm_matvec_s8(const int8_t* M, const int8_t* v,
             /* int16*int16 -> int32 (adjacent pairs summed) */
             acc = _mm_add_epi32(acc, _mm_madd_epi16(m16, v16));
         }
+        /* j has advanced iff a vector pass ran; short of cols is remainder. */
+        XLSTM_SSE2_SEEN(j > 0, j < cols);
 
         /* Horizontal sum of 4 int32 lanes */
         __m128i hi = _mm_shuffle_epi32(acc, _MM_SHUFFLE(1, 0, 3, 2));
@@ -94,6 +152,7 @@ void xlstm_matvec_s8(const int8_t* M, const int8_t* v,
         }
         out[i] = s;
     }
+    XLSTM_SSE2_COUNT(matvec_s8);
 }
 
 void xlstm_rank1_update_f32(float* C, float f_gate, float i_gate,
@@ -102,6 +161,7 @@ void xlstm_rank1_update_f32(float* C, float f_gate, float i_gate,
     int r, c;
     int H4 = H & ~3;
     __m128 vf = _mm_set1_ps(f_gate);
+    XLSTM_SSE2_FLAGS;
 
     for (r = 0; r < H; ++r) {
         __m128 vik = _mm_set1_ps(i_gate * k[r]);
@@ -113,10 +173,14 @@ void xlstm_rank1_update_f32(float* C, float f_gate, float i_gate,
             cv = _mm_add_ps(_mm_mul_ps(vf, cv), _mm_mul_ps(vik, vv));
             _mm_storeu_ps(Crow + c, cv);
         }
+        /* c has advanced iff a vector pass ran; short of H is remainder. */
+        XLSTM_SSE2_SEEN(c > 0, c < H);
+
         for (; c < H; ++c) {
             Crow[c] = f_gate * Crow[c] + i_gate * k[r] * v[c];
         }
     }
+    XLSTM_SSE2_COUNT(rank1_f32);
 }
 
 void xlstm_vecmat_f32(const float* q, const float* M,
@@ -124,6 +188,7 @@ void xlstm_vecmat_f32(const float* q, const float* M,
 {
     int i, j;
     int cols4 = cols & ~3;
+    XLSTM_SSE2_FLAGS;
 
     for (i = 0; i < rows; ++i) {
         __m128 vq = _mm_set1_ps(q[i]);
@@ -135,10 +200,14 @@ void xlstm_vecmat_f32(const float* q, const float* M,
             ov = _mm_add_ps(ov, _mm_mul_ps(vq, mv));
             _mm_storeu_ps(out + j, ov);
         }
+        /* j has advanced iff a vector pass ran; short of cols is remainder. */
+        XLSTM_SSE2_SEEN(j > 0, j < cols);
+
         for (; j < cols; ++j) {
             out[j] += q[i] * Mrow[j];
         }
     }
+    XLSTM_SSE2_COUNT(vecmat_f32);
 }
 
 const char* xlstm_simd_backend(void)

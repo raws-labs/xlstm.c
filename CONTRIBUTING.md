@@ -103,9 +103,20 @@ make perf-baseline     # re-record it, deliberately
 `make bench` prints wall-clock, which no shared runner reproduces closely
 enough to fail a build on. `make perf` counts retired instructions under
 callgrind instead, collection toggled on one kernel entry point at a time. The
-same binary on the same input gives the same count every run, so a 2% move
-against `test/perf_baseline.txt` is a real change in work done, and CI fails on
-it. A deliberate change is a `make perf-baseline` and a one-line-per-case diff.
+same binary on the same input gives the same count every run, so a move against
+`test/perf_baseline.txt` is a real change in work done, and CI fails on it. A
+deliberate change is a `make perf-baseline` and a one-line-per-case diff.
+
+It fails in **both** directions: a regression beyond +2%, and an improvement
+beyond -5%. The second half is not pedantry - an unrecorded win leaves an
+over-generous baseline that a later regression can then hide under, so the gate
+would quietly loosen itself. The two numbers differ on purpose: a false
+regression blocks work that did nothing wrong, whereas a false improvement
+costs one `make perf-baseline`, which is the right thing to run whenever the
+counts genuinely moved. 5% clears the largest environment effect ever measured
+on these loops - the 2.8% the libm implementation choice was worth before the
+gate pinned it - and sits far below any real win, `sse2` beating `ref` by 34%
+to 59% across this table.
 
 Two limits, worth knowing before trusting a green run:
 
@@ -118,6 +129,13 @@ Two limits, worth knowing before trusting a green run:
 
 Counts are specific to the compiler that produced them, so the gate refuses to
 compare across a toolchain it did not record.
+
+`make bench` rebuilds from scratch before it measures anything, then refuses to
+print a number unless the binary names the backend just built. Objects are
+backend-specific; their filenames are not, so `build/xlstm_simd.o` left by an
+earlier `make test-ref` is newer than `src/xlstm_simd_sse2.c` and make finds it
+up to date - without that rebuild, an auto-detected `make bench` benchmarks
+`ref`.
 
 ## Changing a tolerance, a bound, or the generator
 
@@ -138,6 +156,16 @@ tanh are approximations rather than libm - a CMSIS-NN lookup table, say - is
 admitted rather than failed. Bounds tight enough to catch it would reject
 legitimate backends. The same drift at 0.2% must fail, which is what keeps the
 margin a margin rather than a hole.
+
+Each mutation also records **which** assertion must catch it, and one caught by
+a different assertion fails the run as `WRONG CHECK`. Otherwise a check could
+quietly stop firing while a neighbour still catches the mutation, and the
+battery would report green over a blind check - the very loosening it exists to
+detect. The recorded signatures say what actually catches what rather than what
+one would like to: the two single-channel mutations are caught by the
+exit-state checks, not by the per-channel output bound they were written for,
+because a corrupted channel feeds back through `c` and `n` before the output
+path sees it.
 
 It covers `ref` and `sse2`; a mutation the running backend does not compile
 reports `n/a`, which is distinct from an escape. `neon`, `cortexm` and `esp`

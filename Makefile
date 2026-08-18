@@ -99,6 +99,14 @@ TEST_BINS := $(BUILD)/slstm_test $(BUILD)/mlstm_test \
 $(BUILD)/esp_gate: test/esp_gate.cc $(BUILD)/xlstm_simd.o src/xlstm_simd_scalar.h | $(BUILD)
 	@$(CXX) $(CXXFLAGS) -Iinclude -Isrc -o $@ $< $(BUILD)/xlstm_simd.o -lm
 
+# The cortexm backend's out-of-bounds check - the fifth binary of test-cortexm
+# below. The hosted-target spelling of test/helium_gate.cc's edge check: a
+# guard page from mmap rather than an array the linker script butts against
+# the end of SRAM. No -Isrc, because unlike the two gates around it this one
+# compares nothing - it only asserts that no operand is read past its end.
+$(BUILD)/cortexm_gate: test/cortexm_gate.cc $(BUILD)/xlstm_simd.o | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -o $@ $< $(BUILD)/xlstm_simd.o -lm
+
 # The helium backend's fast-path checks - the fifth binary of test-helium
 # below, same shape and same -Isrc reason as esp_gate above. Buildable only
 # with an Armv8.1-M toolchain.
@@ -156,8 +164,11 @@ test-neon:
 # drops the FPU this hard-float toolchain needs.)
 #
 # It gates the arithmetic - the SXTAB16 + SMLAD INT8 path and the blocked f32
-# path, against the same golden vectors as every other backend - and nothing
-# else. Green here is NOT a Cortex-M gate:
+# path, against the same golden vectors as every other backend - plus one
+# thing the goldens cannot see: test/cortexm_gate.cc runs every kernel with
+# each operand in turn butted against a guard page, so a group load that
+# stepped past a row faults rather than passing with the right answer. Green
+# here is NOT a Cortex-M gate:
 #
 #   - Alignment. armv7-a Linux permits unaligned word access, so this build
 #     defines __ARM_FEATURE_UNALIGNED and takes the memcpy spelling of the INT8
@@ -173,10 +184,11 @@ test-neon:
 # Build only, then invoke the emulator explicitly - same reason as test-neon.
 test-cortexm:
 	@$(MAKE) clean
-	@$(MAKE) $(TEST_BINS) XLSTM_SIMD=cortexm \
+	@$(MAKE) $(TEST_BINS) $(BUILD)/cortexm_gate XLSTM_SIMD=cortexm \
 		CC=arm-linux-gnueabihf-gcc CXX=arm-linux-gnueabihf-g++ \
 		CFLAGS="-std=c99 -O2 -Wall -Wextra -static -march=armv7-a+fp" \
 		CXXFLAGS="-std=c++17 -O2 -Wall -Wextra -static -march=armv7-a+fp"
+	@qemu-arm $(BUILD)/cortexm_gate
 	@qemu-arm $(BUILD)/slstm_test
 	@qemu-arm $(BUILD)/mlstm_test
 	@qemu-arm $(BUILD)/slstm_s8_test
@@ -623,8 +635,19 @@ perf-baseline:
 # on interrupt; a run killed outright leaves .mutants-backup/, and the next
 # run restores from that before doing anything else.
 #
+# All six backends, not just the two that run on the build host. The four
+# cross-compiled ones are driven through their own test- target above, so each
+# takes a subset of the shared table plus mutations of what only it compiles -
+# tails, alignment instances, zero-point folding, lane order, the accelerated
+# path guards, and the out-of-bounds checks. Measured: about two minutes for
+# all six, about one for ref and sse2 alone.
+#
+# The default is every backend whose toolchain is on PATH, and the run names
+# the ones it could not cover rather than passing over them silently.
+# MUTANT_BACKENDS="ref sse2" narrows it to an explicit list, and a backend
+# named there is attempted whatever is installed.
+#
 # Plain python3, stdlib only - no .venv, unlike `reference` above.
-# MUTANT_BACKENDS=ref narrows it to one backend; the default runs ref and sse2.
 mutants:
 	@python3 test/mutants.py $(MUTANT_BACKENDS)
 

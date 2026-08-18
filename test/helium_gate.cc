@@ -520,6 +520,13 @@ const int kEdgeBytes = (int)sizeof g_edge;
  * here is a multiple of 4, so a float operand stays word-aligned. */
 void* Edge(int bytes) { return g_edge + kEdgeBytes - bytes; }
 
+/* Destinations that are NOT at the edge. Their own arrays, because the shapes
+ * below run wider than the four checks above and so wider than g_out and
+ * g_outi, which are sized for those. */
+const int kEdgeMax = 32;
+float g_eout[kEdgeMax];
+int32_t g_eouti[kEdgeMax];
+
 bool TestEdge(void) {
     /* Shapes whose last pass is a narrow one, in every residue. */
     static const int kOdd[] = {1, 2, 3, 5, 7, 15, 17, 31};
@@ -541,8 +548,8 @@ bool TestEdge(void) {
             float* eout = (float*)Edge(n * (int)sizeof(float));
 
             for (int i = 0; i < nn; ++i) eM[i] = 0.5f - (float)(i % 7);
-            for (int i = 0; i < n; ++i) g_out[i] = OutSeed(i);
-            xlstm_matvec_f32(eM, g_v, g_out, n, n);
+            for (int i = 0; i < n; ++i) g_eout[i] = OutSeed(i);
+            xlstm_matvec_f32(eM, g_v, g_eout, n, n);
 
             for (int i = 0; i < n; ++i) eout[i] = OutSeed(i);
             xlstm_matvec_f32(g_M, g_v, eout, n, n);
@@ -554,10 +561,10 @@ bool TestEdge(void) {
             int8_t* ev = (int8_t*)Edge(n);
 
             for (int i = 0; i < nn; ++i) eM[i] = (int8_t)(i - 60);
-            xlstm_matvec_s8(eM, g_vi, g_outi, n, n, -128);
+            xlstm_matvec_s8(eM, g_vi, g_eouti, n, n, -128);
 
             for (int i = 0; i < n; ++i) ev[i] = (int8_t)(i - 60);
-            xlstm_matvec_s8(g_Mi, ev, g_outi, n, n, -128);
+            xlstm_matvec_s8(g_Mi, ev, g_eouti, n, n, -128);
         }
 
         /* Rank-1 update writes as well as reads, so C at the edge covers the
@@ -581,8 +588,8 @@ bool TestEdge(void) {
             float* eout = (float*)Edge(n * (int)sizeof(float));
 
             for (int i = 0; i < nn; ++i) eM[i] = 0.5f - (float)(i % 7);
-            for (int j = 0; j < n; ++j) g_vout[j] = OutSeed(j);
-            xlstm_vecmat_f32(g_v, eM, g_vout, n, n);
+            for (int j = 0; j < n; ++j) g_eout[j] = OutSeed(j);
+            xlstm_vecmat_f32(g_v, eM, g_eout, n, n);
 
             for (int j = 0; j < n; ++j) eout[j] = OutSeed(j);
             xlstm_vecmat_f32(g_v, g_M, eout, n, n);
@@ -609,6 +616,13 @@ bool Run(const char* name, bool (*fn)(void)) {
 int main(void) {
     const char* backend = xlstm_simd_backend();
     int rc = 0;
+
+    /* Unbuffered, because the out-of-bounds check below is meant to fail by
+     * faulting, and the fault handler in test/helium_boot.c exits through
+     * semihosting rather than through exit(): anything still in a stdio
+     * buffer at that point is lost, including the [ RUN ] line that says
+     * which check was running. */
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
 
     std::printf("[==========] Running helium fast-path checks (backend=%s)\n",
                 backend);

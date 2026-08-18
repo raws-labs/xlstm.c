@@ -41,11 +41,18 @@ If you change the core math:
 ```bash
 make reference         # requires Python with torch + xlstm
 make test              # verify against new golden values
+make check-tools       # the tools/ examples re-derive from the new data
 ```
 
 This regenerates both `test/reference_data.h` (C tests) and
 `test/reference_data.json` (Python/Docker tests) from the NX-AI/xlstm
 reference implementation.
+
+`make check-tools` matters here because the worked examples in `tools/`
+reproduce that file's calibration and shapes from its float tensors alone. If
+a quantization convention changes and they are not updated with it, they say
+so; they are stdlib-only, so this runs in CI alongside the other hygiene
+checks.
 
 ## Testing a backend
 

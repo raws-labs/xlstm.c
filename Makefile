@@ -503,7 +503,7 @@ check-internal-refs:
 		echo "check-internal-refs: absolute path into a home directory:"; \
 		echo "$$abs"; fail=1; \
 	fi; \
-	for ref in $$(git ls-files -z | xargs -0 grep -hoE '[A-Za-z0-9_][A-Za-z0-9_./-]*\.md' 2>/dev/null | sort -u); do \
+	for ref in $$(git ls-files -z | xargs -0 grep -hoE '\.?[A-Za-z0-9_][A-Za-z0-9_./-]*\.md' 2>/dev/null | sort -u); do \
 		git ls-files --error-unmatch "$$ref" >/dev/null 2>&1 || { \
 			echo "check-internal-refs: cites an untracked document: $$ref"; \
 			git ls-files -z | xargs -0 grep -n "$$ref" 2>/dev/null | head -3; \

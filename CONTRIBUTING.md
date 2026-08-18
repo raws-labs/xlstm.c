@@ -62,9 +62,10 @@ make test-sse2         # x86
 make test-neon         # cross-compile aarch64, run under QEMU
 make test-cortexm      # cross-compile armv7-a, run under QEMU (the DSP path)
 make test-esp          # cross-compile xtensa, run under QEMU (system, not user)
+make test-helium       # cross-compile Cortex-M55, run under QEMU (system)
 ```
 
-All five run the same golden vectors. `test-cortexm` gates the Cortex-M
+All six run the same golden vectors. `test-cortexm` gates the Cortex-M
 backend without a board: `SXTAB16` and `SMLAD` are ARMv6 DSP instructions that
 A-profile also has, so the kernels cross-compile for `armv7-a`. It gates the
 arithmetic and only the arithmetic:
@@ -99,6 +100,32 @@ shapes and alignments that straddle its dispatch rule and fails the run unless
 every call took the path its shape dictates and matched the shared scalar body
 in `src/xlstm_simd_scalar.h` bit for bit. Emulation still says nothing about
 the part's FPU corner cases or about cycles.
+
+`test-helium` is the same shape again for the `helium` backend, on an emulated
+Cortex-M55 (`qemu-system-arm -M mps3-an547`). Both halves come from the
+distribution archive - `gcc-arm-none-eabi` and upstream `qemu-system-arm` - so
+there is nothing to download and no version to pin. The bare-metal side is two
+small files instead of a specs file, because the Arm toolchain ships no board
+support: `test/helium_boot.c` (vector table, the CPACR write that switches the
+vector unit on, and a semihosting `SYS_EXIT_EXTENDED` so `main`'s return value
+becomes the exit status) and `test/helium.ld` (the AN547 memory map).
+
+`test/helium_gate.cc` asserts three things the golden vectors cannot. That
+every call took the vector body its shape dictates, at every alignment of every
+operand. That a size which is not a multiple of the vector width ends in a
+narrowed vector pass rather than a scalar remainder - each kernel reports that
+separately, so a tail creeping back in fails the run. And that no kernel
+touches a byte outside its operands: one operand at a time is butted against
+the end of mapped memory, where an over-read faults instead of quietly
+succeeding, which is the only way to see a load whose lanes are discarded.
+Comparisons there are bit-exact and not toleranced, for the f32 kernels as much
+as the INT8 one: this backend reassociates nothing and contracts nothing.
+
+QEMU executes MVE architecturally - leave CP10/CP11 at their reset value and
+the first vector instruction takes a UsageFault instead - but it models no
+timing. Nothing in this gate is a performance claim, and the gap is easy to
+misread here: `matvec_f32` buys its bit-exactness with a gather load, which is
+several beats on a Cortex-M55 where a contiguous 128-bit load is two.
 
 ## The performance gate
 

@@ -155,3 +155,34 @@ jobs:
           echo "$RUNNER_TEMP/qemu/bin" >> "$GITHUB_PATH"
       - name: Cross-compile and run under qemu-system-xtensa
         run: make test-esp
+
+  # The helium backend on an emulated Cortex-M55. Same reason to exist as the
+  # two jobs above: without it the backend has no gate anywhere, and MVE is not
+  # an ISA any runner here can execute natively.
+  #
+  # System emulation, like emulated-esp - M-profile has no Linux userspace
+  # either. Unlike emulated-esp, both halves are distribution packages, so
+  # there is no tarball to fetch and no version to pin: gcc-arm-none-eabi
+  # supplies the compiler and the MVE intrinsics, qemu-system-arm supplies the
+  # board. MPS3 AN547 is the machine because its CPU is a Cortex-M55; none of
+  # the MPS2 machines model an Armv8.1-M part.
+  #
+  # Green here does NOT mean the part is covered. QEMU executes MVE
+  # architecturally - with CP10/CP11 left at reset the first vector instruction
+  # faults instead, which is what proves the instructions are really run - but
+  # it models no timing and its FPU is not guaranteed bit-identical to silicon.
+  # See the Makefile's test-helium target for what the run does and does not
+  # assert.
+  emulated-helium:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Arm bare-metal toolchain and qemu-system-arm
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-none-eabi binutils-arm-none-eabi \
+            libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib \
+            qemu-system-arm
+      - name: Cross-compile and run under qemu-system-arm
+        run: make test-helium

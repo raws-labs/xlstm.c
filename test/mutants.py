@@ -20,8 +20,9 @@ must fail: the margin is deliberate, not unlimited.
 
 Backends differ in which code they compile, so several defects apply to one
 and are absent from the other; those report n/a, which is not an escape. Only
-the backends that run on the build host are covered: neon, cortexm and esp
-have tails and zero-point handling of their own that nothing here mutates.
+the backends that run on the build host are covered: neon, cortexm, esp and
+helium have tails and zero-point handling of their own that nothing here
+mutates. Each of those is gated instead by its own emulated target.
 
 Deliberately not in CI: this edits files in the working tree. Sources are
 copied to .mutants-backup/ and restored on exit, on failure and on SIGINT.

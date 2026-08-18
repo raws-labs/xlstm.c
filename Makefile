@@ -7,12 +7,12 @@ BUILD   := build
 VENV    := .venv/bin/python3
 
 # --- SIMD backend selection ---
-# XLSTM_SIMD: auto (default), ref, sse2, neon, esp, cortexm
+# XLSTM_SIMD: auto (default), ref, sse2, neon, esp, cortexm, helium
 #
-# auto never picks esp or cortexm: both need a cross toolchain and neither can
-# run on the build host, so they are opt-in rather than part of `make test`.
-# Both are gated under emulation instead - cortexm by test-cortexm, esp by
-# test-esp, both below.
+# auto never picks esp, cortexm or helium: each needs a cross toolchain and
+# none can run on the build host, so they are opt-in rather than part of
+# `make test`. All three are gated under emulation instead - cortexm by
+# test-cortexm, esp by test-esp, helium by test-helium, all below.
 XLSTM_SIMD ?= auto
 
 ifeq ($(XLSTM_SIMD),auto)
@@ -36,7 +36,8 @@ else
   endif
 endif
 
-.PHONY: all test simd-info test-ref test-sse2 test-neon test-cortexm test-esp reference clean \
+.PHONY: all test simd-info test-ref test-sse2 test-neon test-cortexm test-esp \
+        test-helium reference clean \
         test-docker-ort test-docker-tvm test-docker-tflm test-docker-espdl \
         bench bench-ref bench-sse2 perf perf-baseline mutants \
         check-internal-refs check-tools
@@ -97,6 +98,18 @@ TEST_BINS := $(BUILD)/slstm_test $(BUILD)/mlstm_test \
 # itself rather than a copy. Buildable only with the xtensa toolchain.
 $(BUILD)/esp_gate: test/esp_gate.cc $(BUILD)/xlstm_simd.o src/xlstm_simd_scalar.h | $(BUILD)
 	@$(CXX) $(CXXFLAGS) -Iinclude -Isrc -o $@ $< $(BUILD)/xlstm_simd.o -lm
+
+# The helium backend's fast-path checks - the fifth binary of test-helium
+# below, same shape and same -Isrc reason as esp_gate above. Buildable only
+# with an Armv8.1-M toolchain.
+$(BUILD)/helium_gate: test/helium_gate.cc $(BUILD)/xlstm_simd.o src/xlstm_simd_scalar.h | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -Isrc -o $@ $< $(BUILD)/xlstm_simd.o -lm
+
+# Vector table, .bss zeroing, the CPACR write that switches the vector unit
+# on, and the semihosting exit that turns main's return value into the
+# emulator's exit status. Linked into all five test-helium images.
+$(BUILD)/helium_boot.o: test/helium_boot.c | $(BUILD)
+	@$(CC) $(CFLAGS) -c $< -o $@
 
 test: $(TEST_BINS)
 	@$(BUILD)/slstm_test
@@ -271,6 +284,105 @@ test-esp:
 	@$(ESP_RUN) $(BUILD)/mlstm_test
 	@$(ESP_RUN) $(BUILD)/slstm_s8_test
 	@$(ESP_RUN) $(BUILD)/mlstm_s8_test
+	@# Same reason as test-neon above: do not leave foreign binaries in build/.
+	@$(MAKE) clean
+
+# The helium backend on an emulated Cortex-M55. Like test-esp above this is
+# system emulation rather than qemu-user, because M-profile has no Linux
+# userspace either - but unlike test-esp both halves come from the distribution
+# archive, so there is nothing to download and no version to pin:
+# gcc-arm-none-eabi supplies the compiler and MVE intrinsics, and upstream
+# qemu-system-arm supplies the board.
+#
+# The board is MPS3 AN547, whose CPU is a Cortex-M55 - the reason this machine
+# and not one of the MPS2 ones, none of which model an Armv8.1-M part. QEMU
+# executes MVE architecturally: with CP10/CP11 left at their reset value the
+# first vector instruction takes a UsageFault instead, which is what proves
+# these instructions are being run rather than ignored.
+#
+# The bare-metal side is two small files rather than a specs file, because the
+# Arm toolchain ships no board support the way the xtensa one does:
+#
+#   test/helium_boot.c  vector table, CPACR write, .bss zeroing, and a
+#                       semihosting SYS_EXIT_EXTENDED so that main's return
+#                       value becomes the emulator's exit status.
+#   test/helium.ld      the AN547 memory map. The vector table is pinned at 0
+#                       because that is where the core fetches it from at
+#                       reset; everything else lives in the 4 MB SRAM at
+#                       0x21000000, which the ~170 KB of golden vectors each
+#                       suite pulls in needs.
+#
+# rdimon supplies printf, malloc and the semihosting stdout behind them, so
+# these are ordinary test binaries: output arrives on the host from the first
+# byte. XLSTM_TEST_MAX_H=64 bounds the runners' own static buffers
+# (test/test_config.h) and covers every case in test/reference_data.h; it does
+# not touch XLSTM_MAX_HIDDEN, so the kernels under test are the shipping ones.
+#
+# WHAT IT EXERCISES, precisely - a green run here is a narrow claim:
+#
+#   - All four contract functions, vector body and narrowed pass alike.
+#     test/helium_gate.cc runs each across shapes and every alignment of every
+#     operand, and fails the run unless each call took the body its shape
+#     dictates AND matched the scalar body in src/xlstm_simd_scalar.h bit for
+#     bit. Bit-exact, not within a tolerance: this backend reassociates
+#     nothing and contracts nothing, so equality is the whole of correctness
+#     for the three f32 kernels as much as for the INT8 one.
+#   - That an odd size stays in the vector body. Each kernel reports whether a
+#     call ended in a narrowed final pass, and the gate asserts that split on
+#     sizes chosen to straddle the vector width in every residue. This is the
+#     property MVE predication is supposed to buy and the one thing the golden
+#     vectors could never show.
+#   - That the INT8 zero point never leaves the vector body, swept out to
+#     +/-65535 - past the bounds at which the cortexm and esp backends fall
+#     back to scalar.
+#   - The four golden-vector suites, 39 assertions, against this backend on
+#     this core. Same binaries the other gates run, from the same sources with
+#     no test-side change - one image each, because each pulls in its own copy
+#     of the golden vectors.
+#   - Incidentally but genuinely: the FPv5 vminnm / vrinta path in
+#     include/xlstm_util.h. This is the only gate here that compiles it -
+#     test-cortexm's armv7-a build resolves XLSTM_FPU_HAS_MINMAX_ROUND to 0
+#     and takes the portable path instead.
+#
+# What it does NOT cover: cycles, and therefore any performance claim at all.
+# QEMU executes MVE but models no timing, and the shape of this backend makes
+# that gap unusually easy to misread - matvec_f32 buys its bit-exactness with
+# a gather load, which is several beats on a Cortex-M55 where a contiguous
+# 128-bit load is two. Instruction counts are in the backend's comments; cycle
+# counts belong to hardware.
+#
+# -ffp-contract=off is load-bearing and belongs on BOTH dialects, for the same
+# reason as test-esp: the gate compares the accelerated bodies (C) against the
+# scalar bodies it inlines from src/xlstm_simd_scalar.h (C++), bit for bit, and
+# gcc contracts the two dialects differently. This core HAS a fused multiply
+# accumulate, so leaving it implicit compiles one side with VFMA and the other
+# with VMUL + VADD, and the gate fails on a last-bit difference that is the
+# flags' doing and not the kernel's.
+HELIUM_ARCH := -mcpu=cortex-m55 -mthumb -mfloat-abi=hard
+HELIUM_DEFS := -DXLSTM_TEST_MAX_H=64 -DXLSTM_HELIUM_FASTPATH_COUNTERS \
+               -ffp-contract=off
+HELIUM_LINK := -nostartfiles -specs=rdimon.specs -T test/helium.ld \
+               $(BUILD)/helium_boot.o
+# timeout because an infinite loop in a system emulator never returns, unlike
+# the qemu-user gates above; a hang has to be red rather than a stuck runner.
+HELIUM_RUN  := timeout 600 qemu-system-arm -M mps3-an547 -semihosting \
+               -display none -serial none -monitor none -kernel
+
+test-helium:
+	@$(MAKE) clean
+	@$(MAKE) $(BUILD)/helium_boot.o XLSTM_SIMD=helium \
+		CC=arm-none-eabi-gcc \
+		CFLAGS="-std=c99 -O2 -Wall -Wextra $(HELIUM_ARCH) $(HELIUM_DEFS)"
+	@$(MAKE) $(TEST_BINS) $(BUILD)/helium_gate XLSTM_SIMD=helium \
+		CC=arm-none-eabi-gcc CXX=arm-none-eabi-g++ \
+		CFLAGS="-std=c99 -O2 -Wall -Wextra $(HELIUM_ARCH) $(HELIUM_DEFS)" \
+		CXXFLAGS="-std=c++17 -O2 -Wall -Wextra $(HELIUM_ARCH) $(HELIUM_DEFS) \
+		          $(HELIUM_LINK)"
+	@$(HELIUM_RUN) $(BUILD)/helium_gate
+	@$(HELIUM_RUN) $(BUILD)/slstm_test
+	@$(HELIUM_RUN) $(BUILD)/mlstm_test
+	@$(HELIUM_RUN) $(BUILD)/slstm_s8_test
+	@$(HELIUM_RUN) $(BUILD)/mlstm_s8_test
 	@# Same reason as test-neon above: do not leave foreign binaries in build/.
 	@$(MAKE) clean
 

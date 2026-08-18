@@ -46,10 +46,13 @@ Compute-intensive primitives (matvec, rank-1 update) dispatch to a backend selec
 | `neon` | ARM with NEON |
 | `esp` | ESP32-S3 (Xtensa) |
 | `cortexm` | Cortex-M4/M7/M33 (ARMv7E-M / ARMv8-M DSP extension) |
+| `helium` | Cortex-M55/M85 (Armv8.1-M MVE) |
 
-Auto-detection probes the compiler's predefined macros; override with `XLSTM_SIMD=ref|sse2|neon|esp|cortexm`.
+Auto-detection probes the compiler's predefined macros; override with `XLSTM_SIMD=ref|sse2|neon|esp|cortexm|helium`.
 
 A backend need not accelerate everything. `cortexm` implements the two matrix-vector kernels (`SXTAB16` + `SMLAD` for INT8, fused `VFMA` for f32) and defers the rest to `src/xlstm_simd_scalar.h`, which is the same text `ref` compiles rather than a copy of it.
+
+`helium` accelerates all four, and every one of them is bit-identical to that scalar text at every shape, alignment and zero point. MVE predicates per lane and an inactive lane makes no memory access, so two things the other vector backends spend most of their length on do not arise there: no alignment path (a contiguous MVE access needs only element alignment) and no scalar remainder (an odd size runs the vector body over a narrowed final pass). `H` = 17 is not a special case anywhere in it.
 
 ## Using your own weights
 
@@ -85,7 +88,7 @@ make clean
 
 Requires `gcc` (C99) and `g++` (C++17, for tests and bench).
 
-Each backend has its own gate, including the cross-compiled ones: `make test-ref`, `make test-sse2`, `make test-neon`, `make test-cortexm` and `make test-esp` run the same golden vectors, the last three under emulation with no hardware. See [CONTRIBUTING.md](CONTRIBUTING.md) for those and for the regression gates.
+Each backend has its own gate, including the cross-compiled ones: `make test-ref`, `make test-sse2`, `make test-neon`, `make test-cortexm`, `make test-esp` and `make test-helium` run the same golden vectors, the last four under emulation with no hardware. See [CONTRIBUTING.md](CONTRIBUTING.md) for those and for the regression gates.
 
 ## Adapters
 

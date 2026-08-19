@@ -67,9 +67,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install valgrind
-        run: |
-          sudo apt-get -o Acquire::Retries=5 update
-          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends valgrind
+        uses: ./.github/actions/apt-install
+        with:
+          packages: valgrind
       - name: Instruction-count gate
         run: make perf
         env:
@@ -86,10 +86,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install aarch64 cross toolchain and emulator
-        run: |
-          sudo apt-get -o Acquire::Retries=5 update
-          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu qemu-user
+        uses: ./.github/actions/apt-install
+        with:
+          packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu qemu-user
       - name: Cross-compile and run under qemu-aarch64
         run: make test-neon
 
@@ -116,10 +115,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install armhf cross toolchain and emulator
-        run: |
-          sudo apt-get -o Acquire::Retries=5 update
-          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
-            gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf qemu-user
+        uses: ./.github/actions/apt-install
+        with:
+          packages: gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf qemu-user
       - name: Cross-compile and run under qemu-arm
         run: make test-cortexm
 
@@ -161,14 +159,15 @@ jobs:
             ${{ runner.temp }}/xtensa-esp-elf
             ${{ runner.temp }}/qemu
           key: esp-${{ hashFiles('.github/workflows/ci.yml') }}-${{ env.TOOLCHAIN }}-${{ env.QEMU }}
-      - name: Install the xtensa toolchain and Espressif's qemu-system-xtensa
+      # The three libraries are qemu-system-xtensa's DT_NEEDED entries. SDL2 is
+      # one of them even though this runs -display none: it is linked, not
+      # dlopened, so the binary will not start without it.
+      - name: Install qemu-system-xtensa's shared libraries
+        uses: ./.github/actions/apt-install
+        with:
+          packages: libpixman-1-0 libsdl2-2.0-0 libslirp0
+      - name: Fetch the pinned toolchain and emulator
         run: |
-          # The three libraries are qemu-system-xtensa's DT_NEEDED entries.
-          # SDL2 is one of them even though this runs -display none: it is
-          # linked, not dlopened, so the binary will not start without it.
-          sudo apt-get -o Acquire::Retries=5 update
-          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
-            libpixman-1-0 libsdl2-2.0-0 libslirp0
           if [ ! -d "$RUNNER_TEMP/xtensa-esp-elf" ]; then
             curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 --max-time 600 "$TOOLCHAIN" | tar -xJ -C "$RUNNER_TEMP"
           fi
@@ -203,11 +202,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install the Arm bare-metal toolchain and qemu-system-arm
-        run: |
-          sudo apt-get -o Acquire::Retries=5 update
-          sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
-            gcc-arm-none-eabi binutils-arm-none-eabi \
-            libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib \
-            qemu-system-arm
+        uses: ./.github/actions/apt-install
+        with:
+          packages: gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib qemu-system-arm
       - name: Cross-compile and run under qemu-system-arm
         run: make test-helium

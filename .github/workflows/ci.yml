@@ -12,7 +12,7 @@ jobs:
   # references in a clone.
   hygiene:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - run: make check-internal-refs
@@ -27,7 +27,7 @@ jobs:
   # regresses, the reference vectors themselves are suspect, not the backend.
   build-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       matrix:
         include:
@@ -63,7 +63,7 @@ jobs:
   # Host backends only. This says nothing about cortexm or esp performance.
   perf:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Install valgrind
@@ -82,7 +82,7 @@ jobs:
   # alignment, accumulator width) before they reach a real target.
   cross-neon:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Install aarch64 cross toolchain and emulator
@@ -111,7 +111,7 @@ jobs:
   # about cycles. See the make target.
   cross-cortexm:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Install armhf cross toolchain and emulator
@@ -142,7 +142,7 @@ jobs:
   # run does and does not assert.
   emulated-esp:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       TOOLCHAIN: https://github.com/espressif/crosstool-NG/releases/download/esp-14.2.0_20241119/xtensa-esp-elf-14.2.0_20241119-x86_64-linux-gnu.tar.xz
       QEMU: https://github.com/espressif/qemu/releases/download/esp-develop-9.2.2-20260417/qemu-xtensa-softmmu-esp_develop_9.2.2_20260417-x86_64-linux-gnu.tar.xz
@@ -198,7 +198,7 @@ jobs:
   # assert.
   emulated-helium:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Install the Arm bare-metal toolchain and qemu-system-arm

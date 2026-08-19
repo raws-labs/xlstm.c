@@ -130,6 +130,40 @@ static inline int8x4_t xlstm_cm_ld4(const int8_t* p, int aligned)
  * overflow of ref's own int32 accumulator if it ever were reached. */
 #define XLSTM_CM_ZP_MAX 32640
 
+/* Which body a call actually ran, for test/cortexm_gate.cc.
+ *
+ * A build can link this backend, reproduce every golden vector, and execute
+ * no DSP instruction at all: the INT8 dispatch below decides on cols and the
+ * zero point, and the f32 kernel's eight-row block is entered on rows. Both
+ * are invisible to a value comparison, which makes them exactly the kind of
+ * silent loss of coverage a gate has to be able to fail on.
+ *
+ * The INT8 counts sit ON the dispatch, one per branch. The f32 counts are
+ * taken from the eight-row loop's own cursor after it, never re-derived from
+ * rows before it, so a guard added around that loop would have to move the
+ * count with it. `unblocked` is not a scalar body - the two-row and one-row
+ * tiers still use fmaf - it means no eight-row block ran.
+ *
+ * Off unless XLSTM_CORTEXM_FASTPATH_COUNTERS is defined - the Makefile sets
+ * it for the object the tests link and for nothing else - so a shipping
+ * kernel carries neither the counters nor the increment. */
+#ifdef XLSTM_CORTEXM_FASTPATH_COUNTERS
+unsigned long xlstm_cortexm_matvec_s8_aligned = 0;
+unsigned long xlstm_cortexm_matvec_s8_unaligned = 0;
+unsigned long xlstm_cortexm_matvec_s8_scalar = 0;
+unsigned long xlstm_cortexm_matvec_f32_blocked = 0;
+unsigned long xlstm_cortexm_matvec_f32_unblocked = 0;
+unsigned long xlstm_cortexm_matvec_f32_narrow = 0;
+#define XLSTM_CM_COUNT_S8(which) ((void)++xlstm_cortexm_matvec_s8_##which)
+#define XLSTM_CM_COUNT_F32(blocked, narrow)                           \
+    ((void)((blocked) ? ++xlstm_cortexm_matvec_f32_blocked            \
+                      : ++xlstm_cortexm_matvec_f32_unblocked),        \
+     (void)((narrow) ? ++xlstm_cortexm_matvec_f32_narrow : 0ul))
+#else
+#define XLSTM_CM_COUNT_S8(which) ((void)0)
+#define XLSTM_CM_COUNT_F32(blocked, narrow) ((void)0)
+#endif
+
 /* The DSP body. ALIGNED means both what its name says and that cols is a
  * multiple of 4 - one flag because the dispatch below tests them together and
  * a word-typed load needs both. It reaches xlstm_cm_ld4 as a constant from
@@ -248,6 +282,7 @@ void xlstm_matvec_s8(const int8_t* M, const int8_t* v,
      * addresses at all and the loops below would step past out entirely.
      * Neither is alignment. */
     if (cols <= 0 || v_zp > XLSTM_CM_ZP_MAX || v_zp < -XLSTM_CM_ZP_MAX) {
+        XLSTM_CM_COUNT_S8(scalar);
         xlstm_scalar_matvec_s8(M, v, out, rows, cols, v_zp);
         return;
     }
@@ -265,8 +300,10 @@ void xlstm_matvec_s8(const int8_t* M, const int8_t* v,
      * abandon the DSP body on most rows of every odd hidden size - H = 17
      * among them - which is where the whole of the work is. */
     if ((((uintptr_t)M | (uintptr_t)v) & 3u) == 0u && (cols & 3) == 0) {
+        XLSTM_CM_COUNT_S8(aligned);
         xlstm_cm_matvec_s8(M, v, out, rows, cols, v_zp, 1);
     } else {
+        XLSTM_CM_COUNT_S8(unaligned);
         xlstm_cm_matvec_s8(M, v, out, rows, cols, v_zp, 0);
     }
 }
@@ -348,6 +385,9 @@ void xlstm_matvec_f32(const float* M, const float* v,
             out[i + 6] = a6; out[i + 7] = a7;
         }
     }
+    /* i has advanced iff an eight-row block ran; short of rows is the two-row
+     * and one-row tiers below. */
+    XLSTM_CM_COUNT_F32(i > 0, i < rows);
 
     /* Both callers make rows a multiple of two - 4H for sLSTM, 4H + 2 for
      * mLSTM - so what is left here is 0, 2, 4 or 6 rows and the two-row pass

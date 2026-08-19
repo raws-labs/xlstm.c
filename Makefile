@@ -55,6 +55,35 @@ $(BUILD)/xlstm_simd.o: src/xlstm_simd_$(XLSTM_SIMD_IMPL).c include/xlstm_simd.h 
     src/xlstm_simd_scalar.h | $(BUILD)
 	@$(CC) $(CFLAGS) $(SIMD_CFLAGS) -Iinclude -c $< -o $@
 
+# The same source with the fast-path counters compiled in - a separate object,
+# and every test binary links this one rather than the one above.
+#
+# The counters are what lets a gate fail when an accelerated body is never
+# entered, which no golden vector can see. They are behind a compile-time flag
+# because a shipping kernel must carry neither them nor the increment that
+# feeds them; a second object rather than a flag on the rule above is what
+# keeps `make all`, `make bench` and `make perf` measuring the code that
+# ships. The gate binaries reference the counters unconditionally, so losing
+# the define here is a link error rather than a check that stopped checking.
+#
+# -ffp-contract=off on the two host backends is load-bearing and belongs on
+# BOTH dialects (see the gate rule below): the gate compares the accelerated
+# bodies (C) against the scalar bodies it inlines from src/xlstm_simd_scalar.h
+# (C++), bit for bit, and gcc contracts the two dialects differently. On
+# aarch64 that is the difference between FMLA and FMUL + FADD, and the gate
+# would fail on a last-bit difference that is the flags' doing and not the
+# kernel's. esp and helium set it across the whole build for the same reason.
+SIMD_TEST_DEFS_sse2    := -DXLSTM_SSE2_FASTPATH_COUNTERS -ffp-contract=off
+SIMD_TEST_DEFS_neon    := -DXLSTM_NEON_FASTPATH_COUNTERS -ffp-contract=off
+SIMD_TEST_DEFS_cortexm := -DXLSTM_CORTEXM_FASTPATH_COUNTERS
+SIMD_TEST_DEFS_esp     := -DXLSTM_ESP_FASTPATH_COUNTERS
+SIMD_TEST_DEFS_helium  := -DXLSTM_HELIUM_FASTPATH_COUNTERS
+SIMD_TEST_DEFS := $(SIMD_TEST_DEFS_$(XLSTM_SIMD_IMPL))
+
+$(BUILD)/xlstm_simd_test.o: src/xlstm_simd_$(XLSTM_SIMD_IMPL).c \
+    include/xlstm_simd.h src/xlstm_simd_scalar.h | $(BUILD)
+	@$(CC) $(CFLAGS) $(SIMD_CFLAGS) $(SIMD_TEST_DEFS) -Iinclude -c $< -o $@
+
 # --- Core objects ---
 
 $(BUILD)/slstm.o: src/slstm.c include/slstm.h include/xlstm_util.h include/xlstm_simd.h | $(BUILD)
@@ -76,42 +105,56 @@ $(BUILD)/mlstm_s8.o: src/mlstm_s8.c include/mlstm_s8.h include/xlstm_quant.h inc
 
 # --- Core tests ---
 
-$(BUILD)/slstm_test: test/slstm_test.cc $(BUILD)/slstm.o $(BUILD)/xlstm_simd.o include/slstm.h test/reference_data.h | $(BUILD)
-	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/slstm.o $(BUILD)/xlstm_simd.o -lm
+$(BUILD)/slstm_test: test/slstm_test.cc $(BUILD)/slstm.o $(BUILD)/xlstm_simd_test.o include/slstm.h test/reference_data.h | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/slstm.o $(BUILD)/xlstm_simd_test.o -lm
 
-$(BUILD)/mlstm_test: test/mlstm_test.cc $(BUILD)/mlstm.o $(BUILD)/xlstm_simd.o include/mlstm.h test/reference_data.h | $(BUILD)
-	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/mlstm.o $(BUILD)/xlstm_simd.o -lm
+$(BUILD)/mlstm_test: test/mlstm_test.cc $(BUILD)/mlstm.o $(BUILD)/xlstm_simd_test.o include/mlstm.h test/reference_data.h | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/mlstm.o $(BUILD)/xlstm_simd_test.o -lm
 
 # --- Quantized tests ---
 
-$(BUILD)/slstm_s8_test: test/slstm_s8_test.cc $(BUILD)/slstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o include/slstm_s8.h test/reference_data.h | $(BUILD)
-	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/slstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o -lm
+$(BUILD)/slstm_s8_test: test/slstm_s8_test.cc $(BUILD)/slstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd_test.o include/slstm_s8.h test/reference_data.h | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/slstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd_test.o -lm
 
-$(BUILD)/mlstm_s8_test: test/mlstm_s8_test.cc $(BUILD)/mlstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o include/mlstm_s8.h test/reference_data.h | $(BUILD)
-	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/mlstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o -lm
+$(BUILD)/mlstm_s8_test: test/mlstm_s8_test.cc $(BUILD)/mlstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd_test.o include/mlstm_s8.h test/reference_data.h | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/mlstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd_test.o -lm
 
 TEST_BINS := $(BUILD)/slstm_test $(BUILD)/mlstm_test \
              $(BUILD)/slstm_s8_test $(BUILD)/mlstm_s8_test
 
+# The sse2 and neon backends' fast-path checks - the fifth binary of `make
+# test` and of test-neon below. One source for both: the two are the same
+# kernel twice, and -DXLSTM_GATE_{SSE2,NEON} picks which set of counters it
+# reads. -Isrc so it compares the accelerated bodies against
+# src/xlstm_simd_scalar.h itself rather than a copy, and -ffp-contract=off for
+# the reason given on the test object above - it has to be on both dialects.
+$(BUILD)/sse2_gate: test/simd_gate.cc $(BUILD)/xlstm_simd_test.o src/xlstm_simd_scalar.h | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -ffp-contract=off -DXLSTM_GATE_SSE2 -Iinclude -Isrc \
+		-o $@ $< $(BUILD)/xlstm_simd_test.o -lm
+
+$(BUILD)/neon_gate: test/simd_gate.cc $(BUILD)/xlstm_simd_test.o src/xlstm_simd_scalar.h | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -ffp-contract=off -DXLSTM_GATE_NEON -Iinclude -Isrc \
+		-o $@ $< $(BUILD)/xlstm_simd_test.o -lm
+
 # The esp backend's fast-path checks - the fifth binary of test-esp below.
 # -Isrc so it compares the accelerated bodies against src/xlstm_simd_scalar.h
 # itself rather than a copy. Buildable only with the xtensa toolchain.
-$(BUILD)/esp_gate: test/esp_gate.cc $(BUILD)/xlstm_simd.o src/xlstm_simd_scalar.h | $(BUILD)
-	@$(CXX) $(CXXFLAGS) -Iinclude -Isrc -o $@ $< $(BUILD)/xlstm_simd.o -lm
+$(BUILD)/esp_gate: test/esp_gate.cc $(BUILD)/xlstm_simd_test.o src/xlstm_simd_scalar.h | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -Isrc -o $@ $< $(BUILD)/xlstm_simd_test.o -lm
 
-# The cortexm backend's out-of-bounds check - the fifth binary of test-cortexm
-# below. The hosted-target spelling of test/helium_gate.cc's edge check: a
-# guard page from mmap rather than an array the linker script butts against
-# the end of SRAM. No -Isrc, because unlike the two gates around it this one
-# compares nothing - it only asserts that no operand is read past its end.
-$(BUILD)/cortexm_gate: test/cortexm_gate.cc $(BUILD)/xlstm_simd.o | $(BUILD)
-	@$(CXX) $(CXXFLAGS) -Iinclude -o $@ $< $(BUILD)/xlstm_simd.o -lm
+# The cortexm backend's fast-path and out-of-bounds checks - the fifth binary
+# of test-cortexm below. Its edge check is the hosted-target spelling of
+# test/helium_gate.cc's: a guard page from mmap rather than an array the
+# linker script butts against the end of SRAM. -Isrc for the same reason as
+# the gates around it.
+$(BUILD)/cortexm_gate: test/cortexm_gate.cc $(BUILD)/xlstm_simd_test.o src/xlstm_simd_scalar.h | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -Isrc -o $@ $< $(BUILD)/xlstm_simd_test.o -lm
 
 # The helium backend's fast-path checks - the fifth binary of test-helium
 # below, same shape and same -Isrc reason as esp_gate above. Buildable only
 # with an Armv8.1-M toolchain.
-$(BUILD)/helium_gate: test/helium_gate.cc $(BUILD)/xlstm_simd.o src/xlstm_simd_scalar.h | $(BUILD)
-	@$(CXX) $(CXXFLAGS) -Iinclude -Isrc -o $@ $< $(BUILD)/xlstm_simd.o -lm
+$(BUILD)/helium_gate: test/helium_gate.cc $(BUILD)/xlstm_simd_test.o src/xlstm_simd_scalar.h | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -Isrc -o $@ $< $(BUILD)/xlstm_simd_test.o -lm
 
 # Vector table, .bss zeroing, the CPACR write that switches the vector unit
 # on, and the semihosting exit that turns main's return value into the
@@ -119,11 +162,28 @@ $(BUILD)/helium_gate: test/helium_gate.cc $(BUILD)/xlstm_simd.o src/xlstm_simd_s
 $(BUILD)/helium_boot.o: test/helium_boot.c | $(BUILD)
 	@$(CC) $(CFLAGS) -c $< -o $@
 
-test: $(TEST_BINS)
+# The fast-path gate for the active backend, where it has one. ref has none:
+# there is no accelerated body to prove was entered.
+SIMD_GATE_sse2 := $(BUILD)/sse2_gate
+SIMD_GATE_neon := $(BUILD)/neon_gate
+SIMD_GATE := $(SIMD_GATE_$(XLSTM_SIMD_IMPL))
+
+# The gate runs AFTER the four suites here, where test-esp and test-helium run
+# theirs first. Several defects in these backends are visible to both, and the
+# mutation battery records which check catches which defect: running the
+# suites first keeps their sensitivity to those on the record, and leaves the
+# gate to fail on the one thing they cannot see - an accelerated body that was
+# never entered at all.
+#
+# xlstm_simd.o is a prerequisite although nothing here links it: the tests link
+# the counted object, so without this the counters-OFF build - the one that
+# ships - would go uncompiled on every run of the test suite.
+test: $(TEST_BINS) $(SIMD_GATE) $(BUILD)/xlstm_simd.o
 	@$(BUILD)/slstm_test
 	@$(BUILD)/mlstm_test
 	@$(BUILD)/slstm_s8_test
 	@$(BUILD)/mlstm_s8_test
+	@$(if $(SIMD_GATE),$(SIMD_GATE),true)
 
 # --- SIMD convenience targets ---
 
@@ -144,7 +204,7 @@ test-sse2:
 # to work wherever binfmt_misc is registered and fails everywhere else.
 test-neon:
 	@$(MAKE) clean
-	@$(MAKE) $(TEST_BINS) XLSTM_SIMD=neon \
+	@$(MAKE) $(TEST_BINS) $(BUILD)/neon_gate XLSTM_SIMD=neon \
 		CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
 		CFLAGS="-std=c99 -O2 -Wall -Wextra -static" \
 		CXXFLAGS="-std=c++17 -O2 -Wall -Wextra -static"
@@ -152,6 +212,8 @@ test-neon:
 	@qemu-aarch64 $(BUILD)/mlstm_test
 	@qemu-aarch64 $(BUILD)/slstm_s8_test
 	@qemu-aarch64 $(BUILD)/mlstm_s8_test
+	@# Last, not first - see the `test` target above for why.
+	@qemu-aarch64 $(BUILD)/neon_gate
 	@# Leave no foreign binaries behind. Where binfmt_misc is registered, a
 	@# later host `make test` finds these up to date and RUNS them under the
 	@# emulator, reporting a pass for a backend it never built.
@@ -164,11 +226,15 @@ test-neon:
 # drops the FPU this hard-float toolchain needs.)
 #
 # It gates the arithmetic - the SXTAB16 + SMLAD INT8 path and the blocked f32
-# path, against the same golden vectors as every other backend - plus one
-# thing the goldens cannot see: test/cortexm_gate.cc runs every kernel with
-# each operand in turn butted against a guard page, so a group load that
-# stepped past a row faults rather than passing with the right answer. Green
-# here is NOT a Cortex-M gate:
+# path, against the same golden vectors as every other backend - plus two
+# things the goldens cannot see, both in test/cortexm_gate.cc. WHICH body ran:
+# the INT8 dispatch has three arms and the f32 kernel an eight-row block, and
+# a build can reproduce every golden vector having entered none of them, so
+# the gate asserts the arm each shape dictates and compares against the shared
+# scalar body. And whether anything was read past an operand: every kernel is
+# run with each operand in turn butted against a guard page, so a group load
+# that stepped past a row faults rather than passing with the right answer.
+# Green here is NOT a Cortex-M gate:
 #
 #   - Alignment. armv7-a Linux permits unaligned word access, so this build
 #     defines __ARM_FEATURE_UNALIGNED and takes the memcpy spelling of the INT8
@@ -188,11 +254,12 @@ test-cortexm:
 		CC=arm-linux-gnueabihf-gcc CXX=arm-linux-gnueabihf-g++ \
 		CFLAGS="-std=c99 -O2 -Wall -Wextra -static -march=armv7-a+fp" \
 		CXXFLAGS="-std=c++17 -O2 -Wall -Wextra -static -march=armv7-a+fp"
-	@qemu-arm $(BUILD)/cortexm_gate
 	@qemu-arm $(BUILD)/slstm_test
 	@qemu-arm $(BUILD)/mlstm_test
 	@qemu-arm $(BUILD)/slstm_s8_test
 	@qemu-arm $(BUILD)/mlstm_s8_test
+	@# Last, not first - see the `test` target above for why.
+	@qemu-arm $(BUILD)/cortexm_gate
 	@# Same reason as test-neon above: do not leave armhf binaries in build/.
 	@$(MAKE) clean
 
@@ -276,8 +343,11 @@ test-cortexm:
 # kernel's. Off, not fast, because that is what the arithmetic the goldens were
 # gated against does; a contracted build also passes, and would be the setting
 # to move to if this ever needs to gate a -O2 GNU-dialect firmware.
-ESP_DEFS := -DXLSTM_TEST_MAX_H=64 -DXLSTM_ESP_FASTPATH_COUNTERS \
-            -ffp-contract=off
+#
+# The fast-path counters are not here: they belong to the SIMD object alone
+# and are set by SIMD_TEST_DEFS at the top of this file, which is what keeps
+# them out of the object `make all` produces.
+ESP_DEFS := -DXLSTM_TEST_MAX_H=64 -ffp-contract=off
 ESP_LINK := -specs=sim.elf.specs -specs=sys.qemu.specs \
             -Wl,--defsym=entire_dram_seg=1
 # timeout because an infinite loop in a system emulator never returns, unlike
@@ -371,8 +441,10 @@ test-esp:
 # with VMUL + VADD, and the gate fails on a last-bit difference that is the
 # flags' doing and not the kernel's.
 HELIUM_ARCH := -mcpu=cortex-m55 -mthumb -mfloat-abi=hard
-HELIUM_DEFS := -DXLSTM_TEST_MAX_H=64 -DXLSTM_HELIUM_FASTPATH_COUNTERS \
-               -ffp-contract=off
+#
+# The fast-path counters are not here, for the same reason as test-esp above:
+# SIMD_TEST_DEFS sets them on the SIMD object alone.
+HELIUM_DEFS := -DXLSTM_TEST_MAX_H=64 -ffp-contract=off
 HELIUM_LINK := -nostartfiles -specs=rdimon.specs -T test/helium.ld \
                $(BUILD)/helium_boot.o
 # timeout because an infinite loop in a system emulator never returns, unlike

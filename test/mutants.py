@@ -27,9 +27,18 @@ targets, which is why each of those takes a SUBSET of the shared table (A1 to
 B2, one mutation per assertion family plus the pass case) rather than all of
 it, and adds mutations for what only it compiles: loop tails, alignment
 instances, zero-point folding, lane order, the accelerated-path guards, and
-the out-of-bounds checks in test/{esp,cortexm,helium}_gate.cc. A backend whose
-toolchain is not installed is reported as NOT COVERED at the end rather than
-passed over in silence.
+the out-of-bounds checks in test/{simd,esp,cortexm,helium}_gate.cc. A backend
+whose toolchain is not installed is reported as NOT COVERED at the end rather
+than passed over in silence.
+
+One class of mutation is here for a reason worth stating: forcing an
+accelerated body unreachable while leaving every answer intact. The scalar
+remainder under each vector loop computes the whole row when the loop runs no
+passes, so the suites go green with no vector instruction executed - which is
+how the esp backend once ran its accelerated matvec 6 times in 76 suite calls
+without any gate noticing. Only a counter can see it, and the entries that
+inject it (S1 to S4, N7 to N10, M6, M7, P1 to P4, H1 to H4) are the proof that
+those counters are wired to an assertion.
 
 Deliberately not in CI: this edits files in the working tree. Sources are
 copied to .mutants-backup/ and restored on exit, on failure and on SIGINT.
@@ -96,6 +105,16 @@ SSE_TAIL_F32 = """        for (; j < cols; ++j) {
 SSE_TAIL_S8 = """        for (; j < cols; ++j) {
             s += (int32_t)row[j] * ((int32_t)v[j] - v_zp);"""
 
+# sse2 and neon: the four vector loops. A bound of zero runs no pass at all
+# and leaves every answer intact - the scalar remainder below each loop then
+# computes the whole row - so nothing but the counters can see it.
+SSE_VEC_F32 = """        for (j = 0; j < cols4; j += 4) {
+            __m128 m = _mm_loadu_ps(row + j);"""
+SSE_VEC_S8 = "        for (j = 0; j < cols8; j += 8) {"
+SSE_VEC_RANK1 = "        for (c = 0; c < H4; c += 4) {"
+SSE_VEC_VECMAT = """        for (j = 0; j < cols4; j += 4) {
+            __m128 mv = _mm_loadu_ps(Mrow + j);"""
+
 # neon: one tail per kernel, the vector zero point, and the lane pairing.
 NE_TAIL_F32 = """        float s = vaddvq_f32(acc);
         for (; j < cols; ++j) {
@@ -110,6 +129,12 @@ NE_TAIL_VECMAT = """        for (; j < cols; ++j) {
 NE_ZP = "            int16x8_t v16 = vsubq_s16(vmovl_s8(vr), vzp);"
 NE_LANES = """            acc = vmlal_s16(acc, vget_low_s16(m16), vget_low_s16(v16));
             acc = vmlal_s16(acc, vget_high_s16(m16), vget_high_s16(v16));"""
+NE_VEC_F32 = """        for (j = 0; j < cols4; j += 4) {
+            float32x4_t m = vld1q_f32(row + j);"""
+NE_VEC_S8 = "        for (j = 0; j < cols8; j += 8) {"
+NE_VEC_RANK1 = "        for (c = 0; c < H4; c += 4) {"
+NE_VEC_VECMAT = """        for (j = 0; j < cols4; j += 4) {
+            float32x4_t mv = vld1q_f32(Mrow + j);"""
 
 # cortexm: the two group-load instances, the zero-point fold, the lane pairing,
 # the f32 accumulator seed, and a group load that reads one word ahead.
@@ -125,6 +150,12 @@ CM_SEED = """            float a0 = out[i], a1 = out[i + 1];
 CM_LD4 = """    if (aligned) {
         w = *(const xlstm_cm_word*)(const void*)p;
     } else {"""
+# The two accelerated bodies, made unreachable. Both leave every answer
+# unchanged: the scalar body computes the same integers, and the two-row tier
+# uses the same fmaf as the eight-row block it replaces.
+CM_S8_GUARD = ("    if (cols <= 0 || v_zp > XLSTM_CM_ZP_MAX"
+               " || v_zp < -XLSTM_CM_ZP_MAX) {")
+CM_BLOCK8 = "        for (; i + 7 < rows; i += 8) {"
 
 # esp: the four accelerated-path guards, and the partial group's upper block.
 EP_F32 = "    const int fast = cols >= 7 && rows >= tile;"
@@ -219,8 +250,14 @@ ESP_PATH_RANK1 = r"FAIL rank1 H=\d+ .*: expected fast\+"
 ESP_PATH_VECMAT = r"FAIL vecmat rows=\d+ .*: expected wide\+"
 
 
-def hlpath(k):  # helium's CheckSplit, per contract function.
-    return r"FAIL %s .*expected vector\+" % k
+def vecpath(k):  # the CheckSplit in test/simd_gate.cc and test/helium_gate.cc,
+    return r"FAIL %s .*expected vector\+" % k   # per contract function.
+
+
+# cortexm's two splits: three arms for the INT8 dispatch, and whether the f32
+# kernel's eight-row block ran.
+CM_PATH_S8 = r"FAIL matvec_s8 .*expected aligned\+"
+CM_PATH_F32 = r"FAIL matvec_f32 .*expected blocked\+"
 
 
 # What an out-of-bounds READ looks like, which is a fault and not a comparison:
@@ -286,6 +323,29 @@ MUTANTS = [
     ("E4", "sse2 f32 matvec skips its scalar tail", "fail", near("y"),
      ("sse2",),
      [(SSE2, SSE_TAIL_F32, SSE_TAIL_F32.replace("j < cols;", "j < cols4;"))]),
+
+    # --- sse2: the four vector loops ---------------------------------------
+    #
+    # S1 is the one that is NOT caught by its gate, and the signature says so.
+    # Losing the vector body of a f32 matvec also changes the summation order
+    # - four lane accumulators become one running sum - and the f32 goldens
+    # turn out to be tight enough to see that, by 4.6e-05 against their own
+    # bound. So the suites fail first and this defect never reaches the gate.
+    # That is luck rather than design, and it holds for exactly one of these
+    # eight vector bodies: S2 to S4 and N8 to N10 are bit-identical either
+    # way, which is why nothing but a counter could ever have seen them.
+    ("S1", "sse2 f32 matvec never enters its vector body", "fail", near("y"),
+     ("sse2",),
+     [(SSE2, SSE_VEC_F32, SSE_VEC_F32.replace("j < cols4", "j < 0"))]),
+    ("S2", "sse2 INT8 matvec never enters its vector body", "fail",
+     vecpath("matvec_s8"), ("sse2",),
+     [(SSE2, SSE_VEC_S8, SSE_VEC_S8.replace("j < cols8", "j < 0"))]),
+    ("S3", "sse2 rank-1 update never enters its vector body", "fail",
+     vecpath("rank1_f32"), ("sse2",),
+     [(SSE2, SSE_VEC_RANK1, SSE_VEC_RANK1.replace("c < H4", "c < 0"))]),
+    ("S4", "sse2 vecmat never enters its vector body", "fail",
+     vecpath("vecmat_f32"), ("sse2",),
+     [(SSE2, SSE_VEC_VECMAT, SSE_VEC_VECMAT.replace("j < cols4", "j < 0"))]),
     # SweepS17 ch5 and ch6 are the narrowest windows in the whole table: the
     # bound sits at ~0.96x the channel's own range, so these two are where a
     # single corrupted channel comes closest to fitting underneath it.
@@ -317,6 +377,20 @@ MUTANTS = [
        " vget_high_s16(v16));\n"
        "            acc = vmlal_s16(acc, vget_high_s16(m16),"
        " vget_low_s16(v16));")]),
+    # N7 is S1 on the other backend, and is caught the same way - by the f32
+    # goldens rather than by the gate. See the note above S1.
+    ("N7", "neon f32 matvec never enters its vector body", "fail", near("y"),
+     ("neon",),
+     [(NEON, NE_VEC_F32, NE_VEC_F32.replace("j < cols4", "j < 0"))]),
+    ("N8", "neon INT8 matvec never enters its vector body", "fail",
+     vecpath("matvec_s8"), ("neon",),
+     [(NEON, NE_VEC_S8, NE_VEC_S8.replace("j < cols8", "j < 0"))]),
+    ("N9", "neon rank-1 update never enters its vector body", "fail",
+     vecpath("rank1_f32"), ("neon",),
+     [(NEON, NE_VEC_RANK1, NE_VEC_RANK1.replace("c < H4", "c < 0"))]),
+    ("N10", "neon vecmat never enters its vector body", "fail",
+     vecpath("vecmat_f32"), ("neon",),
+     [(NEON, NE_VEC_VECMAT, NE_VEC_VECMAT.replace("j < cols4", "j < 0"))]),
 
     # --- cortexm: two group-load instances, and a read that faults ---------
     ("M1", "cortexm INT8 matvec always takes the aligned instance", "fail",
@@ -349,6 +423,12 @@ MUTANTS = [
        "          (void)ahead_; }\n"
        "        w = *(const xlstm_cm_word*)(const void*)p;\n"
        "    } else {")]),
+    ("M6", "cortexm INT8 matvec never enters its DSP body", "fail",
+     CM_PATH_S8, ("cortexm",),
+     [(CORTEXM, CM_S8_GUARD, CM_S8_GUARD.replace("if (cols", "if (1 || cols"))]),
+    ("M7", "cortexm f32 matvec never enters its eight-row block", "fail",
+     CM_PATH_F32, ("cortexm",),
+     [(CORTEXM, CM_BLOCK8, CM_BLOCK8.replace("i + 7 < rows", "0"))]),
 
     # --- esp: the four accelerated-path guards, and an over-read -----------
     ("P1", "esp f32 matvec never enters its blocked body", "fail",
@@ -374,16 +454,16 @@ MUTANTS = [
 
     # --- helium: the four vector-body guards, and the gather clamp ---------
     ("H1", "helium f32 matvec never enters its vector body", "fail",
-     hlpath("matvec_f32"), ("helium",),
+     vecpath("matvec_f32"), ("helium",),
      [(HELIUM, HL_F32, HL_F32.replace("if (cols", "if (1 || cols"))]),
     ("H2", "helium INT8 matvec never enters its vector body", "fail",
-     hlpath("matvec_s8"), ("helium",),
+     vecpath("matvec_s8"), ("helium",),
      [(HELIUM, HL_S8, HL_S8.replace("if (cols", "if (1 || cols"))]),
     ("H3", "helium rank-1 update never enters its vector body", "fail",
-     hlpath("rank1_f32"), ("helium",),
+     vecpath("rank1_f32"), ("helium",),
      [(HELIUM, HL_RANK1, HL_RANK1.replace("if (H", "if (1 || H"))]),
     ("H4", "helium vecmat never enters its vector body", "fail",
-     hlpath("vecmat_f32"), ("helium",),
+     vecpath("vecmat_f32"), ("helium",),
      [(HELIUM, HL_VECMAT, HL_VECMAT.replace("if (rows", "if (1 || rows"))]),
     # The gather's spare lanes are clamped onto the last row and discarded by
     # a predicated store. Unclamped, every answer is still right and the

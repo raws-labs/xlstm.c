@@ -65,10 +65,32 @@ make test-esp          # cross-compile xtensa, run under QEMU (system, not user)
 make test-helium       # cross-compile Cortex-M55, run under QEMU (system)
 ```
 
-All six run the same golden vectors. `test-cortexm` gates the Cortex-M
-backend without a board: `SXTAB16` and `SMLAD` are ARMv6 DSP instructions that
-A-profile also has, so the kernels cross-compile for `armv7-a`. It gates the
-arithmetic and only the arithmetic:
+All six run the same golden vectors. Five of them also run a fast-path gate as
+a fifth binary - `test/simd_gate.cc` for `sse2` and `neon`, and
+`test/cortexm_gate.cc`, `test/esp_gate.cc`, `test/helium_gate.cc` for the
+cross-compiled ones. They exist because a vector body that is never entered
+still produces the right answer through the scalar remainder underneath it, so
+every suite stays green with no accelerated instruction executed. That is not
+hypothetical: `esp` once reached its accelerated matvec 6 times in 76 suite
+calls, by linker accident, with every gate green. So each accelerated backend
+counts which body every call took - behind a compile-time flag the test build
+sets and the shipping build does not, and referenced unconditionally by the
+gate, so a lost define is a link error rather than a check that stopped
+checking - and its gate fails unless every call took the body its shape
+dictates and matched the scalar bodies in `src/xlstm_simd_scalar.h`.
+
+Those comparisons are bit-exact wherever the backend is: `helium` in all four
+kernels, `sse2` and `neon` in the INT8 matvec, the rank-1 update and `vecmat`.
+Two are not, and are held to the standard summation error bound instead -
+`sse2`/`neon` `matvec_f32`, whose four lane accumulators regroup the sum, and
+`cortexm` `matvec_f32`, whose `fmaf` rounds once per term where the scalar body
+rounds twice. Both differences are what those bodies are for; a tolerance is
+the honest comparison there and is stated as such rather than applied quietly
+everywhere.
+
+`test-cortexm` gates the Cortex-M backend without a board: `SXTAB16` and
+`SMLAD` are ARMv6 DSP instructions that A-profile also has, so the kernels
+cross-compile for `armv7-a`. It gates the arithmetic and only the arithmetic:
 
 - armv7-a Linux permits unaligned word access, so the INT8 matvec's
   `-mno-unaligned-access` load path is never compiled and M-profile alignment
@@ -174,15 +196,30 @@ up to date - without that rebuild, an auto-detected `make bench` benchmarks
 ## Changing a tolerance, a bound, or the generator
 
 ```bash
-make mutants           # ~35s, edits the working tree and restores it
+make mutants           # ~90s for the host pair, ~3 min for every backend
+                       # whose toolchain is installed. Edits the working tree
+                       # and restores it.
 ```
 
 Those changes fail by making a gate quietly stop failing, which a green
 `make test` cannot show you. `make mutants` injects the defects the bounds
 exist to catch - an activation drift, a zeroed exit state, a state
 requantization drift, a dropped zero point, a matvec that skips its SIMD tail,
-a single corrupted channel - rebuilds, and asserts the suites fail. A defect
-they no longer notice is an escape, and fails the target.
+a single corrupted channel, a vector body no call ever enters - rebuilds, and
+asserts the gates fail. A defect they no longer notice is an escape, and fails
+the target. Every mutation records WHICH assertion has to catch it, so a check
+that quietly stopped firing behind a neighbour that still fires is a failure
+too.
+
+The last of those defect classes is the one worth naming: forcing a vector
+body unreachable leaves every answer intact, because the scalar remainder
+computes the whole row. Fourteen entries inject exactly that, one per
+accelerated body across the five accelerated backends, and each is recorded
+against the fast-path gate that catches it. One is not: losing the vector body
+of `sse2`/`neon` `matvec_f32` also changes the summation order, and the f32
+goldens turn out to be tight enough to see that - by 4.6e-05 against their own
+bound - so the suites fail first. That is luck rather than design, and it holds
+for that one body only.
 
 One mutation must **pass**: a 0.1% activation drift. That is the portability
 margin the INT8 bounds are derived with, so that a backend whose sigmoid and

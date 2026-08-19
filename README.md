@@ -88,7 +88,7 @@ make clean
 
 Requires `gcc` (C99) and `g++` (C++17, for tests and bench).
 
-Each backend has its own gate, including the cross-compiled ones: `make test-ref`, `make test-sse2`, `make test-neon`, `make test-cortexm`, `make test-esp` and `make test-helium` run the same golden vectors, the last four under emulation with no hardware. See [CONTRIBUTING.md](CONTRIBUTING.md) for those and for the regression gates.
+Each backend has its own gate, including the cross-compiled ones: `make test-ref`, `make test-sse2`, `make test-neon`, `make test-cortexm`, `make test-esp` and `make test-helium` run the same golden vectors, the last four under emulation with no hardware. Every accelerated backend also runs a fast-path gate that fails if a vector body was never entered - a golden vector cannot see that, because the scalar remainder underneath computes the same answer. See [CONTRIBUTING.md](CONTRIBUTING.md) for those and for the regression gates.
 
 ## Adapters
 

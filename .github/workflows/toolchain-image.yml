@@ -1,0 +1,47 @@
+name: Toolchain image
+
+# Builds and publishes the image every cross job in ci.yml runs in. See
+# .github/toolchain.Dockerfile for what is in it and why.
+#
+# The tag is the content hash of that Dockerfile and the perf baseline it
+# asserts against, so CI names an exact image rather than floating onto
+# whatever was pushed last: change either file and this publishes a new tag,
+# which ci.yml must then be pointed at. ci.yml's hygiene job recomputes the
+# same hash and fails if the two have drifted, so a stale pin cannot pass
+# unnoticed.
+
+on:
+  push:
+    paths:
+      - .github/toolchain.Dockerfile
+      - .github/workflows/toolchain-image.yml
+      - test/perf_baseline.txt
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and push
+        run: |
+          set -eu
+          img=ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain
+          tag=$(sha256sum .github/toolchain.Dockerfile test/perf_baseline.txt \
+                | sha256sum | cut -c1-12)
+          echo '${{ secrets.GITHUB_TOKEN }}' \
+            | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+          docker build -f .github/toolchain.Dockerfile \
+            --label org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }} \
+            -t "$img:$tag" -t "$img:latest" .
+          docker push "$img:$tag"
+          docker push "$img:latest"
+          echo "image: $img:$tag" >> "$GITHUB_STEP_SUMMARY"
+          echo "size: $(docker image inspect "$img:$tag" \
+                       --format '{{.Size}}' | numfmt --to=iec)" \
+            >> "$GITHUB_STEP_SUMMARY"

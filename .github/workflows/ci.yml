@@ -6,12 +6,32 @@ on:
   pull_request:
     branches: [main]
 
+# Only to pull the toolchain image. Nothing in this workflow writes anything.
+permissions:
+  contents: read
+  packages: read
+
+# Every job that needs a cross toolchain or an emulator runs inside the image
+# .github/workflows/toolchain-image.yml publishes, and installs nothing.
+# Acquisition, not testing, was what this workflow spent its time on: apt was
+# about 90% of every cross job, and against a throttled Ubuntu mirror one job
+# spent 34 minutes installing a compiler for a 3-second test. The image tag is
+# the content hash of .github/toolchain.Dockerfile, so this pins an exact image
+# rather than floating onto whatever was pushed last; the hygiene job fails if
+# the pin and the Dockerfile have drifted apart.
+#
+# hygiene and build-and-test stay on a plain runner deliberately. Neither
+# installs anything today, so the image could only make them slower - and
+# build-and-test's whole point is the host compiler pair, clang included, which
+# is the one toolchain here that is meant to be the runner's and not ours.
+
 jobs:
   # This repository is public. Tracked files must not cite paths that exist only
   # on a maintainer's machine - they leak internal structure and are broken
   # references in a clone.
   hygiene:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - run: make check-internal-refs
@@ -19,6 +39,21 @@ jobs:
         run: python3 test/head_slicing_example.py
       - name: Adoption helpers stay correct
         run: make check-tools
+      # A Dockerfile edit that is not matched by an edit to the container lines
+      # below means every cross job is silently testing against the previous
+      # image. Nothing else would notice, so check it here.
+      - name: CI pins the image its Dockerfile describes
+        run: |
+          want=$(sha256sum .github/toolchain.Dockerfile test/perf_baseline.txt \
+                 | sha256sum | cut -c1-12)
+          got=$(grep -oE 'xlstm-c-toolchain:[0-9a-f]+' \
+                .github/workflows/ci.yml | sort -u)
+          if [ "$got" != "xlstm-c-toolchain:$want" ]; then
+            echo "ci.yml pins '$got' but the Dockerfile hashes to '$want'."
+            echo "Publish the image, then point every container line at it."
+            exit 1
+          fi
+          echo "image pin: OK ($want)"
 
   # Host backends. `make test` auto-detects, which resolves to sse2 on the x86
   # runners; `make test-ref` forces the scalar backend. ref is gated explicitly
@@ -26,6 +61,7 @@ jobs:
   # regresses, the reference vectors themselves are suspect, not the backend.
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       matrix:
         include:
@@ -51,22 +87,21 @@ jobs:
   # far more than the regressions worth catching - so the gate counts retired
   # instructions under callgrind instead, which is exact and repeatable.
   #
-  # Pinned to ubuntu-24.04 rather than ubuntu-latest on purpose: the counts are
-  # specific to the compiler that produced them, and `ubuntu-latest` silently
-  # moving to a new image would change gcc under the baseline. make perf checks
-  # the toolchain against the one recorded in test/perf_baseline.txt and refuses
-  # to compare across a mismatch, so an image bump fails loudly and is fixed by
-  # re-recording, rather than quietly measuring the compiler instead of the code.
+  # The counts are specific to the compiler that produced them, so this needs a
+  # fixed toolchain, not a fixed runner label. It used to ask for ubuntu-24.04
+  # and hope; the image carries gcc and valgrind and refuses to build unless
+  # they match the versions test/perf_baseline.txt records, so the thing the
+  # baseline depends on is now pinned by content rather than by a label that
+  # can move underneath it. make perf still checks at run time and refuses to
+  # compare across a mismatch.
   #
   # Host backends only. This says nothing about cortexm or esp performance.
   perf:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:c1893cbac9e0
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - name: Install valgrind
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends valgrind
       - name: Instruction-count gate
         run: make perf
         env:
@@ -79,13 +114,10 @@ jobs:
   # alignment, accumulator width) before they reach a real target.
   cross-neon:
     runs-on: ubuntu-latest
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:c1893cbac9e0
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - name: Install aarch64 cross toolchain and emulator
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu qemu-user
       - name: Cross-compile and run under qemu-aarch64
         run: make test-neon
 
@@ -108,13 +140,10 @@ jobs:
   # about cycles. See the make target.
   cross-cortexm:
     runs-on: ubuntu-latest
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:c1893cbac9e0
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - name: Install armhf cross toolchain and emulator
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf qemu-user
       - name: Cross-compile and run under qemu-arm
         run: make test-cortexm
 
@@ -123,15 +152,15 @@ jobs:
   # check is test/adapters/esp-dl, which compiles and never executes.
   #
   # System emulation rather than qemu-user, because Xtensa has no Linux
-  # userspace - that is the only way this differs from the two jobs above. Two
-  # tarballs, ~190 MB together, replace the ESP-IDF container this used to
-  # need: the bare-metal startup, linker script and semihosting stdout all come
-  # from specs files inside the toolchain, so there is no IDF project to build,
-  # no bootloader, no flash image and no Docker.
+  # userspace - that is the only way this differs from the two jobs above. The
+  # bare-metal startup, linker script and semihosting stdout all come from specs
+  # files inside the toolchain, so there is no IDF project to build, no
+  # bootloader, no flash image and no Docker.
   #
-  # Both versions are pinned. The toolchain is the one ESP-IDF v5.4 ships, so
-  # the gate compiles the kernels with the compiler a user of that IDF gets.
-  # QEMU has to be Espressif's fork: upstream has no esp32s3 machine.
+  # The toolchain and Espressif's QEMU fork are in the image, both pinned there.
+  # The toolchain is the one ESP-IDF v5.4 ships, so the gate compiles the
+  # kernels with the compiler a user of that IDF gets; QEMU has to be
+  # Espressif's fork because upstream has no esp32s3 machine.
   #
   # Green here does NOT mean the part is covered. QEMU executes the S3's PIE
   # instructions but models no timing, and its Xtensa FPU is not guaranteed
@@ -139,23 +168,10 @@ jobs:
   # run does and does not assert.
   emulated-esp:
     runs-on: ubuntu-latest
-    env:
-      TOOLCHAIN: https://github.com/espressif/crosstool-NG/releases/download/esp-14.2.0_20241119/xtensa-esp-elf-14.2.0_20241119-x86_64-linux-gnu.tar.xz
-      QEMU: https://github.com/espressif/qemu/releases/download/esp-develop-9.2.2-20260417/qemu-xtensa-softmmu-esp_develop_9.2.2_20260417-x86_64-linux-gnu.tar.xz
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:c1893cbac9e0
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - name: Install the xtensa toolchain and Espressif's qemu-system-xtensa
-        run: |
-          # The three libraries are qemu-system-xtensa's DT_NEEDED entries.
-          # SDL2 is one of them even though this runs -display none: it is
-          # linked, not dlopened, so the binary will not start without it.
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libpixman-1-0 libsdl2-2.0-0 libslirp0
-          curl -fsSL "$TOOLCHAIN" | tar -xJ -C "$RUNNER_TEMP"
-          curl -fsSL "$QEMU" | tar -xJ -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/xtensa-esp-elf/bin" >> "$GITHUB_PATH"
-          echo "$RUNNER_TEMP/qemu/bin" >> "$GITHUB_PATH"
       - name: Cross-compile and run under qemu-system-xtensa
         run: make test-esp
 
@@ -164,11 +180,9 @@ jobs:
   # an ISA any runner here can execute natively.
   #
   # System emulation, like emulated-esp - M-profile has no Linux userspace
-  # either. Unlike emulated-esp, both halves are distribution packages, so
-  # there is no tarball to fetch and no version to pin: gcc-arm-none-eabi
-  # supplies the compiler and the MVE intrinsics, qemu-system-arm supplies the
-  # board. MPS3 AN547 is the machine because its CPU is a Cortex-M55; none of
-  # the MPS2 machines model an Armv8.1-M part.
+  # either. gcc-arm-none-eabi supplies the compiler and the MVE intrinsics,
+  # qemu-system-arm supplies the board. MPS3 AN547 is the machine because its
+  # CPU is a Cortex-M55; none of the MPS2 machines model an Armv8.1-M part.
   #
   # Green here does NOT mean the part is covered. QEMU executes MVE
   # architecturally - with CP10/CP11 left at reset the first vector instruction
@@ -178,14 +192,9 @@ jobs:
   # assert.
   emulated-helium:
     runs-on: ubuntu-latest
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:c1893cbac9e0
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - name: Install the Arm bare-metal toolchain and qemu-system-arm
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-arm-none-eabi binutils-arm-none-eabi \
-            libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib \
-            qemu-system-arm
       - name: Cross-compile and run under qemu-system-arm
         run: make test-helium

@@ -52,7 +52,7 @@ $(BUILD):
 # --- SIMD kernel object ---
 
 $(BUILD)/xlstm_simd.o: src/xlstm_simd_$(XLSTM_SIMD_IMPL).c include/xlstm_simd.h \
-    src/xlstm_simd_scalar.h | $(BUILD)
+    src/xlstm_simd_scalar.h Makefile | $(BUILD)
 	@$(CC) $(CFLAGS) $(SIMD_CFLAGS) -Iinclude -c $< -o $@
 
 # The same source with the fast-path counters compiled in - a separate object,
@@ -81,26 +81,26 @@ SIMD_TEST_DEFS_helium  := -DXLSTM_HELIUM_FASTPATH_COUNTERS
 SIMD_TEST_DEFS := $(SIMD_TEST_DEFS_$(XLSTM_SIMD_IMPL))
 
 $(BUILD)/xlstm_simd_test.o: src/xlstm_simd_$(XLSTM_SIMD_IMPL).c \
-    include/xlstm_simd.h src/xlstm_simd_scalar.h | $(BUILD)
+    include/xlstm_simd.h src/xlstm_simd_scalar.h Makefile | $(BUILD)
 	@$(CC) $(CFLAGS) $(SIMD_CFLAGS) $(SIMD_TEST_DEFS) -Iinclude -c $< -o $@
 
 # --- Core objects ---
 
-$(BUILD)/slstm.o: src/slstm.c include/slstm.h include/xlstm_util.h include/xlstm_simd.h | $(BUILD)
+$(BUILD)/slstm.o: src/slstm.c include/slstm.h include/xlstm_util.h include/xlstm_simd.h Makefile | $(BUILD)
 	@$(CC) $(CFLAGS) -Iinclude -c $< -o $@
 
-$(BUILD)/mlstm.o: src/mlstm.c include/mlstm.h include/xlstm_util.h include/xlstm_simd.h | $(BUILD)
+$(BUILD)/mlstm.o: src/mlstm.c include/mlstm.h include/xlstm_util.h include/xlstm_simd.h Makefile | $(BUILD)
 	@$(CC) $(CFLAGS) -Iinclude -c $< -o $@
 
 # --- Quantized objects ---
 
-$(BUILD)/xlstm_quant.o: src/xlstm_quant.c include/xlstm_quant.h | $(BUILD)
+$(BUILD)/xlstm_quant.o: src/xlstm_quant.c include/xlstm_quant.h Makefile | $(BUILD)
 	@$(CC) $(CFLAGS) -Iinclude -c $< -o $@
 
-$(BUILD)/slstm_s8.o: src/slstm_s8.c include/slstm_s8.h include/xlstm_quant.h include/xlstm_util.h include/xlstm_simd.h | $(BUILD)
+$(BUILD)/slstm_s8.o: src/slstm_s8.c include/slstm_s8.h include/xlstm_quant.h include/xlstm_util.h include/xlstm_simd.h Makefile | $(BUILD)
 	@$(CC) $(CFLAGS) -Iinclude -c $< -o $@
 
-$(BUILD)/mlstm_s8.o: src/mlstm_s8.c include/mlstm_s8.h include/xlstm_quant.h include/xlstm_util.h include/xlstm_simd.h | $(BUILD)
+$(BUILD)/mlstm_s8.o: src/mlstm_s8.c include/mlstm_s8.h include/xlstm_quant.h include/xlstm_util.h include/xlstm_simd.h Makefile | $(BUILD)
 	@$(CC) $(CFLAGS) -Iinclude -c $< -o $@
 
 # --- Core tests ---
@@ -159,7 +159,7 @@ $(BUILD)/helium_gate: test/helium_gate.cc $(BUILD)/xlstm_simd_test.o src/xlstm_s
 # Vector table, .bss zeroing, the CPACR write that switches the vector unit
 # on, and the semihosting exit that turns main's return value into the
 # emulator's exit status. Linked into all five test-helium images.
-$(BUILD)/helium_boot.o: test/helium_boot.c | $(BUILD)
+$(BUILD)/helium_boot.o: test/helium_boot.c Makefile | $(BUILD)
 	@$(CC) $(CFLAGS) -c $< -o $@
 
 # The fast-path gate for the active backend, where it has one. ref has none:

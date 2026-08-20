@@ -747,6 +747,12 @@ reference: test/generate_reference.py
 
 check-internal-refs:
 	@fail=0; \
+	sib=$$(git ls-files -z | xargs -0 grep -nE '[a-z0-9_.]+\.c-(hil|bench)|raws-strategy|siliconrig' 2>/dev/null \
+	       | grep -v '^Makefile:'); \
+	if [ -n "$$sib" ]; then \
+		echo "check-internal-refs: names a sibling repository:"; \
+		echo "$$sib"; fail=1; \
+	fi; \
 	abs=$$(git ls-files -z | xargs -0 grep -nE '/(home|Users)/[A-Za-z0-9_.-]+/' 2>/dev/null \
 	       | grep -v '^Makefile:.*home|Users'); \
 	if [ -n "$$abs" ]; then \

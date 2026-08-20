@@ -90,7 +90,8 @@ static inline float log_sigmoid_f32(float x) {
  * __ARM_FEATURE_DIRECTED_ROUNDING would say exactly the right thing, but gcc
  * does not define either for M-profile at all. So the build declares it,
  * alongside the -mfpu that decides it (set by whatever Cortex-M build links
- * this header - out of this repository's scope; see the xlstm.c-hil harness).
+ * this header - out of this repository's scope, since the flag is a property
+ * of the firmware image and not of these kernels).
  *
  * The auto-detect below is a genuine capability test where one exists:
  * __ARM_FEATURE_NUMERIC_MAXMIN is ACLE's macro for exactly these numeric

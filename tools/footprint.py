@@ -190,9 +190,9 @@ def self_check():
     print("%d configurations agree with the tensor shapes in "
           "test/reference_data.json" % n)
 
-    # The three mLSTM f32 state figures README.md quotes, which reach a width
-    # the reference data does not: 16.3 KB and 64.5 KB per head, and 130 KB
-    # for an 8-head layer that therefore does not fit a 128 KB part.
+    # 16,644 is the per-head figure README.md quotes, so this keeps the two in
+    # step. The other two pin the formula at widths the reference data does not
+    # reach, including an 8-head layer that does not fit a 128 KB part.
     for label, got, want in (("H=64 per head", state_bytes("mlstm", 64, False), 16644),
                              ("H=128 per head", state_bytes("mlstm", 128, False), 66052),
                              ("H=64, 8 heads", state_bytes("mlstm", 64, False) * 8, 133152)):

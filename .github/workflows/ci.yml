@@ -81,6 +81,16 @@ jobs:
         env:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cxx }}
+      # The approximate gate build (XLSTM_GATES=approx, include/xlstm_util.h),
+      # on both host backends. The same four golden suites plus the gate-math
+      # checks, which is where the approximation's accuracy is actually
+      # asserted - the suites quantize to INT8 and would pass whatever it did.
+      # Measured at 5 s.
+      - name: Test the approximate gate build
+        run: make test-approx
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
 
   # Efficiency is what this library is for, so a speed regression has to be able
   # to fail a build. Wall-clock on a shared runner cannot do that job - it varies
@@ -98,7 +108,7 @@ jobs:
   # Host backends only. This says nothing about cortexm or esp performance.
   perf:
     runs-on: ubuntu-latest
-    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:c1893cbac9e0
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:bed53ff4fb3a
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -114,7 +124,7 @@ jobs:
   # alignment, accumulator width) before they reach a real target.
   cross-neon:
     runs-on: ubuntu-latest
-    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:c1893cbac9e0
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:bed53ff4fb3a
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -140,12 +150,21 @@ jobs:
   # about cycles. See the make target.
   cross-cortexm:
     runs-on: ubuntu-latest
-    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:c1893cbac9e0
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:bed53ff4fb3a
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Cross-compile and run under qemu-arm
         run: make test-cortexm
+      # Cortex-M is the target the approximate gate build exists for, so it is
+      # the one cross backend gated in both builds. The other three are not,
+      # and that is a considered subset rather than an omission: the gate
+      # arithmetic is plain C99 in the shared cell code with no SIMD contract
+      # behind it, so a fourth backend would run another instance of the same
+      # code rather than another code path. Any of them can be run in either
+      # build by hand: make test-esp XLSTM_GATES=approx.
+      - name: Cross-compile and run the approximate gate build
+        run: make test-cortexm XLSTM_GATES=approx
 
   # The esp backend on an emulated ESP32-S3. Like cross-cortexm above, this
   # exists because without it the backend has no gate anywhere: its only other
@@ -168,7 +187,7 @@ jobs:
   # run does and does not assert.
   emulated-esp:
     runs-on: ubuntu-latest
-    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:c1893cbac9e0
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:bed53ff4fb3a
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -192,7 +211,7 @@ jobs:
   # assert.
   emulated-helium:
     runs-on: ubuntu-latest
-    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:c1893cbac9e0
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:bed53ff4fb3a
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4

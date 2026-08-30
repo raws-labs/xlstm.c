@@ -36,8 +36,50 @@ else
   endif
 endif
 
-.PHONY: all test simd-info test-ref test-sse2 test-neon test-cortexm test-esp \
-        test-helium reference clean \
+# --- Gate-transcendental variant selection ---
+#
+# XLSTM_GATES: exact (default) or approx. See the block above
+# xlstm_gate_expf in include/xlstm_util.h for what the two paths are and why
+# the exact one is the default. Every target below takes it, so any backend
+# can be gated in either build: `make test-cortexm XLSTM_GATES=approx`.
+#
+# `override` because CFLAGS is routinely set on the command line - by the
+# cross targets below, and by CI - and a plain += against a command-line
+# variable is silently discarded by make. Command-line variables are exported
+# to sub-makes, so a recursive target re-applies this rather than losing it.
+XLSTM_GATES ?= exact
+
+ifeq ($(XLSTM_GATES),approx)
+  GATE_DEFS := -DXLSTM_APPROX_GATES=1
+else ifeq ($(XLSTM_GATES),exact)
+  GATE_DEFS :=
+else
+  $(error XLSTM_GATES must be `exact` or `approx`, not `$(XLSTM_GATES)`)
+endif
+
+override CFLAGS   += $(GATE_DEFS)
+override CXXFLAGS += $(GATE_DEFS)
+
+# An object file carries no record of which variant built it, so `make test
+# XLSTM_GATES=approx` straight after `make test` would relink the exact one and
+# report a green approximate run that never happened. That is the failure mode
+# this repository treats as worse than a red build, so it is a dependency and
+# not a warning in a document: the stamp's name carries the variant, making it
+# a file that does not exist yet whenever the variant changes, and every rule
+# below depends on it. Creating it removes the other one, so the pair can never
+# both be present and stale. XLSTM_SIMD has the same hazard and answers it by
+# making every backend target run `clean` first; this is the cheaper answer,
+# and the reason it is not applied there too is that a backend switch also
+# changes which source file compiles, which is a bigger blast radius than a
+# define.
+GATE_STAMP := $(BUILD)/gates.$(XLSTM_GATES)
+
+$(GATE_STAMP): | $(BUILD)
+	@rm -f $(BUILD)/gates.*
+	@touch $@
+
+.PHONY: all test test-approx simd-info test-ref test-sse2 test-neon \
+        test-cortexm test-esp test-helium reference clean \
         test-docker-ort test-docker-tvm test-docker-tflm test-docker-espdl \
         bench bench-ref bench-sse2 perf perf-baseline mutants \
         check-internal-refs check-tools
@@ -52,7 +94,7 @@ $(BUILD):
 # --- SIMD kernel object ---
 
 $(BUILD)/xlstm_simd.o: src/xlstm_simd_$(XLSTM_SIMD_IMPL).c include/xlstm_simd.h \
-    src/xlstm_simd_scalar.h Makefile | $(BUILD)
+    src/xlstm_simd_scalar.h Makefile $(GATE_STAMP) | $(BUILD)
 	@$(CC) $(CFLAGS) $(SIMD_CFLAGS) -Iinclude -c $< -o $@
 
 # The same source with the fast-path counters compiled in - a separate object,
@@ -81,46 +123,53 @@ SIMD_TEST_DEFS_helium  := -DXLSTM_HELIUM_FASTPATH_COUNTERS
 SIMD_TEST_DEFS := $(SIMD_TEST_DEFS_$(XLSTM_SIMD_IMPL))
 
 $(BUILD)/xlstm_simd_test.o: src/xlstm_simd_$(XLSTM_SIMD_IMPL).c \
-    include/xlstm_simd.h src/xlstm_simd_scalar.h Makefile | $(BUILD)
+    include/xlstm_simd.h src/xlstm_simd_scalar.h Makefile $(GATE_STAMP) | $(BUILD)
 	@$(CC) $(CFLAGS) $(SIMD_CFLAGS) $(SIMD_TEST_DEFS) -Iinclude -c $< -o $@
 
 # --- Core objects ---
 
-$(BUILD)/slstm.o: src/slstm.c include/slstm.h include/xlstm_util.h include/xlstm_simd.h Makefile | $(BUILD)
+$(BUILD)/slstm.o: src/slstm.c include/slstm.h include/xlstm_util.h include/xlstm_simd.h Makefile $(GATE_STAMP) | $(BUILD)
 	@$(CC) $(CFLAGS) -Iinclude -c $< -o $@
 
-$(BUILD)/mlstm.o: src/mlstm.c include/mlstm.h include/xlstm_util.h include/xlstm_simd.h Makefile | $(BUILD)
+$(BUILD)/mlstm.o: src/mlstm.c include/mlstm.h include/xlstm_util.h include/xlstm_simd.h Makefile $(GATE_STAMP) | $(BUILD)
 	@$(CC) $(CFLAGS) -Iinclude -c $< -o $@
 
 # --- Quantized objects ---
 
-$(BUILD)/xlstm_quant.o: src/xlstm_quant.c include/xlstm_quant.h Makefile | $(BUILD)
+$(BUILD)/xlstm_quant.o: src/xlstm_quant.c include/xlstm_quant.h Makefile $(GATE_STAMP) | $(BUILD)
 	@$(CC) $(CFLAGS) -Iinclude -c $< -o $@
 
-$(BUILD)/slstm_s8.o: src/slstm_s8.c include/slstm_s8.h include/xlstm_quant.h include/xlstm_util.h include/xlstm_simd.h Makefile | $(BUILD)
+$(BUILD)/slstm_s8.o: src/slstm_s8.c include/slstm_s8.h include/xlstm_quant.h include/xlstm_util.h include/xlstm_simd.h Makefile $(GATE_STAMP) | $(BUILD)
 	@$(CC) $(CFLAGS) -Iinclude -c $< -o $@
 
-$(BUILD)/mlstm_s8.o: src/mlstm_s8.c include/mlstm_s8.h include/xlstm_quant.h include/xlstm_util.h include/xlstm_simd.h Makefile | $(BUILD)
+$(BUILD)/mlstm_s8.o: src/mlstm_s8.c include/mlstm_s8.h include/xlstm_quant.h include/xlstm_util.h include/xlstm_simd.h Makefile $(GATE_STAMP) | $(BUILD)
 	@$(CC) $(CFLAGS) -Iinclude -c $< -o $@
 
 # --- Core tests ---
 
-$(BUILD)/slstm_test: test/slstm_test.cc $(BUILD)/slstm.o $(BUILD)/xlstm_simd_test.o include/slstm.h test/reference_data.h | $(BUILD)
+$(BUILD)/slstm_test: test/slstm_test.cc $(BUILD)/slstm.o $(BUILD)/xlstm_simd_test.o include/slstm.h test/reference_data.h $(GATE_STAMP) | $(BUILD)
 	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/slstm.o $(BUILD)/xlstm_simd_test.o -lm
 
-$(BUILD)/mlstm_test: test/mlstm_test.cc $(BUILD)/mlstm.o $(BUILD)/xlstm_simd_test.o include/mlstm.h test/reference_data.h | $(BUILD)
+$(BUILD)/mlstm_test: test/mlstm_test.cc $(BUILD)/mlstm.o $(BUILD)/xlstm_simd_test.o include/mlstm.h test/reference_data.h $(GATE_STAMP) | $(BUILD)
 	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/mlstm.o $(BUILD)/xlstm_simd_test.o -lm
 
 # --- Quantized tests ---
 
-$(BUILD)/slstm_s8_test: test/slstm_s8_test.cc $(BUILD)/slstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd_test.o include/slstm_s8.h test/reference_data.h | $(BUILD)
+$(BUILD)/slstm_s8_test: test/slstm_s8_test.cc $(BUILD)/slstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd_test.o include/slstm_s8.h test/reference_data.h $(GATE_STAMP) | $(BUILD)
 	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/slstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd_test.o -lm
 
-$(BUILD)/mlstm_s8_test: test/mlstm_s8_test.cc $(BUILD)/mlstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd_test.o include/mlstm_s8.h test/reference_data.h | $(BUILD)
+$(BUILD)/mlstm_s8_test: test/mlstm_s8_test.cc $(BUILD)/mlstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd_test.o include/mlstm_s8.h test/reference_data.h $(GATE_STAMP) | $(BUILD)
 	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/mlstm_s8.o $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd_test.o -lm
 
 TEST_BINS := $(BUILD)/slstm_test $(BUILD)/mlstm_test \
              $(BUILD)/slstm_s8_test $(BUILD)/mlstm_s8_test
+
+# The gate-math checks. Links nothing: the four transcendentals are inline in
+# include/xlstm_util.h, and this compares them against the libm they either
+# forward to or replace. Runs in both XLSTM_GATES builds and asserts something
+# different in each - see the file.
+$(BUILD)/gate_test: test/gate_test.cc include/xlstm_util.h test/test_util.h $(GATE_STAMP) | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< -lm
 
 # The sse2 and neon backends' fast-path checks - the fifth binary of `make
 # test` and of test-neon below. One source for both: the two are the same
@@ -128,18 +177,18 @@ TEST_BINS := $(BUILD)/slstm_test $(BUILD)/mlstm_test \
 # reads. -Isrc so it compares the accelerated bodies against
 # src/xlstm_simd_scalar.h itself rather than a copy, and -ffp-contract=off for
 # the reason given on the test object above - it has to be on both dialects.
-$(BUILD)/sse2_gate: test/simd_gate.cc $(BUILD)/xlstm_simd_test.o src/xlstm_simd_scalar.h | $(BUILD)
+$(BUILD)/sse2_gate: test/simd_gate.cc $(BUILD)/xlstm_simd_test.o src/xlstm_simd_scalar.h $(GATE_STAMP) | $(BUILD)
 	@$(CXX) $(CXXFLAGS) -ffp-contract=off -DXLSTM_GATE_SSE2 -Iinclude -Isrc \
 		-o $@ $< $(BUILD)/xlstm_simd_test.o -lm
 
-$(BUILD)/neon_gate: test/simd_gate.cc $(BUILD)/xlstm_simd_test.o src/xlstm_simd_scalar.h | $(BUILD)
+$(BUILD)/neon_gate: test/simd_gate.cc $(BUILD)/xlstm_simd_test.o src/xlstm_simd_scalar.h $(GATE_STAMP) | $(BUILD)
 	@$(CXX) $(CXXFLAGS) -ffp-contract=off -DXLSTM_GATE_NEON -Iinclude -Isrc \
 		-o $@ $< $(BUILD)/xlstm_simd_test.o -lm
 
 # The esp backend's fast-path checks - the fifth binary of test-esp below.
 # -Isrc so it compares the accelerated bodies against src/xlstm_simd_scalar.h
 # itself rather than a copy. Buildable only with the xtensa toolchain.
-$(BUILD)/esp_gate: test/esp_gate.cc $(BUILD)/xlstm_simd_test.o src/xlstm_simd_scalar.h | $(BUILD)
+$(BUILD)/esp_gate: test/esp_gate.cc $(BUILD)/xlstm_simd_test.o src/xlstm_simd_scalar.h $(GATE_STAMP) | $(BUILD)
 	@$(CXX) $(CXXFLAGS) -Iinclude -Isrc -o $@ $< $(BUILD)/xlstm_simd_test.o -lm
 
 # The cortexm backend's fast-path and out-of-bounds checks - the fifth binary
@@ -147,19 +196,19 @@ $(BUILD)/esp_gate: test/esp_gate.cc $(BUILD)/xlstm_simd_test.o src/xlstm_simd_sc
 # test/helium_gate.cc's: a guard page from mmap rather than an array the
 # linker script butts against the end of SRAM. -Isrc for the same reason as
 # the gates around it.
-$(BUILD)/cortexm_gate: test/cortexm_gate.cc $(BUILD)/xlstm_simd_test.o src/xlstm_simd_scalar.h | $(BUILD)
+$(BUILD)/cortexm_gate: test/cortexm_gate.cc $(BUILD)/xlstm_simd_test.o src/xlstm_simd_scalar.h $(GATE_STAMP) | $(BUILD)
 	@$(CXX) $(CXXFLAGS) -Iinclude -Isrc -o $@ $< $(BUILD)/xlstm_simd_test.o -lm
 
 # The helium backend's fast-path checks - the fifth binary of test-helium
 # below, same shape and same -Isrc reason as esp_gate above. Buildable only
 # with an Armv8.1-M toolchain.
-$(BUILD)/helium_gate: test/helium_gate.cc $(BUILD)/xlstm_simd_test.o src/xlstm_simd_scalar.h | $(BUILD)
+$(BUILD)/helium_gate: test/helium_gate.cc $(BUILD)/xlstm_simd_test.o src/xlstm_simd_scalar.h $(GATE_STAMP) | $(BUILD)
 	@$(CXX) $(CXXFLAGS) -Iinclude -Isrc -o $@ $< $(BUILD)/xlstm_simd_test.o -lm
 
 # Vector table, .bss zeroing, the CPACR write that switches the vector unit
 # on, and the semihosting exit that turns main's return value into the
 # emulator's exit status. Linked into all five test-helium images.
-$(BUILD)/helium_boot.o: test/helium_boot.c Makefile | $(BUILD)
+$(BUILD)/helium_boot.o: test/helium_boot.c Makefile $(GATE_STAMP) | $(BUILD)
 	@$(CC) $(CFLAGS) -c $< -o $@
 
 # The fast-path gate for the active backend, where it has one. ref has none:
@@ -178,7 +227,10 @@ SIMD_GATE := $(SIMD_GATE_$(XLSTM_SIMD_IMPL))
 # xlstm_simd.o is a prerequisite although nothing here links it: the tests link
 # the counted object, so without this the counters-OFF build - the one that
 # ships - would go uncompiled on every run of the test suite.
-test: $(TEST_BINS) $(SIMD_GATE) $(BUILD)/xlstm_simd.o
+test: $(TEST_BINS) $(BUILD)/gate_test $(SIMD_GATE) $(BUILD)/xlstm_simd.o
+	@# First: it checks the arithmetic the four suites are built on, so a
+	@# failure here explains theirs rather than being buried under them.
+	@$(BUILD)/gate_test
 	@$(BUILD)/slstm_test
 	@$(BUILD)/mlstm_test
 	@$(BUILD)/slstm_s8_test
@@ -193,6 +245,24 @@ simd-info:
 test-ref:
 	@$(MAKE) clean
 	@$(MAKE) test XLSTM_SIMD=ref
+
+# The approximate gate build, on the two host backends. The cleans are for the
+# XLSTM_SIMD switch, which needs them; GATE_STAMP above already makes the
+# variant switch safe on its own.
+#
+# Measured at 5 s: the four golden suites plus the gate-math checks, twice,
+# with a clean between. Every backend is gated on `exact` by its own target; on
+# `approx` this pair plus cross-cortexm is the subset CI runs, because the
+# gate arithmetic is backend-independent - it is the same C on all six, with
+# no SIMD contract behind it - so what a fourth backend would add is another
+# instance of the same code, not another code path. Any backend can still be
+# run in either build by hand: `make test-neon XLSTM_GATES=approx`.
+test-approx:
+	@$(MAKE) clean
+	@$(MAKE) test XLSTM_SIMD=ref XLSTM_GATES=approx
+	@$(MAKE) clean
+	@$(MAKE) test XLSTM_GATES=approx
+	@$(MAKE) clean
 
 test-sse2:
 	@$(MAKE) clean
@@ -250,10 +320,13 @@ test-neon:
 # Build only, then invoke the emulator explicitly - same reason as test-neon.
 test-cortexm:
 	@$(MAKE) clean
-	@$(MAKE) $(TEST_BINS) $(BUILD)/cortexm_gate XLSTM_SIMD=cortexm \
+	@$(MAKE) $(TEST_BINS) $(BUILD)/gate_test $(BUILD)/cortexm_gate XLSTM_SIMD=cortexm \
 		CC=arm-linux-gnueabihf-gcc CXX=arm-linux-gnueabihf-g++ \
 		CFLAGS="-std=c99 -O2 -Wall -Wextra -static -march=armv7-a+fp" \
 		CXXFLAGS="-std=c++17 -O2 -Wall -Wextra -static -march=armv7-a+fp"
+	@# First, like the `test` target above: this one checks the arithmetic the
+	@# four suites are built on, so a failure here explains theirs.
+	@qemu-arm $(BUILD)/gate_test
 	@qemu-arm $(BUILD)/slstm_test
 	@qemu-arm $(BUILD)/mlstm_test
 	@qemu-arm $(BUILD)/slstm_s8_test
@@ -492,7 +565,7 @@ test-docker-espdl:
 
 $(BUILD)/xlstm_bench: test/xlstm_bench.cc $(BUILD)/slstm.o $(BUILD)/mlstm.o \
     $(BUILD)/slstm_s8.o $(BUILD)/mlstm_s8.o \
-    $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o | $(BUILD)
+    $(BUILD)/xlstm_quant.o $(BUILD)/xlstm_simd.o $(GATE_STAMP) | $(BUILD)
 	@$(CXX) $(CXXFLAGS) -Iinclude -o $@ $< \
 		$(BUILD)/slstm.o $(BUILD)/mlstm.o \
 		$(BUILD)/slstm_s8.o $(BUILD)/mlstm_s8.o \
@@ -510,7 +583,7 @@ $(BUILD)/xlstm_bench: test/xlstm_bench.cc $(BUILD)/slstm.o $(BUILD)/mlstm.o \
 # number is only printed once that name matches the backend just built. Via a
 # file rather than a pipe, so the run's own exit status survives - `| tee` would
 # report success for a benchmark that died halfway with its header already out.
-bench: | $(BUILD)
+bench: $(GATE_STAMP) | $(BUILD)
 	@rm -f $(BUILD)/*.o $(BUILD)/xlstm_bench
 	@$(MAKE) --no-print-directory $(BUILD)/xlstm_bench XLSTM_SIMD=$(XLSTM_SIMD_IMPL)
 	@$(BUILD)/xlstm_bench > $(BUILD)/bench.txt; rc=$$?; \
@@ -575,6 +648,11 @@ PERF_ENV := GLIBC_TUNABLES=glibc.cpu.hwcaps=-FMA,-AVX2,-AVX
 
 PERF_BASELINE := test/perf_baseline.txt
 PERF_BACKENDS ?= ref sse2
+# Both gate builds, and the f32 rows in both on purpose. XLSTM_GATES must not
+# reach the f32 kernels at all, and two rows that have to stay equal is a
+# check of that; a change that routed slstm.c through the approximate helpers
+# would show up here as a pair that no longer matches.
+PERF_GATES    ?= exact approx
 PERF_KERNELS  ?= slstm_f32 mlstm_f32 slstm_s8 mlstm_s8
 PERF_WIDTHS   ?= 16 64
 PERF_STEPS    ?= 200
@@ -589,8 +667,10 @@ define perf-measure
 	command -v $(VALGRIND) >/dev/null 2>&1 || { \
 		echo "perf: $(VALGRIND) not found - apt-get install valgrind" >&2; exit 1; }; \
 	for b in $(PERF_BACKENDS); do \
+	  for g in $(PERF_GATES); do \
 		rm -f $(BUILD)/*.o $(BUILD)/xlstm_bench; \
-		$(MAKE) --no-print-directory $(BUILD)/xlstm_bench XLSTM_SIMD=$$b >/dev/null; \
+		$(MAKE) --no-print-directory $(BUILD)/xlstm_bench \
+			XLSTM_SIMD=$$b XLSTM_GATES=$$g >/dev/null; \
 		for k in $(PERF_KERNELS); do \
 			sym=$${k%%_*}_step_$${k#*_}; \
 			for h in $(PERF_WIDTHS); do \
@@ -599,10 +679,12 @@ define perf-measure
 					--collect-atstart=no --toggle-collect=$$sym \
 					$(BUILD)/xlstm_bench $$k $$h $(PERF_STEPS) 2>&1 \
 					| sed -n 's/.*Collected *: *//p'); \
-				test -n "$$ir" || { echo "perf: no count for $$b $$k $$h" >&2; exit 1; }; \
-				echo "$$b $$k $$h $(PERF_STEPS) $$ir"; \
+				test -n "$$ir" || { \
+					echo "perf: no count for $$b $$g $$k $$h" >&2; exit 1; }; \
+				echo "$$b $$g $$k $$h $(PERF_STEPS) $$ir"; \
 			done; \
 		done; \
+	  done; \
 	done
 endef
 
@@ -625,24 +707,25 @@ perf:
 	@$(perf-measure) > $(BUILD)/perf.txt
 	@awk -v tol=$(PERF_TOL) -v fast=$(PERF_TOL_FAST) ' \
 	BEGIN { \
-	  printf "%-7s %-10s %4s %6s %14s %14s %9s\n", \
-	    "backend","kernel","H","steps","baseline","current","delta"; \
-	  printf "%s\n", "---------------------------------------------------------------------------"; \
+	  printf "%-7s %-6s %-10s %4s %6s %14s %14s %9s\n", \
+	    "backend","gates","kernel","H","steps","baseline","current","delta"; \
+	  printf "%s\n", "----------------------------------------------------------------------------------"; \
 	} \
-	NR == FNR { if (NF == 5 && $$1 !~ /^#/) base[$$1" "$$2" "$$3" "$$4] = $$5; next } \
+	NR == FNR { if (NF == 6 && $$1 !~ /^#/) base[$$1" "$$2" "$$3" "$$4" "$$5] = $$6; next } \
 	{ \
-	  key = $$1" "$$2" "$$3" "$$4; \
+	  key = $$1" "$$2" "$$3" "$$4" "$$5; \
 	  if (!(key in base)) { \
-	    printf "%-7s %-10s %4s %6s %14s %14d    NO BASELINE\n", $$1,$$2,$$3,$$4,"-",$$5; \
+	    printf "%-7s %-6s %-10s %4s %6s %14s %14d    NO BASELINE\n", \
+	      $$1,$$2,$$3,$$4,$$5,"-",$$6; \
 	    fail = 1; next; \
 	  } \
-	  seen[key] = 1; d = 100.0 * ($$5 - base[key]) / base[key]; \
+	  seen[key] = 1; d = 100.0 * ($$6 - base[key]) / base[key]; \
 	  tag = (d > tol) ? "  REGRESSED" \
 	      : ((d < -fast) ? "  IMPROVED - RE-RECORD" \
 	      : ((d < -tol) ? "  faster" : "")); \
 	  if (d > tol || d < -fast) fail = 1; \
-	  printf "%-7s %-10s %4s %6s %14d %14d %+8.2f%%%s\n", \
-	    $$1,$$2,$$3,$$4,base[key],$$5,d,tag; \
+	  printf "%-7s %-6s %-10s %4s %6s %14d %14d %+8.2f%%%s\n", \
+	    $$1,$$2,$$3,$$4,$$5,base[key],$$6,d,tag; \
 	} \
 	END { \
 	  for (k in base) if (!(k in seen)) { printf "not measured: %s\n", k; fail = 1 } \
@@ -670,6 +753,9 @@ perf-baseline:
 	  echo "# Regenerate deliberately with:  make perf-baseline"; \
 	  echo "# Checked by:                    make perf   (tolerance +$(PERF_TOL)% / -$(PERF_TOL_FAST)%)"; \
 	  echo "#"; \
+	  echo "# Two rows per case, one per XLSTM_GATES build (see include/xlstm_util.h)."; \
+	  echo "# The f32 pair must stay equal: the switch is not supposed to reach those kernels."; \
+	  echo "#"; \
 	  echo "# Counts are the inclusive cost of one kernel entry point over $(PERF_STEPS) steps,"; \
 	  echo "# collection toggled on that symbol alone. Exact and reproducible for a given"; \
 	  echo "# binary, so any movement here is a real change in work done, not noise."; \
@@ -689,7 +775,7 @@ perf-baseline:
 	  echo "# valgrind:  $$($(VALGRIND) --version 2>/dev/null)"; \
 	  echo "# libm:      $(PERF_ENV)"; \
 	  echo "#"; \
-	  echo "# backend kernel     H steps    instructions"; \
+	  echo "# backend gates  kernel     H steps    instructions"; \
 	  cat $(BUILD)/perf.txt; \
 	} > $(PERF_BASELINE)
 	@echo "wrote $(PERF_BASELINE):"

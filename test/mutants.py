@@ -83,7 +83,7 @@ CROSS_TOOLS = {
 # --- anchors: exact text in the current tree, replaced literally ------------
 
 SY = "        float y_new = o_gate * (c_new / xlstm_maxf(n_new, 1e-6f));"
-MY = "        float y_new = sigmoid_f32(o_raw[j]) * (qC_j / denom);"
+MY = "        float y_new = xlstm_gate_sigmoidf(o_raw[j]) * (qC_j / denom);"
 SCQ = "        float c_q = c_new / params->c_quant.scale;"
 MCQ = "            float C_q = C_new / params->C_quant.scale;"
 NQ = "        float n_q = n_new / params->n_quant.scale;"

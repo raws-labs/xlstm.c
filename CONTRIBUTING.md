@@ -63,7 +63,24 @@ make test-neon         # cross-compile aarch64, run under QEMU
 make test-cortexm      # cross-compile armv7-a, run under QEMU (the DSP path)
 make test-esp          # cross-compile xtensa, run under QEMU (system, not user)
 make test-helium       # cross-compile Cortex-M55, run under QEMU (system)
+make test-approx       # the approximate gate build, on both host backends
 ```
+
+Every one of them takes `XLSTM_GATES=exact|approx`, which picks the INT8 cells'
+transcendentals (see the block above `xlstm_gate_expf` in
+`include/xlstm_util.h`). `exact` is the default and is what all six are gated
+on. `approx` is gated by `make test-approx` on `ref` and the host backend, and
+by CI on `cortexm`, which is the target it exists for; the arithmetic is plain
+C99 in the shared cell code with no SIMD contract behind it, so a fourth
+backend would run another instance of the same code rather than another code
+path. `test/gate_test.cc` is what actually asserts the accuracy, in ulp against
+a double reference - the golden suites quantize to INT8 and would pass whatever
+the approximation did. In the default build the same file asserts the opposite:
+that each wrapper is bit-identical to libm. Switching variant does not need a
+`clean` - an object file carries no record of which one built it, so the
+Makefile keeps a stamp named for the variant and makes every rule depend on
+it, rather than leaving a stale object to report a green run of a build that
+never happened.
 
 All six run the same golden vectors. Five of them also run a fast-path gate as
 a fifth binary - `test/simd_gate.cc` for `sse2` and `neon`, and
@@ -158,7 +175,10 @@ make perf-baseline     # re-record it, deliberately
 
 `make bench` prints wall-clock, which no shared runner reproduces closely
 enough to fail a build on. `make perf` counts retired instructions under
-callgrind instead, collection toggled on one kernel entry point at a time. The
+callgrind instead, collection toggled on one kernel entry point at a time. It
+covers both `XLSTM_GATES` builds, including the f32 kernels in both - those two
+rows have to stay equal, because the switch is not supposed to reach them, and
+a pair that stopped matching would say it had. The
 same binary on the same input gives the same count every run, so a move against
 `test/perf_baseline.txt` is a real change in work done, and CI fails on it. A
 deliberate change is a `make perf-baseline` and a one-line-per-case diff.

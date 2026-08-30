@@ -49,7 +49,8 @@ static const float kRelTol = 2e-6f;
     return true;
 }
 
-static bool ExpectFinite(const char* name, const float* vals, int len) {
+[[maybe_unused]] static bool ExpectFinite(const char* name,
+                                         const float* vals, int len) {
     for (int i = 0; i < len; ++i) {
         if (!std::isfinite(vals[i])) {
             std::printf("  FAIL %s[%d]: not finite (%.8f)\n", name, i, vals[i]);

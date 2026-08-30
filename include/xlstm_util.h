@@ -260,4 +260,228 @@ static inline int32_t xlstm_round_clamp_i32(float v, float lo, float hi) {
 }
 #endif
 
+/* ---------------------------------------------------------------------------
+ * THE GATE TRANSCENDENTALS, IN TWO BUILDS.
+ *
+ * The INT8 cells evaluate exp, log-sigmoid, sigmoid and tanh once per hidden
+ * unit per timestep. On a Cortex-M4F that is where their time goes, not in
+ * the matmul: measured under emulation on a Cortex-M4 (gcc 13.2.1 -O2,
+ * newlib 4.4.0, H = 64), one slstm_step_s8 call retires 107132 instructions,
+ * of which 66402 are the two INT8 matvecs and 40717 are everything else -
+ * and 28506 of that 40717, 70%, is inside newlib's expf, logf and tanhf.
+ * Per hidden unit: 445 instructions of libm against 191 of kernel.
+ *
+ * XLSTM_APPROX_GATES picks which of two implementations the INT8 cells get.
+ * It changes nothing else: the f32 cells call libm directly and are not
+ * routed through these wrappers at all.
+ *
+ *   0 (DEFAULT)  libm. Bit-identical to what this library has always
+ *                computed, so upgrading cannot move a deployed model's
+ *                numbers. Every tolerance, bound and floor in the test data
+ *                was derived against this path and still describes it
+ *                exactly.
+ *
+ *   1            Polynomial approximations, portable C99, no calls and no
+ *                tables. On the same Cortex-M4 the four transcendentals cost
+ *                211 instructions per hidden unit instead of 445, and the
+ *                whole tail 24474 per step instead of 40717 - 40% off. It is
+ *                opt-in because it is a numerical change, small but real, and
+ *                whether it is acceptable depends on what the caller
+ *                calibrated against - not on what benchmarks better. Its
+ *                error is asserted in ulp against a double reference by
+ *                test/gate_test.cc.
+ *
+ * The approximate path is NOT a Cortex-M trick. It is the same C on every
+ * backend, so a model that runs on one target runs the same arithmetic on
+ * all of them; a table that existed only for one core would split the
+ * library's behaviour by target, which is worse than being slower.
+ *
+ * FLASH is close to a wash, which is worth knowing before choosing. On
+ * Armv7E-M slstm_step_s8 grows from 936 to 2978 bytes and mlstm_step_s8 from
+ * 1104 to 2832, while the newlib routines they stop calling - expf, logf,
+ * tanhf, expm1f and their helpers - are 2072 bytes an image with no other
+ * caller drops. What the approximate path does NOT buy is instruction
+ * locality: its loop body is larger, a part with a small instruction cache
+ * may charge for that, and no instruction count can see it.
+ * ------------------------------------------------------------------------- */
+
+#ifndef XLSTM_APPROX_GATES
+#  define XLSTM_APPROX_GATES 0
+#endif
+
+#if XLSTM_APPROX_GATES
+
+/* exp(x), measured at 1.30 ulp of the correctly rounded result against a
+ * double reference (libm: 0.50) - test/gate_test.cc prints both.
+ *
+ * Textbook shape: x = k*ln2 + r, exp(x) = 2^k * exp(r) with |r| <= ln2/2.
+ * What is worth stating is the four places where it is not textbook, all of
+ * them chosen against what a Cortex-M4 charges rather than against what
+ * reads best.
+ *
+ * 1. The domain test is one INTEGER comparison on |x|'s bit pattern, not two
+ *    float compares. An FPv4-SP compare is vcmpe plus vmrs plus a branch,
+ *    and it costs more still to materialize each bound; the integer form is
+ *    a sign strip and a cmp. It also folds NaN in for free - a NaN's
+ *    magnitude exceeds every finite threshold - which keeps NaN away from
+ *    the (int) cast below, where C leaves it undefined. The threshold is the
+ *    UNDERFLOW limit rather than the overflow one, so the whole overflowing
+ *    band still runs the ordinary path and saturates through the arithmetic
+ *    instead of through a second compare.
+ *
+ * 2. Rounding t to the nearest integer is `(int)(t + 256.5f) - 256`. The
+ *    domain test guarantees |t| <= 150, so the sum is positive and C's
+ *    truncating cast IS a floor, making this round-half-up in two
+ *    instructions. The libm idiom `(t + 1.5*2^23) - 1.5*2^23` is one
+ *    cheaper and is deliberately NOT used: it needs round-to-nearest to be
+ *    the active FPU mode, and -ffast-math folds the pair away entirely -
+ *    which here would not cost a bit of accuracy but a whole factor of two.
+ *
+ * 3. ln2 is subtracted in two pieces. XLSTM_EXP_LN2_HI has 13 significant
+ *    bits and |k| <= 150 needs 8, so k*LN2_HI is exact in float32 and the
+ *    subtraction after it is too; a single-constant reduction would lose the
+ *    low bits of r for large |x| and with them the accuracy of the result.
+ *
+ * 4. 2^k is one exponent field and one multiplication whenever k fits one,
+ *    which is every k the gates produce in anger. The out-of-field k values
+ *    - the denormal tail below 2^-126 and the two exponents at the top that
+ *    overflow - take xlstm_expf_scale, which splits 2^k into two exact
+ *    powers of two so that only the last multiplication rounds, exactly as
+ *    ldexpf would. Getting the denormal tail right is not pedantry: it is
+ *    where the m stabilizer does its work, and the point of that state is
+ *    that a gate value of 1e-40 stays 1e-40 rather than becoming garbage.
+ *
+ * exp(0) is exactly 1.0f: k = 0 makes r = 0, the polynomial 1.0f and the
+ * scale factor 1.0f. The sLSTM gate loop relies on that. */
+#define XLSTM_EXP_LN2_HI   0.693359375f      /* 13 significant bits */
+#define XLSTM_EXP_LN2_LO  -2.12194440e-4f    /* ln2 - LN2_HI */
+#define XLSTM_EXP_LOG2E    1.44269504f
+#define XLSTM_EXP_DOMAIN_U 0x42CFF1B5u       /* |x| <= 103.972084 */
+#define XLSTM_EXP_SHIFT_UP 1.84467441e19f    /* 2^64 */
+#define XLSTM_EXP_SHIFT_DN 5.42101086e-20f   /* 2^-64 */
+
+/* p * 2^k for a k no single exponent field holds: |k| <= 150 here, so one
+ * shift of 64 always brings it back into range, and both factors are exact
+ * powers of two. */
+static inline float xlstm_expf_scale(float p, int k) {
+    union { uint32_t u; float f; } b;
+    if (k < 0) {
+        b.u = (uint32_t)(k + 64 + 127) << 23;
+        return p * b.f * XLSTM_EXP_SHIFT_DN;
+    }
+    b.u = (uint32_t)(k - 64 + 127) << 23;
+    return p * b.f * XLSTM_EXP_SHIFT_UP;
+}
+
+static inline float xlstm_gate_expf(float x) {
+    union { uint32_t u; float f; } b;
+    float n, r, q, p;
+    int k;
+
+    b.f = x;
+    if ((b.u & 0x7FFFFFFFu) > XLSTM_EXP_DOMAIN_U) {
+        return (x != x) ? x : (x > 0.0f ? HUGE_VALF : 0.0f);
+    }
+
+    k = (int)(x * XLSTM_EXP_LOG2E + 256.5f) - 256;
+    n = (float)k;
+    r = x - n * XLSTM_EXP_LN2_HI;
+    r = r - n * XLSTM_EXP_LN2_LO;
+
+    /* (exp(r) - 1 - r) / r^2, minimax degree 4 on [-ln2/2, ln2/2]. */
+    q = 0.5f + r * (1.666657776e-01f
+          + r * (4.166655615e-02f
+          + r * (8.363173343e-03f
+          + r * 1.392617589e-03f)));
+    p = 1.0f + r + (r * r) * q;
+
+    if ((unsigned int)(k + 126) > 252u) {    /* k outside [-126, 126] */
+        return xlstm_expf_scale(p, k);
+    }
+    b.u = (uint32_t)(k + 127) << 23;
+    return p * b.f;
+}
+
+/* log(sigmoid(x)), measured at 2.53 ulp.
+ *
+ * log(sigmoid(x)) = min(x, 0) - log1p(exp(-|x|)). Folding the sign in makes
+ * the exp argument non-positive, so its result lands in (0, 1] and the log1p
+ * that follows needs no exponent extraction and no range reduction at all -
+ * one polynomial covers the whole domain, which is why this costs a fraction
+ * of a general logf.
+ *
+ * It is also, unusually for this file, far MORE accurate than the libm path
+ * it replaces, which measures 1.7e7 ulp on the same sweep. That is not a
+ * defect in libm: at x = 15.5 that spelling forms 1.0f + 1.8e-07, and the
+ * spacing of floats at 1.0 is 1.19e-07, so the addend arrives rounded to a
+ * multiple of itself before the log ever runs. The exact build is the one with
+ * the numerics every shipped bound was derived against, so this is a reason
+ * to trust the approximate path's arithmetic, not a reason to switch. */
+static inline float xlstm_gate_log_sigmoidf(float x) {
+    float u = (x < 0.0f) ? -x : x;
+    float t = xlstm_gate_expf(-u);
+    /* log1p(t)/t, minimax degree 9 on [0, 1]. */
+    float p = 1.000000000e+00f + t * (-4.999989271e-01f
+            + t * (3.332971036e-01f + t * (-2.495161593e-01f
+            + t * (1.966327429e-01f + t * (-1.526966691e-01f
+            + t * (1.054362357e-01f + t * (-5.637361109e-02f
+            + t * (1.954252645e-02f + t * -3.176057013e-03f))))))));
+    return ((x < 0.0f) ? x : 0.0f) - t * p;
+}
+
+static inline float xlstm_gate_sigmoidf(float x) {
+    return 1.0f / (1.0f + xlstm_gate_expf(-x));
+}
+
+/* tanh(x), two arms.
+ *
+ * Above |x| = 0.5: (1 - t) / (1 + t) with t = exp(-2|x|). t lands in (0, 1),
+ * so 1 - t is EXACT by Sterbenz whatever cancellation it appears to have,
+ * and the whole error is exp's plus one division.
+ *
+ * Below it: an odd minimax polynomial in x^2. That arm is not there for
+ * speed, although it is the cheaper of the two - it has no exponential and
+ * no division. It is there because the quotient form's error is ABSOLUTE:
+ * it stays near one ulp of 1.0 as x shrinks, so at x = 5e-4 it is already
+ * 500 ulp of the answer. That would not hurt this kernel, where c_input is
+ * an addend and nothing downstream divides by it, but it would make the
+ * accuracy this file claims depend on how the caller uses the value. Four
+ * more multiply-adds buy a figure that holds on its own. */
+static inline float xlstm_gate_tanhf(float x) {
+    float u = (x < 0.0f) ? -x : x;
+    float t, r;
+
+    if (u < 0.5f) {
+        /* tanh(x)/x, minimax degree 4 in x^2 on [0, 0.25]. */
+        t = x * x;
+        return x * (1.000000000e+00f + t * (-3.333306909e-01f
+                 + t * (1.332475096e-01f + t * (-5.298423767e-02f
+                 + t * 1.713134535e-02f))));
+    }
+    t = xlstm_gate_expf(-(u + u));
+    r = (1.0f - t) / (1.0f + t);
+    return (x < 0.0f) ? -r : r;
+}
+
+#else /* !XLSTM_APPROX_GATES - the default, and the numerics every bound in
+       * test/reference_data.h was derived against. */
+
+static inline float xlstm_gate_expf(float x) {
+    return expf(x);
+}
+
+static inline float xlstm_gate_log_sigmoidf(float x) {
+    return log_sigmoid_f32(x);
+}
+
+static inline float xlstm_gate_sigmoidf(float x) {
+    return sigmoid_f32(x);
+}
+
+static inline float xlstm_gate_tanhf(float x) {
+    return tanhf(x);
+}
+
+#endif /* XLSTM_APPROX_GATES */
+
 #endif /* XLSTM_UTIL_H_ */

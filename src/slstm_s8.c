@@ -80,7 +80,7 @@ void slstm_step_s8(
         float m_prev = m[i];
 
         /* 3. Stabilized gating */
-        float log_f_plus_m = m_prev + log_sigmoid_f32(f_raw);
+        float log_f_plus_m = m_prev + xlstm_gate_log_sigmoidf(f_raw);
 
         float m_new;
         if (n[i] == 0) {
@@ -90,10 +90,21 @@ void slstm_step_s8(
             m_new = xlstm_maxf(i_raw, log_f_plus_m);
         }
 
-        float i_gate = xlstm_minf(expf(i_raw - m_new), 1.0f);
-        float f_gate = xlstm_minf(expf(log_f_plus_m - m_new), 1.0f);
-        float o_gate = sigmoid_f32(o_raw);
-        float c_input = tanhf(z_raw);
+        /* Whichever operand m_new was taken from exponentiates a zero, and
+         * min(exp(0), 1) is 1 for any exp that does not return LESS than 1
+         * there - so the shortcut is the clamp's own answer, not an
+         * approximation of it, and it removes one of the two exponentials
+         * outright. m_new comes from xlstm_maxf or is i_raw itself, so at
+         * least one test hits on every path except the non-finite ones,
+         * where both arms already agree: exp(inf - inf) is NaN and
+         * xlstm_minf(NaN, 1.0f) returns 1.0f, the same value. */
+        float i_gate = (i_raw == m_new)
+                     ? 1.0f : xlstm_minf(xlstm_gate_expf(i_raw - m_new), 1.0f);
+        float f_gate = (log_f_plus_m == m_new)
+                     ? 1.0f
+                     : xlstm_minf(xlstm_gate_expf(log_f_plus_m - m_new), 1.0f);
+        float o_gate = xlstm_gate_sigmoidf(o_raw);
+        float c_input = xlstm_gate_tanhf(z_raw);
 
         /* 5. State updates in float */
         float c_new = f_gate * c_prev + i_gate * c_input;

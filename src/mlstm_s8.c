@@ -75,11 +75,18 @@ void mlstm_step_s8(
 
     /* 4. Stabilized gates (scalar m) */
     float m_prev = m[0];
-    float log_f_plus_m = log_sigmoid_f32(f_raw) + m_prev;
+    float log_f_plus_m = xlstm_gate_log_sigmoidf(f_raw) + m_prev;
     float m_new = xlstm_maxf(log_f_plus_m, i_raw);
 
-    float f_gate = expf(log_f_plus_m - m_new);
-    float i_gate = expf(i_raw - m_new);
+    /* No zero-exponent shortcut here, though one of these two arguments is
+     * always zero. slstm_s8.c takes it because its xlstm_minf(., 1.0f) makes
+     * it an identity; this spelling has no clamp, so at log_f_plus_m ==
+     * i_raw == +inf the shortcut would answer 1 where the exponential
+     * answers NaN. Its worth is what settles it: these two are per TIMESTEP,
+     * not per hidden unit, so the shortcut would remove one exponential from
+     * a step whose cost is the O(H^2) loop below. */
+    float f_gate = xlstm_gate_expf(log_f_plus_m - m_new);
+    float i_gate = xlstm_gate_expf(i_raw - m_new);
 
     /* 5. Update C: dequant -> float update -> requant */
     for (r = 0; r < H; ++r) {
@@ -127,7 +134,7 @@ void mlstm_step_s8(
         float n_f = (float)n[i] * params->n_quant.scale;
         qn += q[i] * n_f;
     }
-    float denom = xlstm_maxf(fabsf(qn), expf(-m_new)) + 1e-6f;
+    float denom = xlstm_maxf(fabsf(qn), xlstm_gate_expf(-m_new)) + 1e-6f;
 
     for (j = 0; j < H; ++j) {
         float qC_j = 0.0f;
@@ -135,7 +142,7 @@ void mlstm_step_s8(
             float C_f = (float)C[i * H + j] * params->C_quant.scale;
             qC_j += q[i] * C_f;
         }
-        float y_new = sigmoid_f32(o_raw[j]) * (qC_j / denom);
+        float y_new = xlstm_gate_sigmoidf(o_raw[j]) * (qC_j / denom);
 
         /* Requantize output to INT8 */
         float y_q = y_new / params->y_quant.scale + (float)params->y_quant.zero_point;

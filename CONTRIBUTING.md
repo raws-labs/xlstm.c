@@ -176,9 +176,9 @@ make perf-baseline     # re-record it, deliberately
 `make bench` prints wall-clock, which no shared runner reproduces closely
 enough to fail a build on. `make perf` counts retired instructions under
 callgrind instead, collection toggled on one kernel entry point at a time. It
-covers both `XLSTM_GATES` builds, including the f32 kernels in both - those two
-rows have to stay equal, because the switch is not supposed to reach them, and
-a pair that stopped matching would say it had. The
+covers both `XLSTM_GATES` builds, including the f32 kernels in both - the
+switch reaches all four kernels, so an f32 pair that came back equal would say
+it had stopped reaching them. The
 same binary on the same input gives the same count every run, so a move against
 `test/perf_baseline.txt` is a real change in work done, and CI fails on it. A
 deliberate change is a `make perf-baseline` and a one-line-per-case diff.

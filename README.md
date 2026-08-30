@@ -59,24 +59,25 @@ emulation.
 
 ## Gate transcendentals
 
-The INT8 cells evaluate exp, log-sigmoid, sigmoid and tanh once per hidden unit
+Both cells evaluate exp, log-sigmoid, sigmoid and tanh once per hidden unit
 per timestep. On a Cortex-M4F that, and not the matmul, is where the time goes:
 70% of everything outside the two INT8 matvecs is inside newlib's `expf`, `logf`
 and `tanhf`.
 
 `XLSTM_GATES=approx` (`-DXLSTM_APPROX_GATES=1`) swaps them for polynomial
 approximations - portable C99, no tables, the same code on every backend. They
-run in 2.1x fewer instructions than the libm they replace, which is 40% off
-everything outside the matvecs, and cost 1.3 to 3.0 ulp against a
-double-precision reference where that libm costs 0.5 to 2.1 - except
-`log(sigmoid(x))`, which libm reaches through `logf(1.0f + expf(-x))` at
-1.7e7 ulp, and which gets *more* accurate. Over the gated sizes the swap
-changes no INT8 output at all.
+run in 2.1x fewer instructions than the libm they replace, and cost 1.3 to 3.0
+ulp against a double-precision reference where that libm costs 0.5 to 2.1 -
+except `log(sigmoid(x))`, which libm reaches through `logf(1.0f + expf(-x))` at
+1.7e7 ulp, and which gets *more* accurate. On a Cortex-M4F the swap takes 28%
+to 41% off the INT8 sLSTM step, most at small `H`, where the tail dominates.
 
-It is opt-in because it is still a numerical change, and whether that is
-acceptable depends on what you calibrated against. The default build is exactly
-the arithmetic this library has always done; both are gated on the same vectors,
-and `make test` asserts the default is bit-identical to libm.
+Over the gated sizes it changes no INT8 output at all; f32 state moves by up to
+32 ulp after 24 steps. It is opt-in because that is still a numerical change,
+and whether it is acceptable depends on what you calibrated against. The
+default build is exactly the arithmetic this library has always done; both are
+gated on the same vectors, and `make test` asserts the default is bit-identical
+to libm.
 
 ## Build
 

@@ -648,10 +648,9 @@ PERF_ENV := GLIBC_TUNABLES=glibc.cpu.hwcaps=-FMA,-AVX2,-AVX
 
 PERF_BASELINE := test/perf_baseline.txt
 PERF_BACKENDS ?= ref sse2
-# Both gate builds, and the f32 rows in both on purpose. XLSTM_GATES must not
-# reach the f32 kernels at all, and two rows that have to stay equal is a
-# check of that; a change that routed slstm.c through the approximate helpers
-# would show up here as a pair that no longer matches.
+# Both gate builds, and the f32 rows in both on purpose. XLSTM_GATES reaches
+# all four kernels, so every pair here is expected to differ; an f32 pair that
+# came back equal would mean the switch had stopped reaching those kernels.
 PERF_GATES    ?= exact approx
 PERF_KERNELS  ?= slstm_f32 mlstm_f32 slstm_s8 mlstm_s8
 PERF_WIDTHS   ?= 16 64
@@ -754,7 +753,7 @@ perf-baseline:
 	  echo "# Checked by:                    make perf   (tolerance +$(PERF_TOL)% / -$(PERF_TOL_FAST)%)"; \
 	  echo "#"; \
 	  echo "# Two rows per case, one per XLSTM_GATES build (see include/xlstm_util.h)."; \
-	  echo "# The f32 pair must stay equal: the switch is not supposed to reach those kernels."; \
+	  echo "# Every pair should differ: the switch reaches the f32 kernels too."; \
 	  echo "#"; \
 	  echo "# Counts are the inclusive cost of one kernel entry point over $(PERF_STEPS) steps,"; \
 	  echo "# collection toggled on that symbol alone. Exact and reproducible for a given"; \

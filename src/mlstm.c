@@ -66,11 +66,11 @@ void mlstm_step_f32(
 
     /* 4. Stabilized gates (scalar m) */
     float m_prev = m[0];
-    float log_f_plus_m = log_sigmoid_f32(f_raw) + m_prev;
+    float log_f_plus_m = xlstm_gate_log_sigmoidf(f_raw) + m_prev;
     float m_new = fmaxf(log_f_plus_m, i_raw);
 
-    float f_gate = expf(log_f_plus_m - m_new);
-    float i_gate = expf(i_raw - m_new);
+    float f_gate = xlstm_gate_expf(log_f_plus_m - m_new);
+    float i_gate = xlstm_gate_expf(i_raw - m_new);
 
     /* 5. Update C: C[r][c] = f_gate * C[r][c] + i_gate * k[r] * v[c] */
     xlstm_rank1_update_f32(C, f_gate, i_gate, k, v, H);
@@ -99,14 +99,14 @@ void mlstm_step_f32(
     for (i = 0; i < H; ++i) {
         qn += q[i] * n[i];
     }
-    float denom = fmaxf(fabsf(qn), expf(-m_new)) + 1e-6f;
+    float denom = fmaxf(fabsf(qn), xlstm_gate_expf(-m_new)) + 1e-6f;
 
     /* q^T * C via vecmat (scatter-accumulate with contiguous row access) */
     float qC[XLSTM_MAX_HIDDEN];
     memset(qC, 0, (size_t)H * sizeof(float));
     xlstm_vecmat_f32(q, C, qC, H, H);
     for (j = 0; j < H; ++j) {
-        y[j] = sigmoid_f32(o_raw[j]) * (qC[j] / denom);
+        y[j] = xlstm_gate_sigmoidf(o_raw[j]) * (qC[j] / denom);
     }
 }
 

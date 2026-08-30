@@ -61,7 +61,7 @@ void slstm_step_f32(
         float n_prev = n[i];
         float m_prev = m[i];
 
-        float log_f_plus_m = m_prev + log_sigmoid_f32(f_raw);
+        float log_f_plus_m = m_prev + xlstm_gate_log_sigmoidf(f_raw);
 
         float m_new;
         if (n_prev == 0.0f) {
@@ -72,12 +72,12 @@ void slstm_step_f32(
         }
 
         /* Clamped exponential gates */
-        float i_gate = fminf(expf(i_raw - m_new), 1.0f);
-        float f_gate = fminf(expf(log_f_plus_m - m_new), 1.0f);
+        float i_gate = fminf(xlstm_gate_expf(i_raw - m_new), 1.0f);
+        float f_gate = fminf(xlstm_gate_expf(log_f_plus_m - m_new), 1.0f);
 
         /* Standard activations */
-        float o_gate = sigmoid_f32(o_raw);
-        float c_input = tanhf(z_raw);
+        float o_gate = xlstm_gate_sigmoidf(o_raw);
+        float c_input = xlstm_gate_tanhf(z_raw);
 
         /* State updates */
         float c_new = f_gate * c_prev + i_gate * c_input;

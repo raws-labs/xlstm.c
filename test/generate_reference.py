@@ -1004,24 +1004,24 @@ def _emit_case(f, tc, state_key, has_R):
         f.write(f"// B={tc['B']}, T={tc['T']}, I={tc['I']}, H={tc['H']}\n")
         if tc.get("note"):
             f.write(f"// {tc['note']}\n")
-        f.write(f"const float k{n}_W[] = {{{fmt(tc['W'])}}};\n")
+        f.write(f"inline const float k{n}_W[] = {{{fmt(tc['W'])}}};\n")
         if has_R:
-            f.write(f"const float k{n}_R[] = {{{fmt(tc['R'])}}};\n")
-        f.write(f"const float k{n}_b[] = {{{fmt(tc['b'])}}};\n")
-    f.write(f"const float k{n}_input[] = {{{fmt(tc['input'])}}};\n")
-    f.write(f"const float k{n}_expected_y[] = {{{fmt(tc['y'])}}};\n")
+            f.write(f"inline const float k{n}_R[] = {{{fmt(tc['R'])}}};\n")
+        f.write(f"inline const float k{n}_b[] = {{{fmt(tc['b'])}}};\n")
+    f.write(f"inline const float k{n}_input[] = {{{fmt(tc['input'])}}};\n")
+    f.write(f"inline const float k{n}_expected_y[] = {{{fmt(tc['y'])}}};\n")
     if tc.get("store_state", True):
-        f.write(f"const float k{n}_expected_{state_key}[] = {{{fmt(tc['c'])}}};\n")
-    f.write(f"const float k{n}_expected_n[] = {{{fmt(tc['n'])}}};\n")
-    f.write(f"const float k{n}_expected_m[] = {{{fmt(tc['m'])}}};\n")
+        f.write(f"inline const float k{n}_expected_{state_key}[] = {{{fmt(tc['c'])}}};\n")
+    f.write(f"inline const float k{n}_expected_n[] = {{{fmt(tc['n'])}}};\n")
+    f.write(f"inline const float k{n}_expected_m[] = {{{fmt(tc['m'])}}};\n")
     if tc["output"] is not None:
-        f.write(f"const float k{n}_expected_output[] = {{{fmt(tc['output'])}}};\n")
+        f.write(f"inline const float k{n}_expected_output[] = {{{fmt(tc['output'])}}};\n")
     if "tol_s8_per_channel" in tc:
         vals = ", ".join(f"{v:.8f}f" for v in tc["tol_s8_per_channel"])
-        f.write(f"const float k{n}_tol_s8_per_channel[] = {{{vals}}};\n")
+        f.write(f"inline const float k{n}_tol_s8_per_channel[] = {{{vals}}};\n")
     if "tol_s8_floor_per_channel" in tc:
         vals = ", ".join(f"{v:.8f}f" for v in tc["tol_s8_floor_per_channel"])
-        f.write(f"const float k{n}_tol_s8_floor_per_channel[] = {{{vals}}};\n")
+        f.write(f"inline const float k{n}_tol_s8_floor_per_channel[] = {{{vals}}};\n")
     # Per-element exit-state bounds, and the replica floors they were
     # derived from (see compute_state_tol_per_elem). The 'state' arrays are
     # skipped for a case that does not store its state golden at all, since
@@ -1032,9 +1032,9 @@ def _emit_case(f, tc, state_key, has_R):
         if key == "state" and not tc.get("store_state", True):
             continue
         vals = ", ".join(f"{v:.8f}f" for v in tc["tol_s8_state"][key])
-        f.write(f"const float k{n}_tol_s8_{suffix}_per_elem[] = {{{vals}}};\n")
+        f.write(f"inline const float k{n}_tol_s8_{suffix}_per_elem[] = {{{vals}}};\n")
         vals = ", ".join(f"{v:.8f}f" for v in tc["tol_s8_state_floor"][key])
-        f.write(f"const float k{n}_tol_s8_{suffix}_floor_per_elem[] = {{{vals}}};\n")
+        f.write(f"inline const float k{n}_tol_s8_{suffix}_floor_per_elem[] = {{{vals}}};\n")
     f.write("\n")
 
 
@@ -1103,7 +1103,7 @@ def _emit_table(f, cases, table_name, state_key, has_R):
     case last emitted them. `src` tracks that source case's name so the
     table points at the arrays that actually exist.
     """
-    f.write(f"static const XlstmRefCase {table_name}[] = {{\n")
+    f.write(f"inline const XlstmRefCase {table_name}[] = {{\n")
     src = None
     for tc in cases:
         n = tc["name"]
@@ -1132,7 +1132,7 @@ def _emit_table(f, cases, table_name, state_key, has_R):
             f'{st_fl}, {n_fl}, {m_fl}}},\n'
         )
     f.write("};\n")
-    f.write(f"static const int {table_name}Count = "
+    f.write(f"inline const int {table_name}Count = "
             f"(int)(sizeof({table_name}) / sizeof({table_name}[0]));\n\n")
 
 
@@ -1169,13 +1169,13 @@ def _emit_head2_fused(f, fused):
     f.write(f"#define kHead2_Hf {Hf}\n")
     f.write(f"#define kHead2_I {fused['I']}\n")
     f.write(f"#define kHead2_T {fused['T']}\n")
-    f.write(f"const float kHead2Fused_W[] = {{{fmt(fused['W'])}}};\n")
-    f.write(f"const float kHead2Fused_R[] = {{{fmt(fused['R'])}}};\n")
-    f.write(f"const float kHead2Fused_b[] = {{{fmt(fused['b'])}}};\n")
+    f.write(f"inline const float kHead2Fused_W[] = {{{fmt(fused['W'])}}};\n")
+    f.write(f"inline const float kHead2Fused_R[] = {{{fmt(fused['R'])}}};\n")
+    f.write(f"inline const float kHead2Fused_b[] = {{{fmt(fused['b'])}}};\n")
     f.write("// Final y of the NH=2 cell, [Hf], ordered [head][unit].\n")
-    f.write(f"const float kHead2_expected_y_joined[] = {{{fmt(fused['y_joined'])}}};\n")
+    f.write(f"inline const float kHead2_expected_y_joined[] = {{{fmt(fused['y_joined'])}}};\n")
     f.write("// Per-timestep output of the NH=2 cell, [NH][T][DH].\n")
-    f.write(f"const float kHead2_expected_output_joined[] = "
+    f.write(f"inline const float kHead2_expected_output_joined[] = "
             f"{{{fmt(fused['output_joined'])}}};\n\n")
 
 

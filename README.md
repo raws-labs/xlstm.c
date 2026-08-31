@@ -70,7 +70,8 @@ run in 2.1x fewer instructions than the libm they replace, and cost 1.3 to 3.0
 ulp against a double-precision reference where that libm costs 0.5 to 2.1 -
 except `log(sigmoid(x))`, which libm reaches through `logf(1.0f + expf(-x))` at
 1.7e7 ulp, and which gets *more* accurate. On a Cortex-M4F the swap takes 28%
-to 41% off the INT8 sLSTM step, most at small `H`, where the tail dominates.
+to 41% off the INT8 sLSTM step, most at small `H`, where the tail dominates. It
+is core-dependent: the M7 gains too, the M33 comes out 1% to 3% slower.
 
 Over the gated sizes it changes no INT8 output at all; f32 state moves by up to
 32 ulp after 24 steps. It is opt-in because that is still a numerical change,
@@ -92,13 +93,20 @@ gates, the instruction-count and mutation gates, and how to run them.
 
 ## Measured
 
-Cortex-M7, M4F and M33, cycle-accurate, INT8 against f32 with weights in SRAM
-on both sides.
+Cortex-M7, M4F and M33, on silicon, INT8 against f32 with operands in SRAM on
+both sides. Every run is in [bench/results/](bench/results/); method and limits
+are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-sLSTM runs 1.14x to 2.59x faster in INT8, and the gain grows with width. mLSTM
-halves its state for the same latency: the input projection quantizes, the state
+sLSTM in INT8 reaches 3.4x on the M7, 3.2x on the M4F and 1.4x on the M33, the
+gain growing with width. Below H = 8 it gives nothing back. mLSTM halves its
+state for roughly the same latency: the input projection quantizes, the state
 update stays float because the log-space stabilizer needs the range. So quantize
 mLSTM for footprint and sLSTM for speed.
+
+Against CMSIS-NN's `arm_lstm_unidirectional_s8` at equal MAC count, INT8 sLSTM
+built with `XLSTM_GATES=approx` takes 0.29x to 0.98x its cycles on M7 and M4F,
+and 0.37x to 1.1x on M33. The default exact build is up to 1.5x slower on the
+M4F.
 
 ## Adapters
 

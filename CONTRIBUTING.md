@@ -213,6 +213,31 @@ earlier `make test-ref` is newer than `src/xlstm_simd_sse2.c` and make finds it
 up to date - without that rebuild, an auto-detected `make bench` benchmarks
 `ref`.
 
+## Hardware results
+
+`bench/results/*.jsonl` is one file per board and gate build, straight from the
+boards. Lines are `XLSTM_PROVENANCE` (what was built and at what clock),
+`XLSTM_TIMING` (one per kernel and size), `XLSTM_TIMING_ENV` (sampling), and
+`XLSTM_XIPDIAG` (weights in flash versus SRAM, on the two boards with room for
+it). Nothing needs the harness to read: each timing line carries its own
+`macs_per_call`, so a comparison can be checked for equal work, and `exec_from`,
+so flash-bound rows cannot be mistaken for compute.
+
+Timings are the minimum over 17 samples of 8 calls. Repeat runs of one build
+move by about 1%, so results are quoted to two significant figures. The RP2350
+times off a 4 MHz counter, 250 ns a tick, which quantizes its smallest cases;
+its rows are SRAM-resident, since executing from XIP flash times flash
+bandwidth rather than the kernel.
+
+The CMSIS-NN rows compare `slstm_step_s8` against `arm_lstm_unidirectional_s8`
+at identical `macs_per_call`, but they are not the same model: sLSTM carries two
+extra states and a log-space stabilizer, and reads 6% to 33% more bytes per
+call. Read it as the cost of stabilized exponential gating against a mature
+vendor LSTM, not as one implementation of the same thing beating another.
+
+These are auditable, not reproducible: re-deriving them needs the same boards.
+The harness that produced them is not part of this repository.
+
 ## Changing a tolerance, a bound, or the generator
 
 ```bash

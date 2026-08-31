@@ -1,11 +1,26 @@
 # xlstm.c
 
-sLSTM and mLSTM inference kernels in portable C99, sized for microcontrollers.
-The two cell types from the [xLSTM paper](https://arxiv.org/abs/2405.04517)
-(Beck et al., 2024). Freestanding: nothing outside the C standard library, and
-you own every buffer.
+sLSTM and mLSTM inference kernels in portable C99. These are the two recurrent
+cell types from the [xLSTM paper](https://arxiv.org/abs/2405.04517) (Beck et
+al., 2024), written as freestanding code: nothing outside the C standard
+library, no allocator, no operating system, and every buffer belongs to the
+caller.
 
-## Use it
+Every available xLSTM implementation is shaped around training: PyTorch, CUDA,
+JAX. That is the right shape for research and the wrong one for a part with a
+few hundred kilobytes of RAM and no Python on it. Running one of these models
+outside a framework has meant writing the cells yourself.
+
+The recurrence is what makes that worth doing. Both cells carry a fixed amount
+of state between timesteps, and that state is independent of sequence length.
+The memory a deployment needs can therefore be worked out before it ships,
+rather than bounded by a worst case and hoped for.
+
+It is built for embedded targets, but nothing in it is embedded-specific. The
+same source compiles on a workstation, and there is an x86 backend because that
+is where most people will first try it.
+
+## Usage
 
 ```c
 #include "xlstm.h"
@@ -24,61 +39,78 @@ for (int t = 0; t < SEQ; ++t)
     slstm_step_f32(x[t], W, R, b, y, c, n, m, scratch, I, H, &params);
 ```
 
-`slstm_step_s8` is the same shape with quantized weights and scales: `c` and `n`
-narrow to int16, `m` stays float. Heads are the caller's outer loop - one call
-per head, over that head's slice and its own state.
+`slstm_step_s8` has the same shape, with quantized weights and their scales;
+`c` and `n` narrow to int16 while `m` stays float, because the log-space
+stabilizer needs the range.
 
-## Footprint
+Three things are worth knowing before the first call.
 
-Per head, state only, `H` = `hidden_size`:
+Nothing allocates. The scratch buffer is yours, the state arrays are yours, and
+the kernels touch neither the heap nor any global.
+
+`H` is the per-head width, `DH` in the reference implementation, not the fused
+width across all heads. Getting this wrong still runs, and produces plausible
+numbers from a different model.
+
+Heads are the caller's outer loop: one call per head, over that head's slice of
+the weights and its own state. The reference stores fused weights gate-major,
+so a head's rows are strided rather than contiguous, and the natural guess about
+the layout selects the wrong rows without complaining.
+`test/head_slicing_example.py` is a runnable worked example.
+
+## Memory and precision
+
+Two choices decide what a configuration needs: how wide the heads are, and what
+precision they run at.
+
+Memory per head, state only:
 
 | | sLSTM | mLSTM |
 |---|---|---|
 | f32 | 16H B | 4H^2 + 4H + 4 B |
 | INT8 | 9H B | 2H^2 + 2H + 4 B |
 
-mLSTM is quadratic in `H` and independent of sequence length - at H = 64 that is
-16,644 B per head, flat. `tools/footprint.py 64 64 8` adds weights and scratch
-and sizes a configuration against an SRAM budget.
+sLSTM is linear in `H` and stays cheap at any width worth deploying. mLSTM is
+quadratic, because its state is a matrix rather than a vector, and past roughly
+H = 32 that term dominates everything else in the budget. At H = 64 it is
+16,644 B per head, and it stays that size no matter how long the sequence runs.
+`tools/footprint.py 64 64 8` adds weights and scratch to this and sizes a whole
+configuration against an SRAM budget, which is usually the form the question
+actually takes.
+
+Precision is the other lever, and it does not pull evenly on the two cells.
+Quantizing sLSTM buys speed, several times over on the wider heads. Quantizing
+mLSTM halves its state but leaves latency roughly where it was, because only the
+input projection quantizes: the matrix update stays in float. So the useful rule
+is to quantize mLSTM when memory is the constraint and sLSTM when time is.
+
+There is a third lever if you want it. Both cells evaluate exp, log-sigmoid,
+sigmoid and tanh once per hidden unit per timestep, and on a Cortex-M4F that,
+rather than the matrix arithmetic, is where the time goes. `XLSTM_GATES=approx`
+swaps those four for polynomial approximations in portable C99, which takes
+roughly a third off the INT8 sLSTM step. It is opt-in because it is a real
+numerical change, and it is worth measuring on your own target rather than
+assuming: the M7 gains as well, the M33 comes out slightly slower.
+[CONTRIBUTING.md](CONTRIBUTING.md) has the accuracy bounds and the per-core
+figures.
 
 ## Backends
 
-Selected at compile time with `XLSTM_SIMD=`, auto-detected by default.
+One backend is selected at compile time with `XLSTM_SIMD=`, auto-detected if you
+do not pick.
 
 | backend | target |
 |---|---|
-| `ref` | any C99 (also Cortex-M0/M23, ESP32 classic) |
+| `ref` | any C99, including Cortex-M0/M23 and ESP32 classic |
 | `sse2` | x86, x86-64 |
-| `neon` | ARM Cortex-A |
+| `neon` | Arm Cortex-A |
 | `cortexm` | Cortex-M4/M7/M33, ARMv7E-M and ARMv8-M DSP |
 | `esp` | ESP32-S3, Xtensa LX7 PIE |
 | `helium` | Cortex-M55/M85, Armv8.1-M MVE |
 
-All six are gated per commit against the same PyTorch-derived vectors, under
-emulation.
-
-## Gate transcendentals
-
-Both cells evaluate exp, log-sigmoid, sigmoid and tanh once per hidden unit
-per timestep. On a Cortex-M4F that, and not the matmul, is where the time goes:
-70% of everything outside the two INT8 matvecs is inside newlib's `expf`, `logf`
-and `tanhf`.
-
-`XLSTM_GATES=approx` (`-DXLSTM_APPROX_GATES=1`) swaps them for polynomial
-approximations - portable C99, no tables, the same code on every backend. They
-run in 2.1x fewer instructions than the libm they replace, and cost 1.3 to 3.0
-ulp against a double-precision reference where that libm costs 0.5 to 2.1 -
-except `log(sigmoid(x))`, which libm reaches through `logf(1.0f + expf(-x))` at
-1.7e7 ulp, and which gets *more* accurate. On a Cortex-M4F the swap takes 28%
-to 41% off the INT8 sLSTM step, most at small `H`, where the tail dominates. It
-is core-dependent: the M7 gains too, the M33 comes out 1% to 3% slower.
-
-Over the gated sizes it changes no INT8 output at all; f32 state moves by up to
-32 ulp after 24 steps. It is opt-in because that is still a numerical change,
-and whether it is acceptable depends on what you calibrated against. The
-default build is exactly the arithmetic this library has always done; both are
-gated on the same vectors, and `make test` asserts the default is bit-identical
-to libm.
+`ref` is not a fallback in any apologetic sense. It is the correct choice on
+parts with no vector or DSP extension, and it is the implementation every
+accelerated backend is checked against.
 
 ## Build
 
@@ -88,38 +120,42 @@ make test       # sLSTM and mLSTM, f32 and INT8
 make bench      # H = 16, 32, 64, 128
 ```
 
-Needs `gcc` and `g++`. See [CONTRIBUTING.md](CONTRIBUTING.md) for the per-backend
-gates, the instruction-count and mutation gates, and how to run them.
-
-## Measured
-
-Cortex-M7, M4F and M33, on silicon, INT8 against f32 with operands in SRAM on
-both sides. Every run is in [bench/results/](bench/results/); method and limits
-are in [CONTRIBUTING.md](CONTRIBUTING.md).
-
-sLSTM in INT8 reaches 3.4x on the M7, 3.2x on the M4F and 1.4x on the M33, the
-gain growing with width. Below H = 8 it gives nothing back. mLSTM halves its
-state for roughly the same latency: the input projection quantizes, the state
-update stays float because the log-space stabilizer needs the range. So quantize
-mLSTM for footprint and sLSTM for speed.
-
-Against CMSIS-NN's `arm_lstm_unidirectional_s8` at equal MAC count, INT8 sLSTM
-built with `XLSTM_GATES=approx` takes 0.29x to 0.98x its cycles on M7 and M4F,
-and 0.37x to 1.1x on M33. The default exact build is up to 1.5x slower on the
-M4F.
-
-## Adapters
-
-Custom-op wrappers, f32 and INT8, that unpack framework tensors and call the core:
-[ONNX Runtime](adapters/onnxruntime/), [TFLM](adapters/tflm/),
-[MicroTVM](adapters/microtvm/), [ESP-DL](adapters/esp-dl/).
+Needs `gcc` and `g++`. [CONTRIBUTING.md](CONTRIBUTING.md) covers the per-backend
+checks and how to run them.
 
 ## Scope
 
-Cells only. Pre-LN, causal conv1d, projections, GroupNorm and the residual are
-caller-side, as is stacking.
+The scope of this kernel library is the two cells and nothing around them. An
+xLSTM block is more than its cell: pre-normalization, the causal conv1d, the up
+and down projections, GroupNorm and the residual all sit outside these
+functions, and stacking blocks into a model is yours as well. That is a chosen
+boundary rather than an unfinished edge. The cells are the part that repays
+being hand-written; the rest is ordinary code that a framework, or fifty lines
+of your own, will do just as well.
 
-`tools/` covers weight extraction from a PyTorch xLSTM, INT8 calibration, and
-footprint sizing.
+`tools/` covers the parts of getting a trained model in here that are easy to
+get wrong: extracting per-head weights from a PyTorch xLSTM, INT8 calibration,
+and footprint sizing. Each one checks itself against the reference data rather
+than asking you to trust it.
 
-Apache-2.0. Reference implementation: [NX-AI/xlstm](https://github.com/NX-AI/xlstm).
+## Adapters
+
+Custom-op wrappers, f32 and INT8, that unpack framework tensors and call the
+core: [ONNX Runtime](adapters/onnxruntime/), [TFLM](adapters/tflm/),
+[MicroTVM](adapters/microtvm/), [ESP-DL](adapters/esp-dl/).
+
+## Validation
+
+Every backend is checked on each commit against vectors derived from the PyTorch
+reference, at H = 1, 2, 8, 16, 17 and 64, in both precisions, under emulation
+where the instruction set is not the host's. `cortexm` is additionally verified
+on Cortex-M7, M4F and M33 silicon.
+
+Those boards are where the performance figures come from too. INT8 sLSTM runs
+several times faster than f32 on the wider heads, and built with
+`XLSTM_GATES=approx` it matches or beats CMSIS-NN's INT8 LSTM on the M7 and M4F
+at equal multiply-accumulate count. Raw runs are in
+[bench/results/](bench/results/), one file per board, and
+[CONTRIBUTING.md](CONTRIBUTING.md) describes the method and its limits.
+
+Reference implementation: [NX-AI/xlstm](https://github.com/NX-AI/xlstm).

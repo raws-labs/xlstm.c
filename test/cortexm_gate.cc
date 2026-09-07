@@ -532,12 +532,12 @@ void RunEdgeCases(void) {
 
         for (int i = 0; i < H * H; ++i) eC[i] = 0.25f * (float)(i % 11);
         EDGE_RUN("rank1_f32 C",
-                 xlstm_rank1_update_f32(eC, 0.9f, 0.1f, g_k, g_kv, H));
+                 xlstm_rank1_update_f32(eC, 0.9f, 0.1f, g_k, g_kv, H, H));
         EDGE_RUN("rank1_f32 v",
                  xlstm_rank1_update_f32(g_C, 0.9f, 0.1f, g_k,
                                         (const float*)Edge((size_t)H *
                                                            sizeof(float)),
-                                        H));
+                                        H, H));
     }
 
     std::printf("  %d shapes x 8 placements + %d widths x 2, no access past "

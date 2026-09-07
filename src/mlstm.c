@@ -73,7 +73,7 @@ void mlstm_step_f32(
     float i_gate = xlstm_gate_expf(i_raw - m_new);
 
     /* 5. Update C: C[r][c] = f_gate * C[r][c] + i_gate * k[r] * v[c] */
-    xlstm_rank1_update_f32(C, f_gate, i_gate, k, v, H);
+    xlstm_rank1_update_f32(C, f_gate, i_gate, k, v, H, H);
 
     /* Optional cell clipping */
     if (params && params->cell_clip > 0.0f) {

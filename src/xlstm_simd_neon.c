@@ -133,27 +133,27 @@ void xlstm_matvec_s8(const int8_t* M, const int8_t* v,
 }
 
 void xlstm_rank1_update_f32(float* C, float f_gate, float i_gate,
-                            const float* k, const float* v, int H)
+                            const float* k, const float* v, int rows, int cols)
 {
     int r, c;
-    int H4 = H & ~3;
+    int cols4 = cols & ~3;
     float32x4_t vf = vdupq_n_f32(f_gate);
     XLSTM_NEON_FLAGS;
 
-    for (r = 0; r < H; ++r) {
+    for (r = 0; r < rows; ++r) {
         float32x4_t vik = vdupq_n_f32(i_gate * k[r]);
-        float* Crow = C + r * H;
+        float* Crow = C + r * cols;
 
-        for (c = 0; c < H4; c += 4) {
+        for (c = 0; c < cols4; c += 4) {
             float32x4_t cv = vld1q_f32(Crow + c);
             float32x4_t vv = vld1q_f32(v + c);
             cv = vmlaq_f32(vmulq_f32(vf, cv), vik, vv);
             vst1q_f32(Crow + c, cv);
         }
-        /* c has advanced iff a vector pass ran; short of H is remainder. */
-        XLSTM_NEON_SEEN(c > 0, c < H);
+        /* c has advanced iff a vector pass ran; short of cols is remainder. */
+        XLSTM_NEON_SEEN(c > 0, c < cols);
 
-        for (; c < H; ++c) {
+        for (; c < cols; ++c) {
             Crow[c] = f_gate * Crow[c] + i_gate * k[r] * v[c];
         }
     }

@@ -44,10 +44,14 @@ void xlstm_matvec_f32(const float* M, const float* v,
 void xlstm_matvec_s8(const int8_t* M, const int8_t* v,
                      int32_t* out, int rows, int cols, int32_t v_zp);
 
-/* Rank-1 update for mLSTM cell matrix (row-major H x H).
- * C[r*H+c] = f_gate * C[r*H+c] + i_gate * k[r] * v[c] */
+/* Rank-1 update for mLSTM cell matrix (row-major rows x cols).
+ * C[r*cols+c] = f_gate * C[r*cols+c] + i_gate * k[r] * v[c]
+ *
+ * rows is the q/k width and cols the v width; k is [rows], v is [cols]. They
+ * are equal for a square cell, which is every case this library shipped
+ * before the two were split, and the square path is bit-identical to it. */
 void xlstm_rank1_update_f32(float* C, float f_gate, float i_gate,
-                            const float* k, const float* v, int H);
+                            const float* k, const float* v, int rows, int cols);
 
 /* Left-multiply (vec * mat) for mLSTM output: out[j] = sum_i q[i] * M[i*cols+j]
  * M is row-major [rows x cols]. out must be zeroed by caller. */

@@ -339,8 +339,8 @@ bool CheckRank1(int H, int coff, int koff, int voff, float f_gate,
      * representable and a contraction difference has somewhere to show up. */
     for (int i = 0; i < H * H; ++i)
         C[i] = g_Cref[i] = 0.75f - (float)((i * 29) % 97) / 96.0f;
-    xlstm_rank1_update_f32(C, f_gate, i_gate, k, v, H);
-    xlstm_scalar_rank1_update_f32(g_Cref, f_gate, i_gate, k, v, H);
+    xlstm_rank1_update_f32(C, f_gate, i_gate, k, v, H, H);
+    xlstm_scalar_rank1_update_f32(g_Cref, f_gate, i_gate, k, v, H, H);
 
     std::snprintf(shape, sizeof shape, "H=%d C+%d k+%d v+%d", H, coff, koff,
                   voff);
@@ -575,10 +575,10 @@ bool TestEdge(void) {
             float* ev = (float*)Edge(n * (int)sizeof(float));
 
             for (int i = 0; i < nn; ++i) eC[i] = 0.25f * (float)(i % 11);
-            xlstm_rank1_update_f32(eC, 0.9f, 0.1f, g_k, g_kv, n);
+            xlstm_rank1_update_f32(eC, 0.9f, 0.1f, g_k, g_kv, n, n);
 
             for (int i = 0; i < n; ++i) ev[i] = 0.5f - (float)(i % 5);
-            xlstm_rank1_update_f32(g_C, 0.9f, 0.1f, g_k, ev, n);
+            xlstm_rank1_update_f32(g_C, 0.9f, 0.1f, g_k, ev, n, n);
         }
 
         /* vecmat reads the last columns of every row under a predicate; on

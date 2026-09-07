@@ -100,6 +100,13 @@ S_MATVEC = """        for (j = 0; j < cols; ++j) {
             acc += M[i * cols + j] * v[j];"""
 S_MATVEC_S8 = """        for (j = 0; j < cols; ++j) {
             acc += (int32_t)M[i * cols + j] * ((int32_t)v[j] - v_zp);"""
+# mlstm_s8.c copies DV outputs per step where slstm_s8.c copies H. Derived
+# from TAIL rather than restated, so the two cannot drift in structure -
+# after_eval appends its snippet inside the function, and a stray brace
+# here puts it outside.
+M_TAIL = (TAIL.replace("i < H;", "i < DV;")
+              .replace("* H + i", "* DV + i"))
+
 SSE_TAIL_F32 = """        for (; j < cols; ++j) {
             s += row[j] * v[j];"""
 SSE_TAIL_S8 = """        for (; j < cols; ++j) {
@@ -111,7 +118,7 @@ SSE_TAIL_S8 = """        for (; j < cols; ++j) {
 SSE_VEC_F32 = """        for (j = 0; j < cols4; j += 4) {
             __m128 m = _mm_loadu_ps(row + j);"""
 SSE_VEC_S8 = "        for (j = 0; j < cols8; j += 8) {"
-SSE_VEC_RANK1 = "        for (c = 0; c < H4; c += 4) {"
+SSE_VEC_RANK1 = "        for (c = 0; c < cols4; c += 4) {"
 SSE_VEC_VECMAT = """        for (j = 0; j < cols4; j += 4) {
             __m128 mv = _mm_loadu_ps(Mrow + j);"""
 
@@ -122,7 +129,7 @@ NE_TAIL_F32 = """        float s = vaddvq_f32(acc);
 NE_TAIL_S8 = """        int32_t s = vaddvq_s32(acc);
         for (; j < cols; ++j) {
             s += (int32_t)row[j] * ((int32_t)v[j] - v_zp);"""
-NE_TAIL_RANK1 = """        for (; c < H; ++c) {
+NE_TAIL_RANK1 = """        for (; c < cols; ++c) {
             Crow[c] = f_gate * Crow[c] + i_gate * k[r] * v[c];"""
 NE_TAIL_VECMAT = """        for (; j < cols; ++j) {
             out[j] += q[i] * Mrow[j];"""
@@ -132,7 +139,7 @@ NE_LANES = """            acc = vmlal_s16(acc, vget_low_s16(m16), vget_low_s16(v
 NE_VEC_F32 = """        for (j = 0; j < cols4; j += 4) {
             float32x4_t m = vld1q_f32(row + j);"""
 NE_VEC_S8 = "        for (j = 0; j < cols8; j += 8) {"
-NE_VEC_RANK1 = "        for (c = 0; c < H4; c += 4) {"
+NE_VEC_RANK1 = "        for (c = 0; c < cols4; c += 4) {"
 NE_VEC_VECMAT = """        for (j = 0; j < cols4; j += 4) {
             float32x4_t mv = vld1q_f32(Mrow + j);"""
 
@@ -161,7 +168,7 @@ CM_BLOCK8 = "        for (; i + 7 < rows; i += 8) {"
 EP_F32 = "    const int fast = cols >= 7 && rows >= tile;"
 EP_S8 = """    const int fast = cols > 0 &&
                      v_zp >= -XLSTM_ESP_ZP_MAX && v_zp <= XLSTM_ESP_ZP_MAX;"""
-EP_RANK1 = "    const int fast = H >= 7;"
+EP_RANK1 = "    const int fast = cols >= 7;"
 EP_VECMAT = "    const int wide = (cols % 4 == 0) && cols >= 7;"
 EP_UPPER = ("        mh = (const int8_t*)((uintptr_t)ml"
             " + ((sm + t > 16) ? 16u : 0u));")
@@ -171,7 +178,7 @@ HL_F32 = """    if (cols <= 0 || rows <= 0) {
         XLSTM_HL_COUNT(matvec_f32, 0, 0);"""
 HL_S8 = """    if (cols <= 0 || rows <= 0) {
         XLSTM_HL_COUNT(matvec_s8, 0, 0);"""
-HL_RANK1 = """    if (H <= 0) {
+HL_RANK1 = """    if (rows <= 0 || cols <= 0) {
         XLSTM_HL_COUNT(rank1_f32, 0, 0);"""
 HL_VECMAT = """    if (rows <= 0 || cols <= 0) {
         XLSTM_HL_COUNT(vecmat_f32, 0, 0);"""
@@ -203,8 +210,11 @@ def drift(f):
 
 def after_eval(s_snippet, m_snippet):
     """Corrupt state after the timestep loop, where it can no longer reach
-    output[] - only the exit-state assertions can see it."""
-    return [(S8, TAIL, TAIL + s_snippet), (M8, TAIL, TAIL + m_snippet)]
+    output[] - only the exit-state assertions can see it.
+
+    The two cells no longer share the tail: mlstm_s8.c copies DV outputs per
+    step where slstm_s8.c copies H, so each gets its own anchor."""
+    return [(S8, TAIL, TAIL + s_snippet), (M8, M_TAIL, M_TAIL + m_snippet)]
 
 
 # --- signatures: WHICH assertion has to fire ------------------------------
@@ -246,7 +256,7 @@ CHFLOOR = r"FAIL floor-consistency ch\["
 # mismatch while the counter check itself had gone blind.
 ESP_PATH_F32 = r"FAIL rows=\d+ cols=\d+ M\+\d+ v\+\d+: expected the \w+ path"
 ESP_PATH_S8 = r"FAIL s8 rows=\d+ .*: expected the \w+ path"
-ESP_PATH_RANK1 = r"FAIL rank1 H=\d+ .*: expected fast\+"
+ESP_PATH_RANK1 = r"FAIL rank1 \d+x\d+ .*: expected fast\+"
 ESP_PATH_VECMAT = r"FAIL vecmat rows=\d+ .*: expected wide\+"
 
 
@@ -286,16 +296,16 @@ MUTANTS = [
     ("A3", "activation drift y * 1.05", "fail", CHFLOOR, EVERY, drift("1.05")),
     ("B1", "final y zeroed at H=8, output[] correct", "fail", chan("y"), EVERY,
      after_eval("    if (H == 8) { for (i = 0; i < B * H; ++i) y[i] = 0; }\n",
-                "    if (H == 8) { for (i = 0; i < B * H; ++i) y[i] = 0; }\n")),
+                "    if (DV == 8) { for (i = 0; i < B * DV; ++i) y[i] = 0; }\n")),
     ("B2", "exit state zeroed", "fail", elem("m"), EVERY,
      after_eval("    for (i = 0; i < B * H; ++i) { c[i] = 0; n[i] = 0;"
                 " m[i] = 0.0f; }\n",
-                "    for (i = 0; i < B * H * H; ++i) C[i] = 0;\n"
-                "    for (i = 0; i < B * H; ++i) n[i] = 0;\n"
+                "    for (i = 0; i < B * DQ * DV; ++i) C[i] = 0;\n"
+                "    for (i = 0; i < B * DQ; ++i) n[i] = 0;\n"
                 "    for (i = 0; i < B; ++i) m[i] = 0.0f;\n")),
     ("B3", "sub-maximum state elements zeroed", "fail", elem("c"), HOST,
      after_eval(SUBMAX % "tt[0] = c; len[0] = B * H; tt[1] = n; len[1] = B * H;",
-                SUBMAX % "tt[0] = C; len[0] = B * H * H; tt[1] = n; len[1] = B * H;")),
+                SUBMAX % "tt[0] = C; len[0] = B * DQ * DV; tt[1] = n; len[1] = B * DQ;")),
     ("C1", "state requantization drift 1.05x", "fail", sfloor("n"), HOST,
      [(S8, SCQ, SCQ.replace("c_new /", "1.05f * c_new /")),
       (S8, NQ, NQ.replace("n_new /", "1.05f * n_new /")),
@@ -342,7 +352,7 @@ MUTANTS = [
      [(SSE2, SSE_VEC_S8, SSE_VEC_S8.replace("j < cols8", "j < 0"))]),
     ("S3", "sse2 rank-1 update never enters its vector body", "fail",
      vecpath("rank1_f32"), ("sse2",),
-     [(SSE2, SSE_VEC_RANK1, SSE_VEC_RANK1.replace("c < H4", "c < 0"))]),
+     [(SSE2, SSE_VEC_RANK1, SSE_VEC_RANK1.replace("c < cols4", "c < 0"))]),
     ("S4", "sse2 vecmat never enters its vector body", "fail",
      vecpath("vecmat_f32"), ("sse2",),
      [(SSE2, SSE_VEC_VECMAT, SSE_VEC_VECMAT.replace("j < cols4", "j < 0"))]),
@@ -363,7 +373,7 @@ MUTANTS = [
      [(NEON, NE_TAIL_S8, NE_TAIL_S8.replace("j < cols;", "j < cols8;"))]),
     ("N3", "neon rank-1 update skips its scalar tail", "fail", near("y"),
      ("neon",),
-     [(NEON, NE_TAIL_RANK1, NE_TAIL_RANK1.replace("c < H;", "c < H4;"))]),
+     [(NEON, NE_TAIL_RANK1, NE_TAIL_RANK1.replace("c < cols;", "c < cols4;"))]),
     ("N4", "neon vecmat skips its scalar tail", "fail", near("y"), ("neon",),
      [(NEON, NE_TAIL_VECMAT, NE_TAIL_VECMAT.replace("j < cols;",
                                                     "j < cols4;"))]),
@@ -387,7 +397,7 @@ MUTANTS = [
      [(NEON, NE_VEC_S8, NE_VEC_S8.replace("j < cols8", "j < 0"))]),
     ("N9", "neon rank-1 update never enters its vector body", "fail",
      vecpath("rank1_f32"), ("neon",),
-     [(NEON, NE_VEC_RANK1, NE_VEC_RANK1.replace("c < H4", "c < 0"))]),
+     [(NEON, NE_VEC_RANK1, NE_VEC_RANK1.replace("c < cols4", "c < 0"))]),
     ("N10", "neon vecmat never enters its vector body", "fail",
      vecpath("vecmat_f32"), ("neon",),
      [(NEON, NE_VEC_VECMAT, NE_VEC_VECMAT.replace("j < cols4", "j < 0"))]),
@@ -439,7 +449,7 @@ MUTANTS = [
      [(ESP, EP_S8, EP_S8.replace("= cols", "= 0 && cols"))]),
     ("P3", "esp rank-1 update never enters its 128-bit body", "fail",
      ESP_PATH_RANK1, ("esp",),
-     [(ESP, EP_RANK1, EP_RANK1.replace("= H", "= 0 && H"))]),
+     [(ESP, EP_RANK1, EP_RANK1.replace("= cols", "= 0 && cols"))]),
     ("P4", "esp vecmat never takes its 128-bit load of M", "fail",
      ESP_PATH_VECMAT, ("esp",),
      [(ESP, EP_VECMAT, EP_VECMAT.replace("= (cols", "= 0 && (cols"))]),
@@ -461,7 +471,7 @@ MUTANTS = [
      [(HELIUM, HL_S8, HL_S8.replace("if (cols", "if (1 || cols"))]),
     ("H3", "helium rank-1 update never enters its vector body", "fail",
      vecpath("rank1_f32"), ("helium",),
-     [(HELIUM, HL_RANK1, HL_RANK1.replace("if (H", "if (1 || H"))]),
+     [(HELIUM, HL_RANK1, HL_RANK1.replace("if (rows", "if (1 || rows"))]),
     ("H4", "helium vecmat never enters its vector body", "fail",
      vecpath("vecmat_f32"), ("helium",),
      [(HELIUM, HL_VECMAT, HL_VECMAT.replace("if (rows", "if (1 || rows"))]),

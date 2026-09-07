@@ -203,7 +203,7 @@ TfLiteStatus MLstmEvalInt8(TfLiteContext* context, TfLiteNode* node,
         op_data->batch_size,
         op_data->time_steps,
         op_data->input_size,
-        op_data->hidden_size,
+        op_data->hidden_size, op_data->hidden_size,
         &params);
 
     micro_context->DeallocateTempTfLiteTensor(input);

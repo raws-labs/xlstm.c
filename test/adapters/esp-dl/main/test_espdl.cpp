@@ -294,14 +294,14 @@ bool TestMLstmInt8Forward() {
     float ref_m[1] = {0};
     int32_t scratch[4 * H + 2] = {0};
     mlstm_eval_s8(x, W, b, ref_y, ref_C, ref_n, ref_m, ref_out, scratch,
-                  B, T, I, H, &params);
+                  B, T, I, H, H, &params);
 
     ok &= ExpectNonTrivial(ref_out, T * H);
     ok &= ExpectEqual("output", ref_out, t_out.get_element_ptr<int8_t>(), T * H);
 
     mod.forward(tensors);
     mlstm_eval_s8(x, W, b, ref_y, ref_C, ref_n, ref_m, ref_out, scratch,
-                  B, T, I, H, &params);
+                  B, T, I, H, H, &params);
     ok &= ExpectEqual("output (2nd call, state carried forward)",
                       ref_out, t_out.get_element_ptr<int8_t>(), T * H);
     return ok;

@@ -164,7 +164,7 @@ static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
 
     mlstm_eval_s8(s.input_q, s.W_q, s.b_q,
                   y, C, n_state, m_state, output, scratch,
-                  tc->B, T, I, H, &s.params);
+                  tc->B, T, I, H, H, &s.params);
 
     xlstm_dequantize_s8_to_f32(y, y_out, H, &s.params.y_quant);
     if (m_out) m_out[0] = m_state[0];

@@ -154,7 +154,7 @@ void MLSTM::forward_s8(std::vector<dl::TensorBase*>& tensors) {
         m_y_q, m_C_q, m_n_q, m_m,
         output->get_element_ptr<int8_t>(),
         m_scratch_q,
-        batch_size, time_steps, input_size, m_hidden_size,
+        batch_size, time_steps, input_size, m_hidden_size, m_hidden_size,
         &params);
 }
 

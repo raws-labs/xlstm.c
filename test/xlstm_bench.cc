@@ -236,7 +236,7 @@ static void bench_mlstm_s8(int H, int steps) {
     params.n_quant = {0.001f, 0};
 
     auto step = [&]() {
-        mlstm_step_s8(x, W_q, b_q, y, C, n, &m_state, scratch, I, H, &params);
+        mlstm_step_s8(x, W_q, b_q, y, C, n, &m_state, scratch, I, H, H, &params);
     };
 
     int iters = steps > 0 ? steps : calibrate(step);

@@ -44,14 +44,15 @@ typedef struct {
 
 /* NOTE ON HIDDEN SIZE AND HEADS
  *
- * hidden_size is the PER-HEAD width (DH in the NX-AI reference), not the
+ * qk_size and v_size are PER-HEAD widths (DHQK and DHV in the reference),
+ * not the
  * model width. This kernel implements one head.
  *
  * For a multi-head cell, slice the weights per head and call this function
  * once per head, then concatenate the outputs. State buffers (y, C, n, m)
  * are per head and must not be shared between heads.
  *
- * The cell matrix C is [hidden_size x hidden_size] PER HEAD. Total state
+ * The cell matrix C is [qk_size x v_size] PER HEAD. Total state
  * therefore grows as num_heads * DH * DH, not as (num_heads * DH)^2 - which
  * is the whole memory argument for running xLSTM on an MCU.
  *
@@ -66,39 +67,43 @@ typedef struct {
  * State pointers (y, C, n, m) are updated in-place.
  * C is a flattened HxH matrix (row-major, INT16).
  * m is a scalar (single float).
- * Caller must provide a scratch buffer of at least (4*H+2) int32_t. */
+ * Caller must provide a scratch buffer of at least
+ * (2*qk_size+2*v_size+2) int32_t. */
 void mlstm_step_s8(
     const int8_t* x,          /* [I] */
-    const int8_t* W_q,        /* [(4*H+2), I] */
-    const int32_t* b_q,       /* [4*H+2] */
-    int8_t* y,                /* [H] out */
-    int16_t* C,               /* [H*H] in/out */
-    int16_t* n,               /* [H] in/out */
+    const int8_t* W_q,        /* [(2*qk_size+2*v_size+2), I] */
+    const int32_t* b_q,       /* [2*qk_size+2*v_size+2] */
+    int8_t* y,                /* [v_size] out */
+    int16_t* C,               /* [qk_size*v_size] in/out */
+    int16_t* n,               /* [qk_size] in/out */
     float* m,                 /* [1] in/out */
-    int32_t* scratch,         /* [4*H+2] */
+    int32_t* scratch,         /* [2*qk_size+2*v_size+2] */
     int input_size,
-    int hidden_size,
+    int qk_size,
+    int v_size,
     const MlstmS8Params* params);
 
 /* Full sequence evaluation (INT8 quantized): batch + time loop.
  *
  * Processes input[B, T, I] and writes output[B, T, H] (all INT8).
  * State tensors: y[B,H] INT8, C[B,H*H] INT16, n[B,H] INT16, m[B,1] float.
- * Caller must provide a scratch buffer of at least (4*H+2) int32_t. */
+ * Caller must provide a scratch buffer of at least
+ * (2*qk_size+2*v_size+2) int32_t. */
 void mlstm_eval_s8(
     const int8_t* input,      /* [B, T, I] */
-    const int8_t* W_q,        /* [(4*H+2), I] */
-    const int32_t* b_q,       /* [4*H+2] */
-    int8_t* y,                /* [B, H] in/out */
-    int16_t* C,               /* [B, H*H] in/out */
-    int16_t* n,               /* [B, H] in/out */
+    const int8_t* W_q,        /* [(2*qk_size+2*v_size+2), I] */
+    const int32_t* b_q,       /* [2*qk_size+2*v_size+2] */
+    int8_t* y,                /* [B, v_size] in/out */
+    int16_t* C,               /* [B, qk_size*v_size] in/out */
+    int16_t* n,               /* [B, qk_size] in/out */
     float* m,                 /* [B, 1] in/out */
-    int8_t* output,           /* [B, T, H] */
-    int32_t* scratch,         /* [4*H+2] */
+    int8_t* output,           /* [B, T, v_size] */
+    int32_t* scratch,         /* [2*qk_size+2*v_size+2] */
     int batch_size,
     int time_steps,
     int input_size,
-    int hidden_size,
+    int qk_size,
+    int v_size,
     const MlstmS8Params* params);
 
 #ifdef __cplusplus

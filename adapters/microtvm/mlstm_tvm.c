@@ -142,7 +142,7 @@ static int32_t mlstm_eval_s8_packed(TVMValue* args, int* type_codes) {
         dl_float_ptr(m),
         (int8_t*)dl_ptr(output),
         scratch,
-        batch_size, time_steps, input_size, hidden_size,
+        batch_size, time_steps, input_size, hidden_size, hidden_size,
         &params);
 
     return 0;

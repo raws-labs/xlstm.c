@@ -340,7 +340,7 @@ bool TestMatvecS8(void) {
  * store that ran past the end of a row into the start of the next would be
  * caught here rather than left to the golden vectors.
  */
-bool CheckRank1(int H, int coff, int koff, int voff, float f_gate,
+bool CheckRank1(int rows, int cols, int coff, int koff, int voff, float f_gate,
                 float i_gate, unsigned long want_vec, unsigned long want_tail) {
     float* C = g_C + coff;
     const float* k = g_k + koff;
@@ -353,26 +353,26 @@ bool CheckRank1(int H, int coff, int koff, int voff, float f_gate,
 
     /* Mantissas with no short binary form, so that f*C + ik*v is not exactly
      * representable and a contraction difference has somewhere to show up. */
-    for (int i = 0; i < H * H; ++i)
+    for (int i = 0; i < rows * cols; ++i)
         C[i] = g_Cref[i] = 0.75f - (float)((i * 29) % 97) / 96.0f;
-    xlstm_rank1_update_f32(C, f_gate, i_gate, k, v, H, H);
-    xlstm_scalar_rank1_update_f32(g_Cref, f_gate, i_gate, k, v, H, H);
+    xlstm_rank1_update_f32(C, f_gate, i_gate, k, v, rows, cols);
+    xlstm_scalar_rank1_update_f32(g_Cref, f_gate, i_gate, k, v, rows, cols);
 
-    std::snprintf(shape, sizeof shape, "H=%d C+%d k+%d v+%d", H, coff, koff,
-                  voff);
+    std::snprintf(shape, sizeof shape, "%dx%d C+%d k+%d v+%d", rows, cols, coff,
+                  koff, voff);
     ok &= CheckSplit("rank1_f32", shape,
                      XG(rank1_f32, vector) - v0,
                      XG(rank1_f32, scalar) - s0,
                      XG(rank1_f32, tail) - t0, want_vec, want_tail);
 
-    for (int i = 0; i < H * H; ++i) {
+    for (int i = 0; i < rows * cols; ++i) {
         if (C[i] != g_Cref[i]) {
             std::printf("  FAIL rank1_f32 %s C[%d] (row %d col %d): got %.9g, "
                         "reference %.9g (diff %.2e). Nothing here sums across "
                         "elements - a difference is a lane order, a store that "
                         "ran into the next row, or a contraction that stopped "
                         "matching the scalar body.\n",
-                        shape, i, i / H, i % H, (double)C[i],
+                        shape, i, i / cols, i % cols, (double)C[i],
                         (double)g_Cref[i], (double)std::fabs(C[i] - g_Cref[i]));
             ok = false;
             break;
@@ -387,11 +387,23 @@ bool TestRank1(void) {
         g_kv[i] = (float)((i * 59) % 61) / 30.0f - 1.0f;
     }
 
-    static const struct { int H; unsigned long vec, tail; } kCases[] = {
-        {0, 0, 0},                                   /* no work */
-        {1, 0, 1},  {2, 0, 1},  {3, 0, 1},           /* under the width */
-        {4, 1, 0},  {8, 1, 0},  {16, 1, 0}, {32, 1, 0}, {64, 1, 0},
-        {5, 1, 1},  {7, 1, 1},  {9, 1, 1},  {17, 1, 1}, {31, 1, 1},
+    /* vec and tail are keyed on cols alone - it is the vectorised direction -
+     * while rows only decides whether any work happens at all. A rectangular
+     * shape is therefore not a new counter rule, which is the point: the same
+     * rule has to keep holding once the two extents are free to differ. */
+    static const struct { int rows, cols; unsigned long vec, tail; } kCases[] = {
+        {0, 0, 0, 0},                                        /* no work */
+        {1, 1, 0, 1},  {2, 2, 0, 1},  {3, 3, 0, 1},          /* under the width */
+        {4, 4, 1, 0},  {8, 8, 1, 0},  {16, 16, 1, 0},
+        {32, 32, 1, 0}, {64, 64, 1, 0},
+        {5, 5, 1, 1},  {7, 7, 1, 1},  {9, 9, 1, 1},
+        {17, 17, 1, 1}, {31, 31, 1, 1},
+        /* Rectangular. Both orders, and a narrow one whose cols fall under the
+         * vector width while its rows do not - the shape most likely to expose
+         * a bound that is still counting the wrong extent. */
+        {5, 13, 1, 1},  {13, 5, 1, 1},  {3, 16, 1, 0}, {16, 3, 0, 1},
+        {8, 12, 1, 0},  {12, 8, 1, 0},  {1, 7, 1, 1},  {7, 1, 0, 1},
+        {17, 4, 1, 0},  {4, 17, 1, 1},  {2, 64, 1, 0}, {64, 2, 0, 1},
     };
     /* One pair with both gates ordinary, one with a tiny i_gate, so the two
      * products differ in exponent by enough that the order they are combined
@@ -408,8 +420,8 @@ bool TestRank1(void) {
             for (int coff = 0; coff < 4; ++coff) {
                 for (int koff = 0; koff < 4; ++koff) {
                     for (int voff = 0; voff < 4; ++voff) {
-                        ok &= CheckRank1(kCases[s].H, coff, koff, voff,
-                                         kGates[g].f, kGates[g].i,
+                        ok &= CheckRank1(kCases[s].rows, kCases[s].cols, coff,
+                                         koff, voff, kGates[g].f, kGates[g].i,
                                          kCases[s].vec, kCases[s].tail);
                     }
                 }

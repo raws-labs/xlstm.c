@@ -5,11 +5,13 @@ write any code.
     python3 tools/footprint.py               # self-check (stdlib only)
     python3 tools/footprint.py 64 32 8       # hidden_size, input_size, heads
     python3 tools/footprint.py 64 32 8 256   # ... and a 256 KB SRAM budget
+    python3 tools/footprint.py 64 32 4 --dv 128   # mLSTM with qk != v width
 
 hidden_size is the PER-HEAD width (DH in the reference), so heads multiply
 everything below. The number that usually decides the answer is mLSTM state:
-its cell state is a hidden_size x hidden_size matrix PER HEAD, so it grows
-quadratically while everything else grows linearly.
+its cell state is a qk_size x v_size matrix PER HEAD, so it grows with the
+product while everything else grows linearly. The two widths are equal unless
+--dv says otherwise, and then hidden_size is read as the query/key width.
 
 What is counted, and why the two cells differ by one tensor: sLSTM's y is
 recurrent (slstm.h marks it in/out) and is carried state; mLSTM's y is an
@@ -36,33 +38,42 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TEST = os.path.join(os.path.dirname(HERE), "test")
 
 
-def state_bytes(cell, h, s8):
-    """Carried state, one head. m is float32 in both precisions."""
+def state_bytes(cell, h, s8, dv=None):
+    """Carried state, one head. m is float32 in both precisions.
+
+    For mLSTM, h is the query/key width and dv the value width; dv defaults to
+    h, which is the square cell. C is [h x dv] and n is [h], so a caller that
+    sizes n from the output width is wrong the moment the two differ."""
     if cell == "slstm":
         return (h * (1 if s8 else 4)      # y  int8  / float
                 + h * (2 if s8 else 4)    # c  int16 / float
                 + h * (2 if s8 else 4)    # n  int16 / float
                 + h * 4)                  # m  float, always
-    return (h * h * (2 if s8 else 4)      # C  [h*h] int16 / float
-            + h * (2 if s8 else 4)        # n  int16 / float
+    dv = h if dv is None else dv
+    return (h * dv * (2 if s8 else 4)     # C  [h*dv] int16 / float
+            + h * (2 if s8 else 4)        # n  [h]    int16 / float
             + 4)                          # m  one float per head
 
 
-def weight_bytes(cell, h, i, s8):
+def weight_bytes(cell, h, i, s8, dv=None):
     """Weights, one head. The INT8 bias is int32, not int8: it is added into
     the accumulator at W_scale * x_scale and never fits a byte."""
     if cell == "slstm":
         return (4 * h * i * (1 if s8 else 4)    # W [4h, i]
                 + 4 * h * h * (1 if s8 else 4)  # R [4h, h]
                 + 4 * h * 4)                    # b [4h] int32 or float
-    rows = 4 * h + 2                            # q,k,v, i,f scalars, o
+    dv = h if dv is None else dv
+    rows = 2 * h + 2 * dv + 2                   # q,k(h) v(dv) i,f scalars o(dv)
     return rows * i * (1 if s8 else 4) + rows * 4
 
 
-def scratch_bytes(cell, h):
+def scratch_bytes(cell, h, dv=None):
     """Caller-provided accumulators, reused across heads. int32 and float are
     the same width, so this does not depend on the precision."""
-    return 4 * h * 4 if cell == "slstm" else (4 * h + 2) * 4
+    if cell == "slstm":
+        return 4 * h * 4
+    dv = h if dv is None else dv
+    return (2 * h + 2 * dv + 2) * 4
 
 
 def mlstm_at(t, h, heads=1, s8=False):
@@ -95,14 +106,23 @@ def ceiling(budget, h, heads=1, s8=False, kv=kv_at):
     return budget // kv(1, h, heads, s8)
 
 
-def report(h, i, heads):
-    print("xlstm.c footprint: hidden_size %d (per head), input_size %d, "
-          "%d head(s)\n" % (h, i, heads))
+def report(h, i, heads, dv=None):
+    """h is the query/key width and dv the value width; dv defaults to h.
+
+    The sLSTM rows are unaffected by dv - it has one width - so a rectangular
+    request only moves the mLSTM rows."""
+    if dv is None or dv == h:
+        print("xlstm.c footprint: hidden_size %d (per head), input_size %d, "
+              "%d head(s)\n" % (h, i, heads))
+    else:
+        print("xlstm.c footprint: qk_size %d, v_size %d (per head), "
+              "input_size %d, %d head(s)\n" % (h, dv, i, heads))
     print("  cell   prec   state/head  weights/head    total state  "
           "total weights")
     for cell in ("slstm", "mlstm"):
         for s8 in (False, True):
-            s, w = state_bytes(cell, h, s8), weight_bytes(cell, h, i, s8)
+            d = dv if cell == "mlstm" else None
+            s, w = state_bytes(cell, h, s8, d), weight_bytes(cell, h, i, s8, d)
             print("  %-6s %-5s %11s %13s %14s %14s"
                   % ("sLSTM" if cell == "slstm" else "mLSTM",
                      "int8" if s8 else "f32", "{:,}".format(s),
@@ -179,8 +199,13 @@ def self_check():
     for cell in ("slstm", "mlstm"):
         for name, tc in sorted(data[cell].items()):
             h, i = tc["H"], tc["I"]
+            # For mLSTM the query/key width drives the state; H is the value
+            # width. Square cases carry DQ == DV == H.
+            dq = tc.get("DQ", h) if cell == "mlstm" else h
+            dv = tc.get("DV", h) if cell == "mlstm" else h
             for s8 in (False, True):
-                got = (state_bytes(cell, h, s8), weight_bytes(cell, h, i, s8))
+                got = (state_bytes(cell, dq, s8, dv),
+                       weight_bytes(cell, dq, i, s8, dv))
                 want = _measured(cell, tc, s8)
                 n += 1
                 if got != want:
@@ -276,12 +301,24 @@ def main(argv):
             print("\nreport a configuration with: python3 tools/footprint.py"
                   " <hidden_size> <input_size> [heads] [budget_kb ...]")
         return rc
+    dv = None
+    if "--dv" in argv:
+        k = argv.index("--dv")
+        dv = int(argv[k + 1])
+        argv = argv[:k] + argv[k + 2:]
     h, i = int(argv[0]), int(argv[1])
     heads = int(argv[2]) if len(argv) > 2 else 1
     print()
-    report(h, i, heads)
+    report(h, i, heads, dv)
     print()
-    compare(h, heads, [int(a) for a in argv[3:]] or [128, 512, 520])
+    if dv is not None and dv != h:
+        # compare() weighs the cell against an attention KV cache, which is
+        # sized by the model width rather than by these two, so a rectangular
+        # cell has no single width to put on the other side of it. The
+        # footprint above is the part that answers "does this fit".
+        print("(the KV-cache comparison is square-only; omit --dv for it)")
+    else:
+        compare(h, heads, [int(a) for a in argv[3:]] or [128, 512, 520])
     return 0
 
 

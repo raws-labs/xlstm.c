@@ -1430,6 +1430,9 @@ def generate_json(path):
     for i, tc in enumerate(mlstm_cases, start=1):
         entry = {
             "B": tc["B"], "T": tc["T"], "I": tc["I"], "H": tc["H"],
+            # The two widths, so a consumer does not have to infer them from
+            # tensor lengths. Equal to H for a square cell.
+            "DQ": tc.get("DQ", tc["H"]), "DV": tc.get("DV", tc["H"]),
             "W": to_list(tc["W"]), "b": to_list(tc["b"]),
             "input": to_list(tc["input"]),
             "expected_y": to_list(tc["y"]), "expected_C": to_list(tc["c"]),

@@ -70,10 +70,12 @@ void mlstm_step_s8(
     float f_raw  = preact[2 * DQ + DV + 1];       /* scalar */
     float* o_raw = preact + 2 * DQ + DV + 2;      /* [DV] */
 
-    /* 3. Scale key: k /= sqrt(DQ) - the q/k contraction sets it, not DV. */
-    float k_scale = 1.0f / sqrtf((float)DQ);
+    /* 3. Scale query: q /= sqrt(DQ) - the q/k contraction sets it, not DV.
+     *    Applied to q at readout, not to k on the way in, so C and n store
+     *    unscaled k and match the reference's state. See mlstm.c. */
+    float q_scale = 1.0f / sqrtf((float)DQ);
     for (i = 0; i < DQ; ++i) {
-        k[i] *= k_scale;
+        q[i] *= q_scale;
     }
 
     /* 3b. Optional soft cap on the two gate preactivations. */

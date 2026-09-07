@@ -338,16 +338,20 @@ MUTANTS = [
 
     # --- sse2: the four vector loops ---------------------------------------
     #
-    # S1 is the one that is NOT caught by its gate, and the signature says so.
-    # Losing the vector body of a f32 matvec also changes the summation order
-    # - four lane accumulators become one running sum - and the f32 goldens
-    # turn out to be tight enough to see that, by 4.6e-05 against their own
-    # bound. So the suites fail first and this defect never reaches the gate.
-    # That is luck rather than design, and it holds for exactly one of these
-    # eight vector bodies: S2 to S4 and N8 to N10 are bit-identical either
-    # way, which is why nothing but a counter could ever have seen them.
-    ("S1", "sse2 f32 matvec never enters its vector body", "fail", near("y"),
-     ("sse2",),
+    # All eight of these vector bodies are caught by the fast-path counter,
+    # which is the only check that can see them: dropping a vector body leaves
+    # the arithmetic correct, so nothing in the goldens is obliged to move.
+    #
+    # S1 and N7 used to be recorded against the f32 goldens instead. Losing a
+    # f32 matvec's vector body also changes the summation order - four lane
+    # accumulators become one running sum - and those goldens happened to be
+    # tight enough to see it, by 4.6e-05 against their own bound. That was
+    # luck, not design, and it did not survive the mLSTM state changing
+    # magnitude: the same margin is now inside tolerance. The counter caught
+    # it either way, so the defect was never unguarded - only the recorded
+    # signature was pointing at the wrong check.
+    ("S1", "sse2 f32 matvec never enters its vector body", "fail",
+     vecpath("matvec_f32"), ("sse2",),
      [(SSE2, SSE_VEC_F32, SSE_VEC_F32.replace("j < cols4", "j < 0"))]),
     ("S2", "sse2 INT8 matvec never enters its vector body", "fail",
      vecpath("matvec_s8"), ("sse2",),
@@ -389,10 +393,9 @@ MUTANTS = [
        " vget_high_s16(v16));\n"
        "            acc = vmlal_s16(acc, vget_high_s16(m16),"
        " vget_low_s16(v16));")]),
-    # N7 is S1 on the other backend, and is caught the same way - by the f32
-    # goldens rather than by the gate. See the note above S1.
-    ("N7", "neon f32 matvec never enters its vector body", "fail", near("y"),
-     ("neon",),
+    # N7 is S1 on the other backend, caught the same way. See the note above S1.
+    ("N7", "neon f32 matvec never enters its vector body", "fail",
+     vecpath("matvec_f32"), ("neon",),
      [(NEON, NE_VEC_F32, NE_VEC_F32.replace("j < cols4", "j < 0"))]),
     ("N8", "neon INT8 matvec never enters its vector body", "fail",
      vecpath("matvec_s8"), ("neon",),

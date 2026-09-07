@@ -129,95 +129,21 @@ def run_slstm_multihead(W_fused, R_stack, b_fused, x_seq, num_heads):
 # ============================================================================
 
 def run_mlstm(W, b, x_seq, soft_cap=0.0):
-    """
-    Run mLSTM on a sequence with sigmoid output gate.
+    """Square mLSTM: the DQ == DV case of run_mlstm_rect, which carries the
+    step math and the cross-validation for both.
 
-    Our kernel weight layout: W[(4*H+2), I], b[4*H+2]
+    Weight layout W[(4*H+2), I], b[4*H+2]:
       Rows 0..H-1:     W_q (query)
       Rows H..2H-1:    W_k (key)
       Rows 2H..3H-1:   W_v (value)
-      Row  3H:          w_i (scalar input gate)
-      Row  3H+1:        w_f (scalar forget gate)
+      Row  3H:         w_i (scalar input gate)
+      Row  3H+1:       w_f (scalar forget gate)
       Rows 3H+2..4H+1: W_o (output gate)
 
-    Cross-validates core state update against recurrent_step_stabilized_simple.
-
-    Args:
-        W: [(4*H+2), I] weight matrix
-        b: [4*H+2] bias vector
-        x_seq: [B, T, I] input sequence
-
-    Returns:
-        output: [B, T, H] hidden outputs per timestep
-        y: [B, H] final hidden state
-        C: [B, H*H] final cell state (flattened)
-        n: [B, H] final normalizer
-        m: [B, 1] final stabilizer
+    Returns (output [B,T,H], y [B,H], C [B,H*H], n [B,H], m [B,1]).
     """
-    total_rows = W.shape[0]
-    I = W.shape[1]
-    H = (total_rows - 2) // 4
-    B, T = x_seq.shape[0], x_seq.shape[1]
-
-    # Initialize states
-    C = torch.zeros(B, H, H, dtype=torch.float32)
-    n = torch.zeros(B, H, 1, dtype=torch.float32)
-    m = torch.zeros(B, 1, 1, dtype=torch.float32)
-    outputs = []
-
-    with torch.no_grad():
-        for t in range(T):
-            x_t = x_seq[:, t, :]  # [B, I]
-
-            # Compute projections: [B, 4*H+2]
-            proj = x_t @ W.T + b  # [B, 4*H+2]
-
-            q = proj[:, :H]              # [B, H]
-            k = proj[:, H:2*H]           # [B, H]
-            v = proj[:, 2*H:3*H]         # [B, H]
-            i_raw = proj[:, 3*H:3*H+1]   # [B, 1]
-            f_raw = proj[:, 3*H+1:3*H+2] # [B, 1]
-
-            # Soft cap, applied before the stabilizer sees them. The reference
-            # step below is handed the capped values, so the cross-validation
-            # covers the capped arithmetic too rather than only the uncapped.
-            if soft_cap > 0.0:
-                i_raw = soft_cap * torch.tanh(i_raw / soft_cap)
-                f_raw = soft_cap * torch.tanh(f_raw / soft_cap)
-            o_raw = proj[:, 3*H+2:]       # [B, H]
-
-            # Cross-validate with NX-AI reference (NH=1)
-            q_ref = q.unsqueeze(1).unsqueeze(2)    # [B, 1, 1, H]
-            k_ref = k.unsqueeze(1).unsqueeze(2)    # [B, 1, 1, H]
-            v_ref = v.unsqueeze(1).unsqueeze(2)    # [B, 1, 1, H]
-            i_ref = i_raw.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, 1]
-            f_ref = f_raw.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, 1]
-            C_ref = C.unsqueeze(1)                 # [B, 1, H, H]
-            n_ref = n.unsqueeze(1)                 # [B, 1, H, 1]
-            m_ref = m.unsqueeze(1)                 # [B, 1, 1, 1]
-
-            h_ref, (C_new_ref, n_new_ref, m_new_ref) = \
-                recurrent_step_stabilized_simple(
-                    C_ref, n_ref, m_ref,
-                    q_ref, k_ref, v_ref,
-                    i_ref, f_ref)
-
-            # h_ref: [B, 1, 1, H] -> squeeze to [B, H]
-            h_ref = h_ref.squeeze(1).squeeze(1)
-            C = C_new_ref.squeeze(1)      # [B, H, H]
-            n = n_new_ref.squeeze(1)      # [B, H, 1]
-            m = m_new_ref.squeeze(1)      # [B, 1, 1]
-
-            # Apply sigmoid output gate (our kernel includes this)
-            o_gate = torch.sigmoid(o_raw)  # [B, H]
-            y = o_gate * h_ref             # [B, H]
-            outputs.append(y)
-
-    output = torch.stack(outputs, dim=1)  # [B, T, H]
-    C_flat = C.reshape(B, H * H)          # [B, H*H]
-    n_flat = n.squeeze(-1)                # [B, H]
-    m_flat = m.squeeze(-1)                # [B, 1]
-    return output, y, C_flat, n_flat, m_flat
+    H = (W.shape[0] - 2) // 4
+    return run_mlstm_rect(W, b, x_seq, H, H, soft_cap)
 
 
 def fmt(tensor):
@@ -488,7 +414,7 @@ def _mlstm_int8_trace(tc, perturb=1.0):
         if cap > 0.0:
             i_raw = cap * np.tanh(i_raw / cap)
             f_raw = cap * np.tanh(f_raw / cap)
-        k = k / np.sqrt(DQ)
+        q = q / np.sqrt(DQ)   # on q at readout, so C and n store unscaled k
         m_prev = m_state[0]
         log_f_plus_m = -np.logaddexp(0, -f_raw) + m_prev
         m_new = max(log_f_plus_m, i_raw)
@@ -728,26 +654,33 @@ def _native_step():
     return mod.mlstm_recurrent_step__native_fw
 
 
-def run_mlstm_rect(W, b, x_seq, DQ, DV):
+def run_mlstm_rect(W, b, x_seq, DQ, DV, soft_cap=0.0):
     """mLSTM with independent query/key and value widths.
 
-    recurrent_step_stabilized_simple cannot serve here: it reads one DH off
-    q.shape and uses it for the value side too, so it only ever describes a
-    square cell. mlstm_kernels' step carries matC as (B, NH, DHQK, DHV) and is
-    the rectangular reference; it is also the one the downstream stack runs.
+    The single step implementation behind every mLSTM case here, square ones
+    included. The 1/sqrt(DQ) scaling goes on q at readout, so the stored C and
+    n hold unscaled k - the state the downstream stack keeps, which is what
+    makes a saved state mean the same thing on both sides.
 
-    The two spell the 1/sqrt scaling differently - it scales q at readout,
-    this library scales k into the state - so h agrees exactly while the
-    stored C and n differ by that constant. The cross-check below asserts the
-    agreement that matters (h) and the exact factor on the state, rather than
-    assuming either.
+    The two available references spell that scaling differently, which is
+    useful: they pin the convention from opposite sides rather than one being
+    taken on faith.
+
+      - mlstm_kernels' native step carries matC as (B, NH, DHQK, DHV), is the
+        only one that describes a rectangular cell, scales q as we do, and is
+        the one the downstream stack runs. Its state must match ours exactly.
+      - xlstm's recurrent_step_stabilized_simple reads one DH off q.shape and
+        uses it for the value side too, so it can only speak for a square
+        cell and runs only when DQ == DV. It scales k into the state instead,
+        so its state must equal ours times 1/sqrt(DQ) - and h, which the
+        scaling cancels out of, must agree with both.
 
     Weight layout: rows q(DQ), k(DQ), v(DV), w_i(1), w_f(1), o(DV).
     """
     native = _native_step()
-    I = W.shape[1]
     B, T = x_seq.shape[0], x_seq.shape[1]
     scale = 1.0 / math.sqrt(DQ)
+    square = DQ == DV
 
     C = torch.zeros(B, DQ, DV, dtype=torch.float32)
     n = torch.zeros(B, DQ, dtype=torch.float32)
@@ -755,6 +688,9 @@ def run_mlstm_rect(W, b, x_seq, DQ, DV):
     Cr = torch.zeros(B, 1, DQ, DV, dtype=torch.float32)
     nr = torch.zeros(B, 1, DQ, dtype=torch.float32)
     mr = torch.zeros(B, 1, 1, dtype=torch.float32)
+    Cs = torch.zeros(B, 1, DQ, DV, dtype=torch.float32)
+    ns = torch.zeros(B, 1, DQ, 1, dtype=torch.float32)
+    ms = torch.zeros(B, 1, 1, 1, dtype=torch.float32)
     outputs = []
 
     with torch.no_grad():
@@ -767,17 +703,24 @@ def run_mlstm_rect(W, b, x_seq, DQ, DV):
             f_raw = proj[:, 2 * DQ + DV + 1:2 * DQ + DV + 2]
             o_raw = proj[:, 2 * DQ + DV + 2:]
 
-            ks = k * scale
+            # Soft cap before the stabilizer sees them. Both references are
+            # handed the capped values, so they cover the capped arithmetic
+            # rather than only the uncapped.
+            if soft_cap > 0.0:
+                i_raw = soft_cap * torch.tanh(i_raw / soft_cap)
+                f_raw = soft_cap * torch.tanh(f_raw / soft_cap)
+
+            qs = q * scale
             log_f = torch.nn.functional.logsigmoid(f_raw)
             m_new = torch.maximum(log_f + m, i_raw)
             fg = torch.exp(log_f + m - m_new)
             ig = torch.exp(i_raw - m_new)
-            C = fg[..., None] * C + ig[..., None] * (ks[:, :, None] @ v[:, None, :])
-            n = fg * n + ig * ks
+            C = fg[..., None] * C + ig[..., None] * (k[:, :, None] @ v[:, None, :])
+            n = fg * n + ig * k
             m = m_new
-            qn = (q[:, None, :] @ n[:, :, None]).squeeze(-1)
+            qn = (qs[:, None, :] @ n[:, :, None]).squeeze(-1)
             denom = torch.maximum(qn.abs(), torch.exp(-m)) + 1e-6
-            h = (q[:, None, :] @ C).squeeze(-2) / denom
+            h = (qs[:, None, :] @ C).squeeze(-2) / denom
 
             h_ref, (Cr, nr, mr) = native(
                 Cr, nr, mr,
@@ -785,11 +728,29 @@ def run_mlstm_rect(W, b, x_seq, DQ, DV):
                 i_raw.unsqueeze(1), f_raw.unsqueeze(1))
             h_ref = h_ref.squeeze(1)
             assert torch.allclose(h, h_ref, atol=2e-5), \
-                f"rectangular h disagrees with mlstm_kernels at t={t}"
-            assert torch.allclose(C, Cr.squeeze(1) * scale, atol=2e-5), \
-                f"rectangular C is not the reference state scaled by 1/sqrt(DQ) at t={t}"
-            assert torch.allclose(n, nr.squeeze(1) * scale, atol=2e-5), \
-                f"rectangular n is not the reference state scaled by 1/sqrt(DQ) at t={t}"
+                f"h disagrees with mlstm_kernels at t={t}"
+            assert torch.allclose(C, Cr.squeeze(1), atol=2e-5), \
+                f"C is not mlstm_kernels' state at t={t}"
+            assert torch.allclose(n, nr.squeeze(1), atol=2e-5), \
+                f"n is not mlstm_kernels' state at t={t}"
+
+            if square:
+                # It squeeze_()es its arguments in place, so hand it copies.
+                h_sq, (Cs, ns, ms) = recurrent_step_stabilized_simple(
+                    Cs, ns, ms,
+                    q.clone().unsqueeze(1).unsqueeze(2),
+                    k.clone().unsqueeze(1).unsqueeze(2),
+                    v.clone().unsqueeze(1).unsqueeze(2),
+                    i_raw.clone().unsqueeze(1).unsqueeze(2),
+                    f_raw.clone().unsqueeze(1).unsqueeze(2))
+                h_sq = h_sq.squeeze(1).squeeze(1)
+                assert torch.allclose(h, h_sq, atol=2e-5), \
+                    f"h disagrees with recurrent_step_stabilized_simple at t={t}"
+                assert torch.allclose(C * scale, Cs.squeeze(1), atol=2e-5), \
+                    f"C is not that backend's k-scaled state at t={t}"
+                assert torch.allclose(n * scale, ns.squeeze(1).squeeze(-1),
+                                      atol=2e-5), \
+                    f"n is not that backend's k-scaled state at t={t}"
 
             outputs.append(torch.sigmoid(o_raw) * h)
 

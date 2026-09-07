@@ -61,11 +61,17 @@ void mlstm_step_f32(
     float f_raw  = scratch[2 * DQ + DV + 1];       /* scalar */
     float* o_raw = scratch + 2 * DQ + DV + 2;      /* [DV] */
 
-    /* 3. Scale key: k /= sqrt(DQ). The scaling belongs to the q/k contraction,
-     *    so it is the query-key width that sets it, not the value width. */
-    float k_scale = 1.0f / sqrtf((float)DQ);
+    /* 3. Scale query: q /= sqrt(DQ). The q/k contraction sets it, so it is
+     *    the query-key width, not the value width.
+     *
+     *    Scaling q at readout rather than k on the way in leaves the stored C
+     *    and n holding unscaled k. The two are algebraically identical at the
+     *    output - the constant cancels through C and n - but they store
+     *    different numbers, and this is the one the reference keeps, so a
+     *    state saved by either side means the same thing. */
+    float q_scale = 1.0f / sqrtf((float)DQ);
     for (i = 0; i < DQ; ++i) {
-        k[i] *= k_scale;
+        q[i] *= q_scale;
     }
 
     /* 3b. Optional soft cap on the two gate preactivations. */

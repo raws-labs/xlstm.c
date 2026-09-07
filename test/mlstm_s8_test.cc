@@ -110,6 +110,7 @@ static void PrepareMlstmS8(const XlstmRefCase* tc, MlstmS8Setup* s) {
 
     s->params.cell_clip = 0.0f;
     s->params.gate_soft_cap = tc->gate_soft_cap;
+    s->params.skip_output_gate = 0;
     s->params.W_scale = w_qp.scale;
     s->params.x_quant = x_qp;
 

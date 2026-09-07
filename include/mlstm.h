@@ -49,6 +49,14 @@ typedef struct {
      * stabilizer: cap * tanh(preact / cap). 0 leaves them uncapped, which is
      * what this library did before the knob existed. */
     float gate_soft_cap;
+
+    /* Non-zero writes the UNGATED readout to y - q^T C / denom, without the
+     * sigmoid(o) factor - and leaves the output gate to the caller. Nothing is
+     * lost by doing so: o's preactivation is already in the caller's scratch,
+     * at offset 2*qk_size + v_size + 2. This exists because a model may need a
+     * normalization between the recurrence and the gate, which a fused gate
+     * gives it no seam to insert. 0 applies the gate as usual. */
+    int skip_output_gate;
 } MlstmParams;
 
 /* NOTE ON WIDTHS AND HEADS

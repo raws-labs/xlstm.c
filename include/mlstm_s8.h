@@ -41,8 +41,9 @@ typedef struct {
     XlstmQuantParam C_quant;   /* cell matrix (INT16) - [qk_size x v_size] */
     XlstmQuantParam n_quant;   /* normalizer (INT16) - [qk_size] */
 
-    /* As documented on MlstmParams in mlstm.h. */
+    /* Both as documented on MlstmParams in mlstm.h. */
     float gate_soft_cap;
+    int skip_output_gate;
 } MlstmS8Params;
 
 /* NOTE ON HIDDEN SIZE AND HEADS

@@ -152,7 +152,9 @@ void mlstm_step_s8(
             float C_f = (float)C[i * DV + j] * params->C_quant.scale;
             qC_j += q[i] * C_f;
         }
-        float y_new = xlstm_gate_sigmoidf(o_raw[j]) * (qC_j / denom);
+        float y_new = params->skip_output_gate
+                          ? (qC_j / denom)
+                          : xlstm_gate_sigmoidf(o_raw[j]) * (qC_j / denom);
 
         /* Requantize output to INT8 */
         float y_q = y_new / params->y_quant.scale + (float)params->y_quant.zero_point;

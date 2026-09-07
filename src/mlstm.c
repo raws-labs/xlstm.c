@@ -115,8 +115,16 @@ void mlstm_step_f32(
     float qC[XLSTM_MAX_HIDDEN];
     memset(qC, 0, (size_t)DV * sizeof(float));
     xlstm_vecmat_f32(q, C, qC, DQ, DV);
-    for (j = 0; j < DV; ++j) {
-        y[j] = xlstm_gate_sigmoidf(o_raw[j]) * (qC[j] / denom);
+    /* Two loops rather than a test per element, so the gated path - the one
+     * every existing caller takes - is exactly the arithmetic it was. */
+    if (params && params->skip_output_gate) {
+        for (j = 0; j < DV; ++j) {
+            y[j] = qC[j] / denom;
+        }
+    } else {
+        for (j = 0; j < DV; ++j) {
+            y[j] = xlstm_gate_sigmoidf(o_raw[j]) * (qC[j] / denom);
+        }
     }
 }
 

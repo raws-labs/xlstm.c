@@ -44,6 +44,11 @@ extern "C" {
 
 typedef struct {
     float cell_clip; /* 0 = no clipping */
+
+    /* Cap applied to the input and forget preactivations before the
+     * stabilizer: cap * tanh(preact / cap). 0 leaves them uncapped, which is
+     * what this library did before the knob existed. */
+    float gate_soft_cap;
 } MlstmParams;
 
 /* NOTE ON WIDTHS AND HEADS

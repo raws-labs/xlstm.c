@@ -128,7 +128,7 @@ def run_slstm_multihead(W_fused, R_stack, b_fused, x_seq, num_heads):
 # mLSTM helpers
 # ============================================================================
 
-def run_mlstm(W, b, x_seq):
+def run_mlstm(W, b, x_seq, soft_cap=0.0):
     """
     Run mLSTM on a sequence with sigmoid output gate.
 
@@ -177,6 +177,13 @@ def run_mlstm(W, b, x_seq):
             v = proj[:, 2*H:3*H]         # [B, H]
             i_raw = proj[:, 3*H:3*H+1]   # [B, 1]
             f_raw = proj[:, 3*H+1:3*H+2] # [B, 1]
+
+            # Soft cap, applied before the stabilizer sees them. The reference
+            # step below is handed the capped values, so the cross-validation
+            # covers the capped arithmetic too rather than only the uncapped.
+            if soft_cap > 0.0:
+                i_raw = soft_cap * torch.tanh(i_raw / soft_cap)
+                f_raw = soft_cap * torch.tanh(f_raw / soft_cap)
             o_raw = proj[:, 3*H+2:]       # [B, H]
 
             # Cross-validate with NX-AI reference (NH=1)
@@ -477,6 +484,10 @@ def _mlstm_int8_trace(tc, perturb=1.0):
         q = preact[0:DQ]; k = preact[DQ:2*DQ]; v = preact[2*DQ:2*DQ+DV]
         i_raw = preact[2*DQ+DV]; f_raw = preact[2*DQ+DV+1]
         o_raw = preact[2*DQ+DV+2:2*DQ+2*DV+2]
+        cap = tc.get("gate_soft_cap", 0.0)
+        if cap > 0.0:
+            i_raw = cap * np.tanh(i_raw / cap)
+            f_raw = cap * np.tanh(f_raw / cap)
         k = k / np.sqrt(DQ)
         m_prev = m_state[0]
         log_f_plus_m = -np.logaddexp(0, -f_raw) + m_prev
@@ -786,6 +797,29 @@ def run_mlstm_rect(W, b, x_seq, DQ, DV):
     return output, outputs[-1], C.reshape(B, DQ * DV), n, m
 
 
+def mlstm_capped_case(H, cap, seed):
+    """mLSTM case with the gate soft cap active.
+
+    Only the two gate rows are amplified. The cap has to actually bind - a
+    case whose gate logits sit inside it would pass with the cap disabled and
+    prove nothing - but scaling the whole draw would blow out v and o with
+    it, and the INT8 output range along with them."""
+    torch.manual_seed(seed)
+    I = H
+    W = torch.randn(4 * H + 2, I)
+    b = torch.randn(4 * H + 2)
+    W[3 * H:3 * H + 2] *= 6.0     # rows [q(H), k(H), v(H), i, f, o(H)]
+    b[3 * H:3 * H + 2] *= 6.0
+    x = torch.randn(1, 3, I)
+    output, y, C, n, m = run_mlstm(W, b, x, soft_cap=cap)
+    return dict(
+        name=f"CapM{H}", comment=f"Gate soft cap {cap} at H={H}, 3 timesteps",
+        B=1, T=3, I=I, H=H, gate_soft_cap=cap,
+        W=W, b=b, input=x,
+        y=y, c=C, n=n, m=m, output=output,
+        tol_f32=1e-5)
+
+
 def mlstm_rect_case(DQ, DV, seed):
     """mLSTM case with DQ != DV, 3 timesteps, I = DV."""
     torch.manual_seed(seed)
@@ -1069,6 +1103,7 @@ def build_cases():
     # vector width, so the two extents cannot be silently swapped.
     for idx, (dq, dv) in enumerate([(4, 12), (12, 4), (5, 13)]):
         mlstm_cases.append(mlstm_rect_case(dq, dv, seed=2600 + idx))
+    mlstm_cases.append(mlstm_capped_case(8, 1.5, seed=2700))
 
     # The two per-head slices go into the ordinary sLSTM table (they are
     # ordinary single-head cases, and running them through the f32 and INT8
@@ -1156,6 +1191,7 @@ CASE_STRUCT = """typedef struct {
     int B, T, I, H;
     int DQ, DV;                   /* mLSTM query/key and value widths;
                                    * both equal H for a square cell */
+    float gate_soft_cap;          /* mLSTM gate soft cap; 0 = uncapped */
     const float* W;
     const float* R;               /* NULL for mLSTM */
     const float* b;
@@ -1255,6 +1291,7 @@ def _emit_table(f, cases, table_name, state_key, has_R):
         f.write(
             f'    {{"{n}", {tc["B"]}, {tc["T"]}, {tc["I"]}, {tc["H"]}, '
             f'{tc.get("DQ", tc["H"])}, {tc.get("DV", tc["H"])}, '
+            f'{_cfloat(tc.get("gate_soft_cap", 0.0))}, '
             f'k{src}_W, {R}, k{src}_b, k{n}_input, k{n}_expected_y, {state}, '
             f'k{n}_expected_n, k{n}_expected_m, {out}, '
             f'{_cfloat(tc.get("tol_f32", 1e-5))}, '
@@ -1433,6 +1470,9 @@ def generate_json(path):
             # The two widths, so a consumer does not have to infer them from
             # tensor lengths. Equal to H for a square cell.
             "DQ": tc.get("DQ", tc["H"]), "DV": tc.get("DV", tc["H"]),
+            # 0 = uncapped. A consumer that cannot apply the cap must skip
+            # the case rather than report a mismatch.
+            "gate_soft_cap": tc.get("gate_soft_cap", 0.0),
             "W": to_list(tc["W"]), "b": to_list(tc["b"]),
             "input": to_list(tc["input"]),
             "expected_y": to_list(tc["y"]), "expected_C": to_list(tc["c"]),

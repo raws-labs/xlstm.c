@@ -76,6 +76,12 @@ void mlstm_step_s8(
         k[i] *= k_scale;
     }
 
+    /* 3b. Optional soft cap on the two gate preactivations. */
+    if (params->gate_soft_cap > 0.0f) {
+        i_raw = xlstm_soft_cap(i_raw, params->gate_soft_cap);
+        f_raw = xlstm_soft_cap(f_raw, params->gate_soft_cap);
+    }
+
     /* 4. Stabilized gates (scalar m) */
     float m_prev = m[0];
     float log_f_plus_m = xlstm_gate_log_sigmoidf(f_raw) + m_prev;

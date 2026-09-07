@@ -38,15 +38,17 @@ typedef struct {
     float W_scale;             /* no R for mLSTM */
     XlstmQuantParam x_quant;
     XlstmQuantParam y_quant;
-    XlstmQuantParam C_quant;   /* cell matrix (INT16) - HxH */
-    XlstmQuantParam n_quant;   /* normalizer (INT16) */
+    XlstmQuantParam C_quant;   /* cell matrix (INT16) - [qk_size x v_size] */
+    XlstmQuantParam n_quant;   /* normalizer (INT16) - [qk_size] */
+
+    /* As documented on MlstmParams in mlstm.h. */
+    float gate_soft_cap;
 } MlstmS8Params;
 
 /* NOTE ON HIDDEN SIZE AND HEADS
  *
- * qk_size and v_size are PER-HEAD widths (DHQK and DHV in the reference),
- * not the
- * model width. This kernel implements one head.
+ * qk_size and v_size are PER-HEAD widths (DHQK and DHV in the reference), not
+ * model widths. This kernel implements one head.
  *
  * For a multi-head cell, slice the weights per head and call this function
  * once per head, then concatenate the outputs. State buffers (y, C, n, m)

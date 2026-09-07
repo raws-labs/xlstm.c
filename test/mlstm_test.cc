@@ -44,7 +44,8 @@ static bool RunMlstmCase(const XlstmRefCase* tc) {
     for (int i = 0; i < T * DV; ++i) g_output[i] = 0;
     for (int i = 0; i < 2 * DQ + 2 * DV + 2; ++i) g_scratch[i] = 0;
 
-    MlstmParams params = {0.0f};
+    MlstmParams params = {};
+    params.gate_soft_cap = tc->gate_soft_cap;
     mlstm_eval_f32(tc->input, tc->W, tc->b,
                    g_y, g_C, g_n, g_m, g_output, g_scratch,
                    tc->B, T, tc->I, DQ, DV, &params);

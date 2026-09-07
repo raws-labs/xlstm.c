@@ -95,7 +95,7 @@ int32_t xlstm_tvm_mlstm_eval(
         dl_float_ptr(m),
         dl_float_ptr(output),
         scratch,
-        batch_size, time_steps, input_size, hidden_size,
+        batch_size, time_steps, input_size, hidden_size, hidden_size,
         &params);
 
     return 0;

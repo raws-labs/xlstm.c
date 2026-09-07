@@ -36,31 +36,35 @@ void mlstm_step_f32(
     float* m,
     float* scratch,
     int input_size,
-    int hidden_size,
+    int qk_size,
+    int v_size,
     const MlstmParams* params)
 {
-    int H = hidden_size;
+    int DQ = qk_size;
+    int DV = v_size;
     int I = input_size;
-    int total = 4 * H + 2;
+    int total = 2 * DQ + 2 * DV + 2;
     int i, j;
 
     /* 1. Compute pre-activations: scratch = W*x + b
-     *    scratch layout: [q(H), k(H), v(H), i_raw(1), f_raw(1), o_raw(H)] */
+     *    scratch layout:
+     *      [q(DQ), k(DQ), v(DV), i_raw(1), f_raw(1), o_raw(DV)] */
     for (i = 0; i < total; ++i)
         scratch[i] = b[i];
     xlstm_matvec_f32(W, x, scratch, total, I);
 
     /* 2. Extract projections from scratch */
-    float* q     = scratch;              /* [H] */
-    float* k     = scratch + H;          /* [H] */
-    float* v     = scratch + 2 * H;      /* [H] */
-    float i_raw  = scratch[3 * H];       /* scalar */
-    float f_raw  = scratch[3 * H + 1];   /* scalar */
-    float* o_raw = scratch + 3 * H + 2;  /* [H] */
+    float* q     = scratch;                        /* [DQ] */
+    float* k     = scratch + DQ;                   /* [DQ] */
+    float* v     = scratch + 2 * DQ;               /* [DV] */
+    float i_raw  = scratch[2 * DQ + DV];           /* scalar */
+    float f_raw  = scratch[2 * DQ + DV + 1];       /* scalar */
+    float* o_raw = scratch + 2 * DQ + DV + 2;      /* [DV] */
 
-    /* 3. Scale key: k /= sqrt(H) */
-    float k_scale = 1.0f / sqrtf((float)H);
-    for (i = 0; i < H; ++i) {
+    /* 3. Scale key: k /= sqrt(DQ). The scaling belongs to the q/k contraction,
+     *    so it is the query-key width that sets it, not the value width. */
+    float k_scale = 1.0f / sqrtf((float)DQ);
+    for (i = 0; i < DQ; ++i) {
         k[i] *= k_scale;
     }
 
@@ -73,18 +77,18 @@ void mlstm_step_f32(
     float i_gate = xlstm_gate_expf(i_raw - m_new);
 
     /* 5. Update C: C[r][c] = f_gate * C[r][c] + i_gate * k[r] * v[c] */
-    xlstm_rank1_update_f32(C, f_gate, i_gate, k, v, H, H);
+    xlstm_rank1_update_f32(C, f_gate, i_gate, k, v, DQ, DV);
 
     /* Optional cell clipping */
     if (params && params->cell_clip > 0.0f) {
         float clip = params->cell_clip;
-        for (i = 0; i < H * H; ++i) {
+        for (i = 0; i < DQ * DV; ++i) {
             C[i] = fmaxf(-clip, fminf(clip, C[i]));
         }
     }
 
     /* 6. Update n: n = f_gate * n + i_gate * k */
-    for (i = 0; i < H; ++i) {
+    for (i = 0; i < DQ; ++i) {
         n[i] = f_gate * n[i] + i_gate * k[i];
     }
 
@@ -93,19 +97,19 @@ void mlstm_step_f32(
 
     /* 8. Compute output: y = sigmoid(o) * (q^T C) / max(|q^T n|, exp(-m)) + eps
      *
-     *    q^T C gives a vector of size H: out[j] = sum_i q[i] * C[i*H + j]
+     *    q^T C gives a vector of size DV: out[j] = sum_i q[i] * C[i*DV + j]
      *    q^T n gives a scalar: qn = sum_i q[i] * n[i] */
     float qn = 0.0f;
-    for (i = 0; i < H; ++i) {
+    for (i = 0; i < DQ; ++i) {
         qn += q[i] * n[i];
     }
     float denom = fmaxf(fabsf(qn), xlstm_gate_expf(-m_new)) + 1e-6f;
 
     /* q^T * C via vecmat (scatter-accumulate with contiguous row access) */
     float qC[XLSTM_MAX_HIDDEN];
-    memset(qC, 0, (size_t)H * sizeof(float));
-    xlstm_vecmat_f32(q, C, qC, H, H);
-    for (j = 0; j < H; ++j) {
+    memset(qC, 0, (size_t)DV * sizeof(float));
+    xlstm_vecmat_f32(q, C, qC, DQ, DV);
+    for (j = 0; j < DV; ++j) {
         y[j] = xlstm_gate_sigmoidf(o_raw[j]) * (qC[j] / denom);
     }
 }
@@ -123,13 +127,15 @@ void mlstm_eval_f32(
     int batch_size,
     int time_steps,
     int input_size,
-    int hidden_size,
+    int qk_size,
+    int v_size,
     const MlstmParams* params)
 {
     int B = batch_size;
     int T = time_steps;
     int I = input_size;
-    int H = hidden_size;
+    int DQ = qk_size;
+    int DV = v_size;
     int batch, t, i;
 
     for (batch = 0; batch < B; ++batch) {
@@ -138,16 +144,16 @@ void mlstm_eval_f32(
 
             mlstm_step_f32(
                 x_t, W, b,
-                y + batch * H,
-                C + batch * H * H,
-                n + batch * H,
+                y + batch * DV,
+                C + batch * DQ * DV,
+                n + batch * DQ,
                 m + batch * 1,
                 scratch,
-                I, H, params);
+                I, DQ, DV, params);
 
             /* Copy hidden state to output */
-            for (i = 0; i < H; ++i) {
-                output[(batch * T + t) * H + i] = y[batch * H + i];
+            for (i = 0; i < DV; ++i) {
+                output[(batch * T + t) * DV + i] = y[batch * DV + i];
             }
         }
     }

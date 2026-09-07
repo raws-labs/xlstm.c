@@ -110,7 +110,7 @@ static void bench_slstm_f32(int H, int steps) {
     SlstmParams params = {0.0f};
 
     auto step = [&]() {
-        slstm_step_f32(x, W, R, b, y, c, n, m, scratch, I, H, &params);
+        slstm_step_f32(x, W, R, b, y, c, n, m, scratch, I, H, H, &params);
     };
 
     int iters = steps > 0 ? steps : calibrate(step);

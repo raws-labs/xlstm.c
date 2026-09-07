@@ -67,7 +67,7 @@ void MLstmOrtKernel(
         x.Data(), W.Data(), b.Data(),
         y_data, C_data, n_data, m_data,
         out_data, scratch.data(),
-        batch_size, time_steps, input_size, hidden_size,
+        batch_size, time_steps, input_size, hidden_size, hidden_size,
         &params);
 }
 

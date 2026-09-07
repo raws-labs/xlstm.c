@@ -17,15 +17,20 @@
  * mLSTM is a variant of LSTM from the xLSTM paper (Beck et al., 2024)
  * with a matrix-valued cell state and covariance-based memory retrieval.
  *
- * Weight layout - single packed W matrix [(4*H+2) rows x I cols]:
- *   Rows 0..H-1:       W_q (query projection)
- *   Rows H..2H-1:      W_k (key projection)
- *   Rows 2H..3H-1:     W_v (value projection)
- *   Row  3H:            w_i (scalar input gate)
- *   Row  3H+1:          w_f (scalar forget gate)
- *   Rows 3H+2..4H+1:   W_o (output gate)
+ * The query/key width (DQ) and the value width (DV) are separate. They are
+ * equal for a square cell, which is the common case, but the memory C is
+ * [DQ x DV] in general and the two are not interchangeable.
  *
- * Bias b[4*H+2] follows the same layout.
+ * Weight layout - single packed W matrix [(2*DQ+2*DV+2) rows x I cols]:
+ *   Rows 0..DQ-1:                    W_q (query projection)
+ *   Rows DQ..2DQ-1:                  W_k (key projection)
+ *   Rows 2DQ..2DQ+DV-1:              W_v (value projection)
+ *   Row  2DQ+DV:                      w_i (scalar input gate)
+ *   Row  2DQ+DV+1:                    w_f (scalar forget gate)
+ *   Rows 2DQ+DV+2..2DQ+2DV+1:        W_o (output gate)
+ *
+ * Bias b[2*DQ+2*DV+2] follows the same layout. With DQ == DV == H this is
+ * the [(4*H+2) x I] layout by another name.
  *
  * Reference: https://arxiv.org/abs/2405.04517
  * ===========================================================================*/
@@ -41,20 +46,22 @@ typedef struct {
     float cell_clip; /* 0 = no clipping */
 } MlstmParams;
 
-/* NOTE ON HIDDEN SIZE AND HEADS
+/* NOTE ON WIDTHS AND HEADS
  *
- * hidden_size is the PER-HEAD width (DH in the NX-AI reference), not the
- * model width. This kernel implements one head.
+ * qk_size and v_size are PER-HEAD widths (DHQK and DHV in the reference), not
+ * model widths. This kernel implements one head.
  *
  * For a multi-head cell, slice the weights per head and call this function
  * once per head, then concatenate the outputs. State buffers (y, C, n, m)
  * are per head and must not be shared between heads.
  *
- * The cell matrix C is [hidden_size x hidden_size] PER HEAD. Total state
- * therefore grows as num_heads * DH * DH, not as (num_heads * DH)^2.
+ * The cell matrix C is [qk_size x v_size] PER HEAD. Total state therefore
+ * grows as num_heads * DQ * DV, not as (num_heads * DQ) * (num_heads * DV).
+ * n is [qk_size] and y is [v_size]: the two widths reach different buffers,
+ * so a caller that sizes both from one number is wrong whenever they differ.
  *
  * The reference carries mLSTM heads as a leading batched dimension
- * (B, NH, S, DH), with per-head state c(B,NH,DH,DH), n(B,NH,DH,1),
+ * (B, NH, S, DH), with per-head state c(B,NH,DHQK,DHV), n(B,NH,DHQK,1),
  * m(B,NH,1,1), and never entangles them - so the per-head calls really are
  * independent. How the q/k/v/i/f/o rows above map onto a given exporter's
  * fused projection matrix is that exporter's convention and is not fixed by
@@ -70,15 +77,16 @@ typedef struct {
  * Caller must provide a scratch buffer of at least (4*H+2) floats. */
 void mlstm_step_f32(
     const float* x,       /* [input_size] */
-    const float* W,       /* [(4*hidden_size+2), input_size] */
-    const float* b,       /* [4*hidden_size+2] */
-    float* y,             /* [hidden_size] out */
-    float* C,             /* [hidden_size * hidden_size] in/out */
-    float* n,             /* [hidden_size] in/out */
+    const float* W,       /* [(2*qk_size+2*v_size+2), input_size] */
+    const float* b,       /* [2*qk_size+2*v_size+2] */
+    float* y,             /* [v_size] out */
+    float* C,             /* [qk_size * v_size] in/out */
+    float* n,             /* [qk_size] in/out */
     float* m,             /* [1] in/out */
-    float* scratch,       /* [4*hidden_size+2] caller-provided */
+    float* scratch,       /* [2*qk_size+2*v_size+2] caller-provided */
     int input_size,
-    int hidden_size,
+    int qk_size,
+    int v_size,
     const MlstmParams* params);
 
 /* Full sequence evaluation: batch + time loop.
@@ -88,18 +96,19 @@ void mlstm_step_f32(
  * Caller must provide a scratch buffer of at least (4*H+2) floats. */
 void mlstm_eval_f32(
     const float* input,   /* [batch_size, time_steps, input_size] */
-    const float* W,       /* [(4*hidden_size+2), input_size] */
-    const float* b,       /* [4*hidden_size+2] */
-    float* y,             /* [batch_size, hidden_size] in/out */
-    float* C,             /* [batch_size, hidden_size * hidden_size] in/out */
-    float* n,             /* [batch_size, hidden_size] in/out */
+    const float* W,       /* [(2*qk_size+2*v_size+2), input_size] */
+    const float* b,       /* [2*qk_size+2*v_size+2] */
+    float* y,             /* [batch_size, v_size] in/out */
+    float* C,             /* [batch_size, qk_size * v_size] in/out */
+    float* n,             /* [batch_size, qk_size] in/out */
     float* m,             /* [batch_size, 1] in/out */
-    float* output,        /* [batch_size, time_steps, hidden_size] */
-    float* scratch,       /* [4*hidden_size+2] caller-provided */
+    float* output,        /* [batch_size, time_steps, v_size] */
+    float* scratch,       /* [2*qk_size+2*v_size+2] caller-provided */
     int batch_size,
     int time_steps,
     int input_size,
-    int hidden_size,
+    int qk_size,
+    int v_size,
     const MlstmParams* params);
 
 #ifdef __cplusplus

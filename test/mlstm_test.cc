@@ -42,7 +42,7 @@ static bool RunMlstmCase(const XlstmRefCase* tc) {
     MlstmParams params = {0.0f};
     mlstm_eval_f32(tc->input, tc->W, tc->b,
                    g_y, g_C, g_n, g_m, g_output, g_scratch,
-                   tc->B, T, tc->I, H, &params);
+                   tc->B, T, tc->I, H, H, &params);
 
     bool ok = true;
     ok &= ExpectFinite("y", g_y, H);

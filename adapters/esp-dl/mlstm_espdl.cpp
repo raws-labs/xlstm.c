@@ -116,7 +116,7 @@ void MLSTM::forward_f32(std::vector<dl::TensorBase*>& tensors) {
         m_y, m_C, m_n, m_m,
         output->get_element_ptr<float>(),
         m_scratch,
-        batch_size, time_steps, input_size, m_hidden_size,
+        batch_size, time_steps, input_size, m_hidden_size, m_hidden_size,
         &params);
 }
 

@@ -320,7 +320,9 @@ def _case_arrays(tc, cell):
     H, T, I = tc["H"], tc["T"], tc["I"]
     y_gold = _t2n(tc["y"]).reshape(H)
     a = {"H": H, "T": T, "I": I,
-         "W": _t2n(tc["W"]).reshape(4 * H if cell == "s" else 4 * H + 2, I),
+         "W": _t2n(tc["W"]).reshape(
+            4 * H if cell == "s"
+            else 2 * tc.get("DQ", H) + 2 * tc.get("DV", H) + 2, I),
          "b": _t2n(tc["b"]),
          "x": _t2n(tc["input"]).reshape(1, T, I),
          "y_gold": y_gold,
@@ -355,7 +357,8 @@ def _mlstm_s8_calib(tc):
     w_scale, _ = _quant_sym8(a["W"].flatten())
     x_scale, x_zp = _quant_asym(a["x"].flatten())
     y_scale, y_zp = _quant_asym(a["out_gold"].flatten())
-    n_scale, _ = _quant_sym16_headroom(_t2n(tc["n"]).reshape(a["H"]))
+    n_scale, _ = _quant_sym16_headroom(
+        _t2n(tc["n"]).reshape(tc.get("DQ", a["H"])))
     C_scale, _ = _quant_sym16_headroom(_t2n(tc["c"]).flatten())
     return {"W_scale": w_scale,
             "x_scale": x_scale, "x_zero_point": x_zp,
@@ -442,7 +445,10 @@ def _mlstm_int8_trace(tc, perturb=1.0):
     _slstm_int8_trace above; the exit state is {"state": C[H*H], "n": n[H],
     "m": m[1]}."""
     a = _case_arrays(tc, "m")
+    # H is the VALUE width here - y and output are sized by it - and DQ is the
+    # query/key width. They are equal for a square cell.
     H, T = a["H"], a["T"]
+    DQ, DV = tc.get("DQ", H), tc.get("DV", H)
     W, b, x = a["W"], a["b"], a["x"]
     y_gold, out_gold = a["y_gold"], a["out_gold"]
 
@@ -456,21 +462,22 @@ def _mlstm_int8_trace(tc, perturb=1.0):
     xq = _qs8(x, x_scale, x_zp)
     bq = np.round(b / (w_scale * x_scale)).astype(np.int64)
 
-    C_f = np.zeros((H, H))
-    n_f = np.zeros(H)
+    C_f = np.zeros((DQ, DV))
+    n_f = np.zeros(DQ)
     m_state = np.zeros(1)
-    out_computed = np.zeros((T, H))
-    out_q = np.zeros((T, H), dtype=np.int64)
-    C_q = np.zeros((H, H))
-    n_q = np.zeros(H)
-    yq = np.zeros(H)
+    out_computed = np.zeros((T, DV))
+    out_q = np.zeros((T, DV), dtype=np.int64)
+    C_q = np.zeros((DQ, DV))
+    n_q = np.zeros(DQ)
+    yq = np.zeros(DV)
     for t in range(T):
         xt = xq[0, t, :]
         acc = Wq.astype(np.int64) @ (xt - x_zp)
         preact = acc.astype(np.float64) * w_scale * x_scale + bq.astype(np.float64) * w_scale * x_scale
-        q = preact[0:H]; k = preact[H:2*H]; v = preact[2*H:3*H]
-        i_raw = preact[3*H]; f_raw = preact[3*H+1]; o_raw = preact[3*H+2:4*H+2]
-        k = k / np.sqrt(H)
+        q = preact[0:DQ]; k = preact[DQ:2*DQ]; v = preact[2*DQ:2*DQ+DV]
+        i_raw = preact[2*DQ+DV]; f_raw = preact[2*DQ+DV+1]
+        o_raw = preact[2*DQ+DV+2:2*DQ+2*DV+2]
+        k = k / np.sqrt(DQ)
         m_prev = m_state[0]
         log_f_plus_m = -np.logaddexp(0, -f_raw) + m_prev
         m_new = max(log_f_plus_m, i_raw)
@@ -691,6 +698,108 @@ def slstm_sized_case(H, seed):
         B=1, T=3, I=I, H=H,
         W=W, R=R, b=b, input=x,
         y=y, c=c, n=n, m=m, output=output,
+        tol_f32=1e-5)
+
+
+def _native_step():
+    """mlstm_kernels' rectangular recurrent step, loaded from its file.
+
+    Importing the package pulls in triton, which this environment has no need
+    of and does not install, so the one module is loaded directly."""
+    import importlib.util, glob
+    path = glob.glob(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))),
+        ".venv/lib/python*/site-packages/mlstm_kernels/torch/recurrent/"
+        "native_step.py"))[0]
+    spec = importlib.util.spec_from_file_location("_native_step", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.mlstm_recurrent_step__native_fw
+
+
+def run_mlstm_rect(W, b, x_seq, DQ, DV):
+    """mLSTM with independent query/key and value widths.
+
+    recurrent_step_stabilized_simple cannot serve here: it reads one DH off
+    q.shape and uses it for the value side too, so it only ever describes a
+    square cell. mlstm_kernels' step carries matC as (B, NH, DHQK, DHV) and is
+    the rectangular reference; it is also the one the downstream stack runs.
+
+    The two spell the 1/sqrt scaling differently - it scales q at readout,
+    this library scales k into the state - so h agrees exactly while the
+    stored C and n differ by that constant. The cross-check below asserts the
+    agreement that matters (h) and the exact factor on the state, rather than
+    assuming either.
+
+    Weight layout: rows q(DQ), k(DQ), v(DV), w_i(1), w_f(1), o(DV).
+    """
+    native = _native_step()
+    I = W.shape[1]
+    B, T = x_seq.shape[0], x_seq.shape[1]
+    scale = 1.0 / math.sqrt(DQ)
+
+    C = torch.zeros(B, DQ, DV, dtype=torch.float32)
+    n = torch.zeros(B, DQ, dtype=torch.float32)
+    m = torch.zeros(B, 1, dtype=torch.float32)
+    Cr = torch.zeros(B, 1, DQ, DV, dtype=torch.float32)
+    nr = torch.zeros(B, 1, DQ, dtype=torch.float32)
+    mr = torch.zeros(B, 1, 1, dtype=torch.float32)
+    outputs = []
+
+    with torch.no_grad():
+        for t in range(T):
+            proj = x_seq[:, t, :] @ W.T + b
+            q = proj[:, :DQ]
+            k = proj[:, DQ:2 * DQ]
+            v = proj[:, 2 * DQ:2 * DQ + DV]
+            i_raw = proj[:, 2 * DQ + DV:2 * DQ + DV + 1]
+            f_raw = proj[:, 2 * DQ + DV + 1:2 * DQ + DV + 2]
+            o_raw = proj[:, 2 * DQ + DV + 2:]
+
+            ks = k * scale
+            log_f = torch.nn.functional.logsigmoid(f_raw)
+            m_new = torch.maximum(log_f + m, i_raw)
+            fg = torch.exp(log_f + m - m_new)
+            ig = torch.exp(i_raw - m_new)
+            C = fg[..., None] * C + ig[..., None] * (ks[:, :, None] @ v[:, None, :])
+            n = fg * n + ig * ks
+            m = m_new
+            qn = (q[:, None, :] @ n[:, :, None]).squeeze(-1)
+            denom = torch.maximum(qn.abs(), torch.exp(-m)) + 1e-6
+            h = (q[:, None, :] @ C).squeeze(-2) / denom
+
+            h_ref, (Cr, nr, mr) = native(
+                Cr, nr, mr,
+                q.unsqueeze(1), k.unsqueeze(1), v.unsqueeze(1),
+                i_raw.unsqueeze(1), f_raw.unsqueeze(1))
+            h_ref = h_ref.squeeze(1)
+            assert torch.allclose(h, h_ref, atol=2e-5), \
+                f"rectangular h disagrees with mlstm_kernels at t={t}"
+            assert torch.allclose(C, Cr.squeeze(1) * scale, atol=2e-5), \
+                f"rectangular C is not the reference state scaled by 1/sqrt(DQ) at t={t}"
+            assert torch.allclose(n, nr.squeeze(1) * scale, atol=2e-5), \
+                f"rectangular n is not the reference state scaled by 1/sqrt(DQ) at t={t}"
+
+            outputs.append(torch.sigmoid(o_raw) * h)
+
+    output = torch.stack(outputs, dim=1)
+    return output, outputs[-1], C.reshape(B, DQ * DV), n, m
+
+
+def mlstm_rect_case(DQ, DV, seed):
+    """mLSTM case with DQ != DV, 3 timesteps, I = DV."""
+    torch.manual_seed(seed)
+    I = DV
+    rows = 2 * DQ + 2 * DV + 2
+    W = torch.randn(rows, I) * 0.5
+    b = torch.randn(rows) * 0.1
+    x = torch.randn(1, 3, I)
+    output, y, C, n, m = run_mlstm_rect(W, b, x, DQ, DV)
+    return dict(
+        name=f"RectM{DQ}x{DV}", comment=f"Rectangular DQ={DQ} DV={DV}, 3 timesteps",
+        B=1, T=3, I=I, H=DV, DQ=DQ, DV=DV,
+        W=W, b=b, input=x,
+        y=y, c=C, n=n, m=m, output=output,
         tol_f32=1e-5)
 
 
@@ -956,6 +1065,10 @@ def build_cases():
     for idx, H in enumerate(SWEEP_SIZES):
         slstm_cases.append(slstm_sized_case(H, seed=1000 + idx))
         mlstm_cases.append(mlstm_sized_case(H, seed=2000 + idx))
+    # Both orders, and widths that are not multiples of each other or of the
+    # vector width, so the two extents cannot be silently swapped.
+    for idx, (dq, dv) in enumerate([(4, 12), (12, 4), (5, 13)]):
+        mlstm_cases.append(mlstm_rect_case(dq, dv, seed=2600 + idx))
 
     # The two per-head slices go into the ordinary sLSTM table (they are
     # ordinary single-head cases, and running them through the f32 and INT8
@@ -1041,6 +1154,8 @@ def _emit_case(f, tc, state_key, has_R):
 CASE_STRUCT = """typedef struct {
     const char* name;
     int B, T, I, H;
+    int DQ, DV;                   /* mLSTM query/key and value widths;
+                                   * both equal H for a square cell */
     const float* W;
     const float* R;               /* NULL for mLSTM */
     const float* b;
@@ -1095,6 +1210,20 @@ CASE_STRUCT = """typedef struct {
 """
 
 
+def _cfloat(x):
+    """A C float literal that is always spelled as one.
+
+    "%.8g" of an integral value drops the decimal point, and "1f" is not a
+    float literal - it is an integer with an unknown user-defined suffix, which
+    the compiler rejects. Any tolerance that happens to land on a whole number
+    hits this, so the point is put back rather than relying on none of them
+    doing so."""
+    t = f"{x:.8g}"
+    if "." not in t and "e" not in t and "E" not in t and "inf" not in t and "nan" not in t:
+        t += ".0"
+    return t + "f"
+
+
 def _emit_table(f, cases, table_name, state_key, has_R):
     """Emit a static array of XlstmRefCase referencing the per-case arrays.
 
@@ -1125,9 +1254,11 @@ def _emit_table(f, cases, table_name, state_key, has_R):
         m_fl = f"k{n}_tol_s8_m_floor_per_elem" if has_state_tol else "NULL"
         f.write(
             f'    {{"{n}", {tc["B"]}, {tc["T"]}, {tc["I"]}, {tc["H"]}, '
+            f'{tc.get("DQ", tc["H"])}, {tc.get("DV", tc["H"])}, '
             f'k{src}_W, {R}, k{src}_b, k{n}_input, k{n}_expected_y, {state}, '
             f'k{n}_expected_n, k{n}_expected_m, {out}, '
-            f'{tc.get("tol_f32", 1e-5):.8g}f, {tc.get("tol_s8", 0.10):.8g}f, '
+            f'{_cfloat(tc.get("tol_f32", 1e-5))}, '
+            f'{_cfloat(tc.get("tol_s8", 0.10))}, '
             f'{per_channel}, {floor}, {st_tol}, {n_tol}, {m_tol}, '
             f'{st_fl}, {n_fl}, {m_fl}}},\n'
         )

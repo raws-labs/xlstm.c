@@ -256,17 +256,21 @@ def generate_slstm_model(B, T, I, H):
     return build_tflite_model("SLSTM", tensors, input_indices, output_indices)
 
 
-def generate_mlstm_model(B, T, I, H):
-    """Generate .tflite model for mLSTM custom op."""
+def generate_mlstm_model(B, T, I, DQ, DV):
+    """Generate .tflite model for mLSTM custom op.
+
+    The adapter takes DV off y's shape and DQ off n's, so the two widths
+    reach it through these tensor shapes and nothing else."""
+    R = 2*DQ + 2*DV + 2
     tensors = [
         ("input",  [B, T, I],    TensorType.FLOAT32),  # 0
-        ("W",      [4*H+2, I],   TensorType.FLOAT32),  # 1
-        ("b",      [4*H+2],      TensorType.FLOAT32),  # 2
-        ("y",      [B, H],       TensorType.FLOAT32),  # 3
-        ("C",      [B, H*H],     TensorType.FLOAT32),  # 4
-        ("n",      [B, H],       TensorType.FLOAT32),  # 5
+        ("W",      [R, I],       TensorType.FLOAT32),  # 1
+        ("b",      [R],          TensorType.FLOAT32),  # 2
+        ("y",      [B, DV],      TensorType.FLOAT32),  # 3
+        ("C",      [B, DQ*DV],   TensorType.FLOAT32),  # 4
+        ("n",      [B, DQ],      TensorType.FLOAT32),  # 5
         ("m",      [B, 1],       TensorType.FLOAT32),  # 6
-        ("output", [B, T, H],    TensorType.FLOAT32),  # 7
+        ("output", [B, T, DV],   TensorType.FLOAT32),  # 7
     ]
     input_indices = list(range(7))
     output_indices = [7]
@@ -364,7 +368,7 @@ def main():
     st1 = ref["slstm"]["test1"]
     mt1 = ref["mlstm"]["test1"]
     dims_s = (st1["B"], st1["T"], st1["I"], st1["H"])
-    dims_m = (mt1["B"], mt1["T"], mt1["I"], mt1["H"])
+    dims_m = (mt1["B"], mt1["T"], mt1["I"], mt1["DQ"], mt1["DV"])
 
     # test5 is H=8, T=3: the INT8 gate needs a case big enough that a small
     # numerical drift actually moves an output integer, and one with more
@@ -377,11 +381,19 @@ def main():
     dims_s5 = (st5["B"], st5["T"], st5["I"], st5["H"])
     dims_m5 = (mt5["B"], mt5["T"], mt5["I"], mt5["H"])
 
+    # test9 is DQ=4, DV=12: the only case where the adapter's two widths
+    # differ, so it is the only one that can catch reading one where the
+    # other belongs. Square models leave that path uncovered.
+    mt9 = ref["mlstm"]["test9"]
+    dims_m9 = (mt9["B"], mt9["T"], mt9["I"], mt9["DQ"], mt9["DV"])
+
     for bytes_, var in [
         (generate_slstm_model(*dims_s), "slstm_model_data"),
         (generate_mlstm_model(*dims_m), "mlstm_model_data"),
+        (generate_mlstm_model(*dims_m9), "mlstm_rect_model_data"),
         (generate_slstm_s8_model(*dims_s, st1["s8"]), "slstm_s8_model_data"),
-        (generate_mlstm_s8_model(*dims_m, mt1["s8"]), "mlstm_s8_model_data"),
+        (generate_mlstm_s8_model(mt1["B"], mt1["T"], mt1["I"], mt1["H"],
+                                 mt1["s8"]), "mlstm_s8_model_data"),
         (generate_slstm_s8_model(*dims_s5, st5["s8"]), "slstm_s8_big_model_data"),
         (generate_mlstm_s8_model(*dims_m5, mt5["s8"]), "mlstm_s8_big_model_data"),
     ]:

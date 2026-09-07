@@ -15,7 +15,7 @@
  * mLSTM ESP-DL module - wraps core as an ESP-DL Module subclass.
  *
  * Input tensors (via forward() vector):
- *   [0] X[B,T,I]  [1] W[4H+2,I]  [2] b[4H+2]  [3] output[B,T,H]
+ *   [0] X[B,T,I]  [1] W[2DQ+2DV+2,I]  [2] b[2DQ+2DV+2]  [3] output[B,T,DV]
  *
  * States (y, C, n, m) are owned by the module and persist across calls.
  *
@@ -42,16 +42,20 @@ namespace module {
 
 class MLSTM : public Module {
 public:
-    int m_hidden_size;
+    // The value width sizes y, the output and C's columns; the query/key
+    // width sizes the normalizer and C's rows. Equal for a square cell.
+    int m_v_size;
+    int m_qk_size;
     int m_input_size;
 
     MLSTM(const char* name,
-           int hidden_size,
+           int v_size,
            int input_size,
            module_inplace_t inplace = MODULE_NON_INPLACE,
            quant_type_t quant_type = QUANT_TYPE_NONE,
            int C_exponent = 0,
-           int n_exponent = 0);
+           int n_exponent = 0,
+           int qk_size = 0);   // 0 keeps the cell square
 
     ~MLSTM();
 

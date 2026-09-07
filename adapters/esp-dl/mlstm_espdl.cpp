@@ -22,11 +22,12 @@
 namespace dl {
 namespace module {
 
-MLSTM::MLSTM(const char* name, int hidden_size, int input_size,
+MLSTM::MLSTM(const char* name, int v_size, int input_size,
               module_inplace_t inplace, quant_type_t quant_type,
-              int C_exponent, int n_exponent)
+              int C_exponent, int n_exponent, int qk_size)
     : Module(name, inplace, quant_type),
-      m_hidden_size(hidden_size),
+      m_v_size(v_size),
+      m_qk_size(qk_size > 0 ? qk_size : v_size),
       m_input_size(input_size),
       m_y(nullptr), m_C(nullptr), m_n(nullptr), m_scratch(nullptr),
       m_y_q(nullptr), m_C_q(nullptr), m_n_q(nullptr), m_scratch_q(nullptr),
@@ -42,17 +43,17 @@ MLSTM::~MLSTM() {
 
 void MLSTM::init_states() {
     if (m_initialized) return;
-    int H = m_hidden_size;
+    int DQ = m_qk_size, DV = m_v_size;
     if (quantized()) {
-        m_y_q       = new int8_t[H]();
-        m_C_q       = new int16_t[H * H]();
-        m_n_q       = new int16_t[H]();
-        m_scratch_q = new int32_t[4 * H + 2]();
+        m_y_q       = new int8_t[DV]();
+        m_C_q       = new int16_t[DQ * DV]();
+        m_n_q       = new int16_t[DQ]();
+        m_scratch_q = new int32_t[2 * DQ + 2 * DV + 2]();
     } else {
-        m_y       = new float[H]();
-        m_C       = new float[H * H]();
-        m_n       = new float[H]();
-        m_scratch = new float[4 * H + 2]();
+        m_y       = new float[DV]();
+        m_C       = new float[DQ * DV]();
+        m_n       = new float[DQ]();
+        m_scratch = new float[2 * DQ + 2 * DV + 2]();
     }
     m_m = new float[1]();
     m_initialized = true;
@@ -81,7 +82,7 @@ std::vector<std::vector<int>> MLSTM::get_output_shape(
 {
     auto& x_shape = input_shapes[0];
     std::vector<int> out_shape = x_shape;
-    out_shape.back() = m_hidden_size;
+    out_shape.back() = m_v_size;
     return {out_shape};
 }
 
@@ -96,7 +97,8 @@ void MLSTM::forward(std::vector<dl::TensorBase*>& tensors, runtime_mode_t mode) 
 }
 
 void MLSTM::forward_f32(std::vector<dl::TensorBase*>& tensors) {
-    // tensors: [0]=X[B,T,I], [1]=W[4H+2,I], [2]=b[4H+2], [3]=output[B,T,H]
+    // tensors: [0]=X[B,T,I], [1]=W[2DQ+2DV+2,I], [2]=b[2DQ+2DV+2],
+    //          [3]=output[B,T,DV]
     TensorBase* input_x = tensors[0];
     TensorBase* input_W = tensors[1];
     TensorBase* input_b = tensors[2];
@@ -107,7 +109,7 @@ void MLSTM::forward_f32(std::vector<dl::TensorBase*>& tensors) {
     int time_steps  = (x_shape.size() == 3) ? x_shape[1] : x_shape[0];
     int input_size  = x_shape.back();
 
-    MlstmParams params = {0.0f};
+    MlstmParams params = {};
 
     mlstm_eval_f32(
         input_x->get_element_ptr<float>(),
@@ -116,7 +118,7 @@ void MLSTM::forward_f32(std::vector<dl::TensorBase*>& tensors) {
         m_y, m_C, m_n, m_m,
         output->get_element_ptr<float>(),
         m_scratch,
-        batch_size, time_steps, input_size, m_hidden_size, m_hidden_size,
+        batch_size, time_steps, input_size, m_qk_size, m_v_size,
         &params);
 }
 
@@ -135,7 +137,7 @@ void MLSTM::forward_s8(std::vector<dl::TensorBase*>& tensors) {
     // ESP-DL stores a scale as its base-2 exponent; DL_SCALE turns it back
     // into a float. Quantization is symmetric here, so every zero-point is
     // 0 - this is unpacking the framework's representation, not arithmetic.
-    MlstmS8Params params;
+    MlstmS8Params params = {};
     params.cell_clip = 0.0f;
     params.W_scale = DL_SCALE(input_W->exponent);
     params.x_quant.scale      = DL_SCALE(input_x->exponent);
@@ -154,7 +156,7 @@ void MLSTM::forward_s8(std::vector<dl::TensorBase*>& tensors) {
         m_y_q, m_C_q, m_n_q, m_m,
         output->get_element_ptr<int8_t>(),
         m_scratch_q,
-        batch_size, time_steps, input_size, m_hidden_size, m_hidden_size,
+        batch_size, time_steps, input_size, m_qk_size, m_v_size,
         &params);
 }
 

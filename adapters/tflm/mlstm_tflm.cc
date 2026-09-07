@@ -60,18 +60,24 @@ TfLiteStatus MLstmPrepare(TfLiteContext* context, TfLiteNode* node) {
         micro_context->AllocateTempInputTensor(node, kMLstmHiddenStateTensor);
     TF_LITE_ENSURE(context, hidden_state != nullptr);
 
+    TfLiteTensor* normalizer_state =
+        micro_context->AllocateTempInputTensor(node, kMLstmNormalizerStateTensor);
+    TF_LITE_ENSURE(context, normalizer_state != nullptr);
+
     op_data->batch_size = input->dims->data[0];
     op_data->time_steps = input->dims->data[1];
     op_data->input_size = input->dims->data[2];
-    op_data->hidden_size = hidden_state->dims->data[1];
+    op_data->v_size = hidden_state->dims->data[1];
+    op_data->qk_size = normalizer_state->dims->data[1];
 
     micro_context->DeallocateTempTfLiteTensor(input);
     micro_context->DeallocateTempTfLiteTensor(hidden_state);
+    micro_context->DeallocateTempTfLiteTensor(normalizer_state);
 
     op_data->cell_clip = 0.0f;
 
-    // Gate accumulators, (4*H+2) of them: float on the f32 path, int32 on
-    // the INT8 one. Sized for the wider of the two so Prepare does not have
+    // Gate accumulators, (2*DQ+2*DV+2) of them: float on the f32 path, int32
+    // on the INT8 one. Sized for the wider of the two so Prepare does not have
     // to care which Eval will run.
     const size_t elem = sizeof(float) > sizeof(int32_t) ? sizeof(float)
                                                         : sizeof(int32_t);
@@ -79,7 +85,7 @@ TfLiteStatus MLstmPrepare(TfLiteContext* context, TfLiteNode* node) {
         context,
         context->RequestScratchBufferInArena(
             context,
-            (4 * op_data->hidden_size + 2) * elem,
+            (2 * op_data->qk_size + 2 * op_data->v_size + 2) * elem,
             &op_data->scratch_buffer_index));
 
     return kTfLiteOk;
@@ -111,7 +117,7 @@ TfLiteStatus MLstmEvalFloat(TfLiteContext* context, TfLiteNode* node,
         context->GetScratchBuffer(context, op_data->scratch_buffer_index));
 
     // Set up core params
-    MlstmParams params;
+    MlstmParams params = {};
     params.cell_clip = op_data->cell_clip;
 
     // Call portable core
@@ -128,7 +134,7 @@ TfLiteStatus MLstmEvalFloat(TfLiteContext* context, TfLiteNode* node,
         op_data->batch_size,
         op_data->time_steps,
         op_data->input_size,
-        op_data->hidden_size, op_data->hidden_size,
+        op_data->qk_size, op_data->v_size,
         &params);
 
     // Deallocate temp tensors
@@ -177,7 +183,7 @@ TfLiteStatus MLstmEvalInt8(TfLiteContext* context, TfLiteNode* node,
     int32_t* scratch = static_cast<int32_t*>(
         context->GetScratchBuffer(context, op_data->scratch_buffer_index));
 
-    MlstmS8Params params;
+    MlstmS8Params params = {};
     params.cell_clip = op_data->cell_clip;
     // Weights are symmetric (zero_point 0), so the kernel takes their scale
     // alone; activations and states carry a full scale/zero-point pair.
@@ -203,7 +209,7 @@ TfLiteStatus MLstmEvalInt8(TfLiteContext* context, TfLiteNode* node,
         op_data->batch_size,
         op_data->time_steps,
         op_data->input_size,
-        op_data->hidden_size, op_data->hidden_size,
+        op_data->qk_size, op_data->v_size,
         &params);
 
     micro_context->DeallocateTempTfLiteTensor(input);

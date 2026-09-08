@@ -67,11 +67,12 @@ typedef struct {
 
 /* Single timestep of mLSTM (INT8 quantized).
  *
- * State pointers (y, C, n, m) are updated in-place.
- * C is a flattened HxH matrix (row-major, INT16).
- * m is a scalar (single float).
+ * State pointers (y, C, n, m) are updated in-place: y[v_size] INT8,
+ * C[qk_size * v_size] INT16 flattened row-major, n[qk_size] INT16, m a single
+ * float - it stays float even here, see the header comment above.
  * Caller must provide a scratch buffer of at least
- * (2*qk_size+2*v_size+2) int32_t. */
+ * (2*qk_size+2*v_size+2) int32_t. It carries nothing between calls, so one
+ * buffer serves any number of cells. */
 void mlstm_step_s8(
     const int8_t* x,          /* [I] */
     const int8_t* W_q,        /* [(2*qk_size+2*v_size+2), I] */
@@ -88,8 +89,9 @@ void mlstm_step_s8(
 
 /* Full sequence evaluation (INT8 quantized): batch + time loop.
  *
- * Processes input[B, T, I] and writes output[B, T, H] (all INT8).
- * State tensors: y[B,H] INT8, C[B,H*H] INT16, n[B,H] INT16, m[B,1] float.
+ * Processes input[B, T, I] and writes output[B, T, v_size] (all INT8).
+ * State tensors: y[B, v_size] INT8, C[B, qk_size*v_size] INT16,
+ * n[B, qk_size] INT16, m[B, 1] float.
  * Caller must provide a scratch buffer of at least
  * (2*qk_size+2*v_size+2) int32_t. */
 void mlstm_eval_s8(

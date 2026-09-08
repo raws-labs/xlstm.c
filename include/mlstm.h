@@ -84,10 +84,11 @@ typedef struct {
 
 /* Single timestep of mLSTM.
  *
- * State pointers (y, C, n, m) are updated in-place.
- * C is a flattened HxH matrix (row-major).
- * m is a scalar (single float).
- * Caller must provide a scratch buffer of at least (4*H+2) floats. */
+ * State pointers (y, C, n, m) are updated in-place: y[v_size],
+ * C[qk_size * v_size] flattened row-major, n[qk_size], m a single float.
+ * Caller must provide a scratch buffer of at least
+ * (2*qk_size + 2*v_size + 2) floats. It carries nothing between calls - it is
+ * overwritten from b on entry - so one buffer serves any number of cells. */
 void mlstm_step_f32(
     const float* x,       /* [input_size] */
     const float* W,       /* [(2*qk_size+2*v_size+2), input_size] */
@@ -104,9 +105,10 @@ void mlstm_step_f32(
 
 /* Full sequence evaluation: batch + time loop.
  *
- * Processes input[B, T, I] and writes output[B, T, H].
- * State tensors: y[B,H], C[B,H*H], n[B,H], m[B,1].
- * Caller must provide a scratch buffer of at least (4*H+2) floats. */
+ * Processes input[B, T, I] and writes output[B, T, v_size].
+ * State tensors: y[B, v_size], C[B, qk_size*v_size], n[B, qk_size], m[B, 1].
+ * Caller must provide a scratch buffer of at least
+ * (2*qk_size + 2*v_size + 2) floats. */
 void mlstm_eval_f32(
     const float* input,   /* [batch_size, time_steps, input_size] */
     const float* W,       /* [(2*qk_size+2*v_size+2), input_size] */

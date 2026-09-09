@@ -832,14 +832,7 @@ reference: test/generate_reference.py
 
 check-internal-refs:
 	@fail=0; \
-	sib=$$(git ls-files -z | xargs -0 grep -nE '[a-z0-9_.]+\.c-(hil|bench)|raws-strategy|siliconrig' 2>/dev/null \
-	       | grep -v '^Makefile:'); \
-	if [ -n "$$sib" ]; then \
-		echo "check-internal-refs: names a sibling repository:"; \
-		echo "$$sib"; fail=1; \
-	fi; \
-	abs=$$(git ls-files -z | xargs -0 grep -nE '/(home|Users)/[A-Za-z0-9_.-]+/' 2>/dev/null \
-	       | grep -v '^Makefile:.*home|Users'); \
+	abs=$$(git ls-files -z | xargs -0 grep -nE '/(home|Users)/[A-Za-z0-9_.-]+/' 2>/dev/null); \
 	if [ -n "$$abs" ]; then \
 		echo "check-internal-refs: absolute path into a home directory:"; \
 		echo "$$abs"; fail=1; \
@@ -850,8 +843,28 @@ check-internal-refs:
 			git ls-files -z | xargs -0 grep -n "$$ref" 2>/dev/null | head -3; \
 			fail=1; }; \
 	done; \
+	if [ -r .internal-refs ]; then \
+		pat=$$(sed -e 's/#.*//' -e '/^[[:space:]]*$$/d' .internal-refs | paste -sd'|'); \
+		if [ -n "$$pat" ]; then \
+			hit=$$(git ls-files -z | xargs -0 grep -inE "$$pat" 2>/dev/null); \
+			if [ -n "$$hit" ]; then \
+				echo "check-internal-refs: tracked file carries a private name:"; \
+				echo "$$hit"; fail=1; \
+			fi; \
+			tag=$$(git describe --tags --abbrev=0 2>/dev/null); \
+			if [ -n "$$tag" ]; then \
+				msg=$$(git log $$tag..HEAD --format='%h %B' 2>/dev/null | grep -inE "$$pat"); \
+				if [ -n "$$msg" ]; then \
+					echo "check-internal-refs: a commit message since $$tag carries a private name:"; \
+					echo "$$msg"; fail=1; \
+				fi; \
+			fi; \
+		fi; \
+	else \
+		echo "check-internal-refs: note - .internal-refs absent, structural checks only"; \
+	fi; \
 	if [ $$fail -ne 0 ]; then \
-		echo "Write the fact inline instead of citing a document that is not in the repo."; \
+		echo "Write the fact inline instead of naming something that is not in the repo."; \
 		exit 1; \
 	fi; \
 	echo "check-internal-refs: OK"

@@ -128,89 +128,22 @@ def run_slstm_multihead(W_fused, R_stack, b_fused, x_seq, num_heads):
 # mLSTM helpers
 # ============================================================================
 
-def run_mlstm(W, b, x_seq):
-    """
-    Run mLSTM on a sequence with sigmoid output gate.
+def run_mlstm(W, b, x_seq, soft_cap=0.0):
+    """Square mLSTM: the DQ == DV case of run_mlstm_rect, which carries the
+    step math and the cross-validation for both.
 
-    Our kernel weight layout: W[(4*H+2), I], b[4*H+2]
+    Weight layout W[(4*H+2), I], b[4*H+2]:
       Rows 0..H-1:     W_q (query)
       Rows H..2H-1:    W_k (key)
       Rows 2H..3H-1:   W_v (value)
-      Row  3H:          w_i (scalar input gate)
-      Row  3H+1:        w_f (scalar forget gate)
+      Row  3H:         w_i (scalar input gate)
+      Row  3H+1:       w_f (scalar forget gate)
       Rows 3H+2..4H+1: W_o (output gate)
 
-    Cross-validates core state update against recurrent_step_stabilized_simple.
-
-    Args:
-        W: [(4*H+2), I] weight matrix
-        b: [4*H+2] bias vector
-        x_seq: [B, T, I] input sequence
-
-    Returns:
-        output: [B, T, H] hidden outputs per timestep
-        y: [B, H] final hidden state
-        C: [B, H*H] final cell state (flattened)
-        n: [B, H] final normalizer
-        m: [B, 1] final stabilizer
+    Returns (output [B,T,H], y [B,H], C [B,H*H], n [B,H], m [B,1]).
     """
-    total_rows = W.shape[0]
-    I = W.shape[1]
-    H = (total_rows - 2) // 4
-    B, T = x_seq.shape[0], x_seq.shape[1]
-
-    # Initialize states
-    C = torch.zeros(B, H, H, dtype=torch.float32)
-    n = torch.zeros(B, H, 1, dtype=torch.float32)
-    m = torch.zeros(B, 1, 1, dtype=torch.float32)
-    outputs = []
-
-    with torch.no_grad():
-        for t in range(T):
-            x_t = x_seq[:, t, :]  # [B, I]
-
-            # Compute projections: [B, 4*H+2]
-            proj = x_t @ W.T + b  # [B, 4*H+2]
-
-            q = proj[:, :H]              # [B, H]
-            k = proj[:, H:2*H]           # [B, H]
-            v = proj[:, 2*H:3*H]         # [B, H]
-            i_raw = proj[:, 3*H:3*H+1]   # [B, 1]
-            f_raw = proj[:, 3*H+1:3*H+2] # [B, 1]
-            o_raw = proj[:, 3*H+2:]       # [B, H]
-
-            # Cross-validate with NX-AI reference (NH=1)
-            q_ref = q.unsqueeze(1).unsqueeze(2)    # [B, 1, 1, H]
-            k_ref = k.unsqueeze(1).unsqueeze(2)    # [B, 1, 1, H]
-            v_ref = v.unsqueeze(1).unsqueeze(2)    # [B, 1, 1, H]
-            i_ref = i_raw.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, 1]
-            f_ref = f_raw.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, 1]
-            C_ref = C.unsqueeze(1)                 # [B, 1, H, H]
-            n_ref = n.unsqueeze(1)                 # [B, 1, H, 1]
-            m_ref = m.unsqueeze(1)                 # [B, 1, 1, 1]
-
-            h_ref, (C_new_ref, n_new_ref, m_new_ref) = \
-                recurrent_step_stabilized_simple(
-                    C_ref, n_ref, m_ref,
-                    q_ref, k_ref, v_ref,
-                    i_ref, f_ref)
-
-            # h_ref: [B, 1, 1, H] -> squeeze to [B, H]
-            h_ref = h_ref.squeeze(1).squeeze(1)
-            C = C_new_ref.squeeze(1)      # [B, H, H]
-            n = n_new_ref.squeeze(1)      # [B, H, 1]
-            m = m_new_ref.squeeze(1)      # [B, 1, 1]
-
-            # Apply sigmoid output gate (our kernel includes this)
-            o_gate = torch.sigmoid(o_raw)  # [B, H]
-            y = o_gate * h_ref             # [B, H]
-            outputs.append(y)
-
-    output = torch.stack(outputs, dim=1)  # [B, T, H]
-    C_flat = C.reshape(B, H * H)          # [B, H*H]
-    n_flat = n.squeeze(-1)                # [B, H]
-    m_flat = m.squeeze(-1)                # [B, 1]
-    return output, y, C_flat, n_flat, m_flat
+    H = (W.shape[0] - 2) // 4
+    return run_mlstm_rect(W, b, x_seq, H, H, soft_cap)
 
 
 def fmt(tensor):
@@ -320,7 +253,9 @@ def _case_arrays(tc, cell):
     H, T, I = tc["H"], tc["T"], tc["I"]
     y_gold = _t2n(tc["y"]).reshape(H)
     a = {"H": H, "T": T, "I": I,
-         "W": _t2n(tc["W"]).reshape(4 * H if cell == "s" else 4 * H + 2, I),
+         "W": _t2n(tc["W"]).reshape(
+            4 * H if cell == "s"
+            else 2 * tc.get("DQ", H) + 2 * tc.get("DV", H) + 2, I),
          "b": _t2n(tc["b"]),
          "x": _t2n(tc["input"]).reshape(1, T, I),
          "y_gold": y_gold,
@@ -355,7 +290,8 @@ def _mlstm_s8_calib(tc):
     w_scale, _ = _quant_sym8(a["W"].flatten())
     x_scale, x_zp = _quant_asym(a["x"].flatten())
     y_scale, y_zp = _quant_asym(a["out_gold"].flatten())
-    n_scale, _ = _quant_sym16_headroom(_t2n(tc["n"]).reshape(a["H"]))
+    n_scale, _ = _quant_sym16_headroom(
+        _t2n(tc["n"]).reshape(tc.get("DQ", a["H"])))
     C_scale, _ = _quant_sym16_headroom(_t2n(tc["c"]).flatten())
     return {"W_scale": w_scale,
             "x_scale": x_scale, "x_zero_point": x_zp,
@@ -442,7 +378,10 @@ def _mlstm_int8_trace(tc, perturb=1.0):
     _slstm_int8_trace above; the exit state is {"state": C[H*H], "n": n[H],
     "m": m[1]}."""
     a = _case_arrays(tc, "m")
+    # H is the VALUE width here - y and output are sized by it - and DQ is the
+    # query/key width. They are equal for a square cell.
     H, T = a["H"], a["T"]
+    DQ, DV = tc.get("DQ", H), tc.get("DV", H)
     W, b, x = a["W"], a["b"], a["x"]
     y_gold, out_gold = a["y_gold"], a["out_gold"]
 
@@ -456,21 +395,26 @@ def _mlstm_int8_trace(tc, perturb=1.0):
     xq = _qs8(x, x_scale, x_zp)
     bq = np.round(b / (w_scale * x_scale)).astype(np.int64)
 
-    C_f = np.zeros((H, H))
-    n_f = np.zeros(H)
+    C_f = np.zeros((DQ, DV))
+    n_f = np.zeros(DQ)
     m_state = np.zeros(1)
-    out_computed = np.zeros((T, H))
-    out_q = np.zeros((T, H), dtype=np.int64)
-    C_q = np.zeros((H, H))
-    n_q = np.zeros(H)
-    yq = np.zeros(H)
+    out_computed = np.zeros((T, DV))
+    out_q = np.zeros((T, DV), dtype=np.int64)
+    C_q = np.zeros((DQ, DV))
+    n_q = np.zeros(DQ)
+    yq = np.zeros(DV)
     for t in range(T):
         xt = xq[0, t, :]
         acc = Wq.astype(np.int64) @ (xt - x_zp)
         preact = acc.astype(np.float64) * w_scale * x_scale + bq.astype(np.float64) * w_scale * x_scale
-        q = preact[0:H]; k = preact[H:2*H]; v = preact[2*H:3*H]
-        i_raw = preact[3*H]; f_raw = preact[3*H+1]; o_raw = preact[3*H+2:4*H+2]
-        k = k / np.sqrt(H)
+        q = preact[0:DQ]; k = preact[DQ:2*DQ]; v = preact[2*DQ:2*DQ+DV]
+        i_raw = preact[2*DQ+DV]; f_raw = preact[2*DQ+DV+1]
+        o_raw = preact[2*DQ+DV+2:2*DQ+2*DV+2]
+        cap = tc.get("gate_soft_cap", 0.0)
+        if cap > 0.0:
+            i_raw = cap * np.tanh(i_raw / cap)
+            f_raw = cap * np.tanh(f_raw / cap)
+        q = q / np.sqrt(DQ)   # on q at readout, so C and n store unscaled k
         m_prev = m_state[0]
         log_f_plus_m = -np.logaddexp(0, -f_raw) + m_prev
         m_new = max(log_f_plus_m, i_raw)
@@ -691,6 +635,166 @@ def slstm_sized_case(H, seed):
         B=1, T=3, I=I, H=H,
         W=W, R=R, b=b, input=x,
         y=y, c=c, n=n, m=m, output=output,
+        tol_f32=1e-5)
+
+
+def _native_step():
+    """mlstm_kernels' rectangular recurrent step, loaded from its file.
+
+    Importing the package pulls in triton, which this environment has no need
+    of and does not install, so the one module is loaded directly."""
+    import importlib.util, glob
+    path = glob.glob(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))),
+        ".venv/lib/python*/site-packages/mlstm_kernels/torch/recurrent/"
+        "native_step.py"))[0]
+    spec = importlib.util.spec_from_file_location("_native_step", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.mlstm_recurrent_step__native_fw
+
+
+def run_mlstm_rect(W, b, x_seq, DQ, DV, soft_cap=0.0):
+    """mLSTM with independent query/key and value widths.
+
+    The single step implementation behind every mLSTM case here, square ones
+    included. The 1/sqrt(DQ) scaling goes on q at readout, so the stored C and
+    n hold unscaled k - the state the downstream stack keeps, which is what
+    makes a saved state mean the same thing on both sides.
+
+    The two available references spell that scaling differently, which is
+    useful: they pin the convention from opposite sides rather than one being
+    taken on faith.
+
+      - mlstm_kernels' native step carries matC as (B, NH, DHQK, DHV), is the
+        only one that describes a rectangular cell, scales q as we do, and is
+        the one the downstream stack runs. Its state must match ours exactly.
+      - xlstm's recurrent_step_stabilized_simple reads one DH off q.shape and
+        uses it for the value side too, so it can only speak for a square
+        cell and runs only when DQ == DV. It scales k into the state instead,
+        so its state must equal ours times 1/sqrt(DQ) - and h, which the
+        scaling cancels out of, must agree with both.
+
+    Weight layout: rows q(DQ), k(DQ), v(DV), w_i(1), w_f(1), o(DV).
+    """
+    native = _native_step()
+    B, T = x_seq.shape[0], x_seq.shape[1]
+    scale = 1.0 / math.sqrt(DQ)
+    square = DQ == DV
+
+    C = torch.zeros(B, DQ, DV, dtype=torch.float32)
+    n = torch.zeros(B, DQ, dtype=torch.float32)
+    m = torch.zeros(B, 1, dtype=torch.float32)
+    Cr = torch.zeros(B, 1, DQ, DV, dtype=torch.float32)
+    nr = torch.zeros(B, 1, DQ, dtype=torch.float32)
+    mr = torch.zeros(B, 1, 1, dtype=torch.float32)
+    Cs = torch.zeros(B, 1, DQ, DV, dtype=torch.float32)
+    ns = torch.zeros(B, 1, DQ, 1, dtype=torch.float32)
+    ms = torch.zeros(B, 1, 1, 1, dtype=torch.float32)
+    outputs = []
+
+    with torch.no_grad():
+        for t in range(T):
+            proj = x_seq[:, t, :] @ W.T + b
+            q = proj[:, :DQ]
+            k = proj[:, DQ:2 * DQ]
+            v = proj[:, 2 * DQ:2 * DQ + DV]
+            i_raw = proj[:, 2 * DQ + DV:2 * DQ + DV + 1]
+            f_raw = proj[:, 2 * DQ + DV + 1:2 * DQ + DV + 2]
+            o_raw = proj[:, 2 * DQ + DV + 2:]
+
+            # Soft cap before the stabilizer sees them. Both references are
+            # handed the capped values, so they cover the capped arithmetic
+            # rather than only the uncapped.
+            if soft_cap > 0.0:
+                i_raw = soft_cap * torch.tanh(i_raw / soft_cap)
+                f_raw = soft_cap * torch.tanh(f_raw / soft_cap)
+
+            qs = q * scale
+            log_f = torch.nn.functional.logsigmoid(f_raw)
+            m_new = torch.maximum(log_f + m, i_raw)
+            fg = torch.exp(log_f + m - m_new)
+            ig = torch.exp(i_raw - m_new)
+            C = fg[..., None] * C + ig[..., None] * (k[:, :, None] @ v[:, None, :])
+            n = fg * n + ig * k
+            m = m_new
+            qn = (qs[:, None, :] @ n[:, :, None]).squeeze(-1)
+            denom = torch.maximum(qn.abs(), torch.exp(-m)) + 1e-6
+            h = (qs[:, None, :] @ C).squeeze(-2) / denom
+
+            h_ref, (Cr, nr, mr) = native(
+                Cr, nr, mr,
+                q.unsqueeze(1), k.unsqueeze(1), v.unsqueeze(1),
+                i_raw.unsqueeze(1), f_raw.unsqueeze(1))
+            h_ref = h_ref.squeeze(1)
+            assert torch.allclose(h, h_ref, atol=2e-5), \
+                f"h disagrees with mlstm_kernels at t={t}"
+            assert torch.allclose(C, Cr.squeeze(1), atol=2e-5), \
+                f"C is not mlstm_kernels' state at t={t}"
+            assert torch.allclose(n, nr.squeeze(1), atol=2e-5), \
+                f"n is not mlstm_kernels' state at t={t}"
+
+            if square:
+                # It squeeze_()es its arguments in place, so hand it copies.
+                h_sq, (Cs, ns, ms) = recurrent_step_stabilized_simple(
+                    Cs, ns, ms,
+                    q.clone().unsqueeze(1).unsqueeze(2),
+                    k.clone().unsqueeze(1).unsqueeze(2),
+                    v.clone().unsqueeze(1).unsqueeze(2),
+                    i_raw.clone().unsqueeze(1).unsqueeze(2),
+                    f_raw.clone().unsqueeze(1).unsqueeze(2))
+                h_sq = h_sq.squeeze(1).squeeze(1)
+                assert torch.allclose(h, h_sq, atol=2e-5), \
+                    f"h disagrees with recurrent_step_stabilized_simple at t={t}"
+                assert torch.allclose(C * scale, Cs.squeeze(1), atol=2e-5), \
+                    f"C is not that backend's k-scaled state at t={t}"
+                assert torch.allclose(n * scale, ns.squeeze(1).squeeze(-1),
+                                      atol=2e-5), \
+                    f"n is not that backend's k-scaled state at t={t}"
+
+            outputs.append(torch.sigmoid(o_raw) * h)
+
+    output = torch.stack(outputs, dim=1)
+    return output, outputs[-1], C.reshape(B, DQ * DV), n, m
+
+
+def mlstm_capped_case(H, cap, seed):
+    """mLSTM case with the gate soft cap active.
+
+    Only the two gate rows are amplified. The cap has to actually bind - a
+    case whose gate logits sit inside it would pass with the cap disabled and
+    prove nothing - but scaling the whole draw would blow out v and o with
+    it, and the INT8 output range along with them."""
+    torch.manual_seed(seed)
+    I = H
+    W = torch.randn(4 * H + 2, I)
+    b = torch.randn(4 * H + 2)
+    W[3 * H:3 * H + 2] *= 6.0     # rows [q(H), k(H), v(H), i, f, o(H)]
+    b[3 * H:3 * H + 2] *= 6.0
+    x = torch.randn(1, 3, I)
+    output, y, C, n, m = run_mlstm(W, b, x, soft_cap=cap)
+    return dict(
+        name=f"CapM{H}", comment=f"Gate soft cap {cap} at H={H}, 3 timesteps",
+        B=1, T=3, I=I, H=H, gate_soft_cap=cap,
+        W=W, b=b, input=x,
+        y=y, c=C, n=n, m=m, output=output,
+        tol_f32=1e-5)
+
+
+def mlstm_rect_case(DQ, DV, seed):
+    """mLSTM case with DQ != DV, 3 timesteps, I = DV."""
+    torch.manual_seed(seed)
+    I = DV
+    rows = 2 * DQ + 2 * DV + 2
+    W = torch.randn(rows, I) * 0.5
+    b = torch.randn(rows) * 0.1
+    x = torch.randn(1, 3, I)
+    output, y, C, n, m = run_mlstm_rect(W, b, x, DQ, DV)
+    return dict(
+        name=f"RectM{DQ}x{DV}", comment=f"Rectangular DQ={DQ} DV={DV}, 3 timesteps",
+        B=1, T=3, I=I, H=DV, DQ=DQ, DV=DV,
+        W=W, b=b, input=x,
+        y=y, c=C, n=n, m=m, output=output,
         tol_f32=1e-5)
 
 
@@ -956,6 +1060,11 @@ def build_cases():
     for idx, H in enumerate(SWEEP_SIZES):
         slstm_cases.append(slstm_sized_case(H, seed=1000 + idx))
         mlstm_cases.append(mlstm_sized_case(H, seed=2000 + idx))
+    # Both orders, and widths that are not multiples of each other or of the
+    # vector width, so the two extents cannot be silently swapped.
+    for idx, (dq, dv) in enumerate([(4, 12), (12, 4), (5, 13)]):
+        mlstm_cases.append(mlstm_rect_case(dq, dv, seed=2600 + idx))
+    mlstm_cases.append(mlstm_capped_case(8, 1.5, seed=2700))
 
     # The two per-head slices go into the ordinary sLSTM table (they are
     # ordinary single-head cases, and running them through the f32 and INT8
@@ -1041,6 +1150,9 @@ def _emit_case(f, tc, state_key, has_R):
 CASE_STRUCT = """typedef struct {
     const char* name;
     int B, T, I, H;
+    int DQ, DV;                   /* mLSTM query/key and value widths;
+                                   * both equal H for a square cell */
+    float gate_soft_cap;          /* mLSTM gate soft cap; 0 = uncapped */
     const float* W;
     const float* R;               /* NULL for mLSTM */
     const float* b;
@@ -1095,6 +1207,20 @@ CASE_STRUCT = """typedef struct {
 """
 
 
+def _cfloat(x):
+    """A C float literal that is always spelled as one.
+
+    "%.8g" of an integral value drops the decimal point, and "1f" is not a
+    float literal - it is an integer with an unknown user-defined suffix, which
+    the compiler rejects. Any tolerance that happens to land on a whole number
+    hits this, so the point is put back rather than relying on none of them
+    doing so."""
+    t = f"{x:.8g}"
+    if "." not in t and "e" not in t and "E" not in t and "inf" not in t and "nan" not in t:
+        t += ".0"
+    return t + "f"
+
+
 def _emit_table(f, cases, table_name, state_key, has_R):
     """Emit a static array of XlstmRefCase referencing the per-case arrays.
 
@@ -1125,9 +1251,12 @@ def _emit_table(f, cases, table_name, state_key, has_R):
         m_fl = f"k{n}_tol_s8_m_floor_per_elem" if has_state_tol else "NULL"
         f.write(
             f'    {{"{n}", {tc["B"]}, {tc["T"]}, {tc["I"]}, {tc["H"]}, '
+            f'{tc.get("DQ", tc["H"])}, {tc.get("DV", tc["H"])}, '
+            f'{_cfloat(tc.get("gate_soft_cap", 0.0))}, '
             f'k{src}_W, {R}, k{src}_b, k{n}_input, k{n}_expected_y, {state}, '
             f'k{n}_expected_n, k{n}_expected_m, {out}, '
-            f'{tc.get("tol_f32", 1e-5):.8g}f, {tc.get("tol_s8", 0.10):.8g}f, '
+            f'{_cfloat(tc.get("tol_f32", 1e-5))}, '
+            f'{_cfloat(tc.get("tol_s8", 0.10))}, '
             f'{per_channel}, {floor}, {st_tol}, {n_tol}, {m_tol}, '
             f'{st_fl}, {n_fl}, {m_fl}}},\n'
         )
@@ -1299,6 +1428,12 @@ def generate_json(path):
     for i, tc in enumerate(mlstm_cases, start=1):
         entry = {
             "B": tc["B"], "T": tc["T"], "I": tc["I"], "H": tc["H"],
+            # The two widths, so a consumer does not have to infer them from
+            # tensor lengths. Equal to H for a square cell.
+            "DQ": tc.get("DQ", tc["H"]), "DV": tc.get("DV", tc["H"]),
+            # 0 = uncapped. A consumer that cannot apply the cap must skip
+            # the case rather than report a mismatch.
+            "gate_soft_cap": tc.get("gate_soft_cap", 0.0),
             "W": to_list(tc["W"]), "b": to_list(tc["b"]),
             "input": to_list(tc["input"]),
             "expected_y": to_list(tc["y"]), "expected_C": to_list(tc["c"]),

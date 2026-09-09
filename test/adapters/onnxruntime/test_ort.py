@@ -64,27 +64,30 @@ def make_slstm_model(B, T, I, H):
     return model
 
 
-def make_mlstm_model(B, T, I, H):
+def make_mlstm_model(B, T, I, DQ, DV):
     """Build an ONNX model with a single mLSTM custom op node.
 
-    Inputs:  X[B,T,I], W[4H+2,I], b[4H+2],
-             y_init[B,H], C_init[B,H*H], n_init[B,H], m_init[B,1]
-    Outputs: output[B,T,H], y[B,H], C[B,H*H], n[B,H], m[B,1]
+    Inputs:  X[B,T,I], W[R,I], b[R],
+             y_init[B,DV], C_init[B,DQ*DV], n_init[B,DQ], m_init[B,1]
+    Outputs: output[B,T,DV], y[B,DV], C[B,DQ*DV], n[B,DQ], m[B,1]
+
+    The adapter reads DV off y and DQ off n, so nothing else carries them.
     """
+    R = 2*DQ + 2*DV + 2
     inputs = [
         helper.make_tensor_value_info("X", TensorProto.FLOAT, [B, T, I]),
-        helper.make_tensor_value_info("W", TensorProto.FLOAT, [4*H+2, I]),
-        helper.make_tensor_value_info("b", TensorProto.FLOAT, [4*H+2]),
-        helper.make_tensor_value_info("y_init", TensorProto.FLOAT, [B, H]),
-        helper.make_tensor_value_info("C_init", TensorProto.FLOAT, [B, H*H]),
-        helper.make_tensor_value_info("n_init", TensorProto.FLOAT, [B, H]),
+        helper.make_tensor_value_info("W", TensorProto.FLOAT, [R, I]),
+        helper.make_tensor_value_info("b", TensorProto.FLOAT, [R]),
+        helper.make_tensor_value_info("y_init", TensorProto.FLOAT, [B, DV]),
+        helper.make_tensor_value_info("C_init", TensorProto.FLOAT, [B, DQ*DV]),
+        helper.make_tensor_value_info("n_init", TensorProto.FLOAT, [B, DQ]),
         helper.make_tensor_value_info("m_init", TensorProto.FLOAT, [B, 1]),
     ]
     outputs = [
-        helper.make_tensor_value_info("output", TensorProto.FLOAT, [B, T, H]),
-        helper.make_tensor_value_info("y", TensorProto.FLOAT, [B, H]),
-        helper.make_tensor_value_info("C", TensorProto.FLOAT, [B, H*H]),
-        helper.make_tensor_value_info("n", TensorProto.FLOAT, [B, H]),
+        helper.make_tensor_value_info("output", TensorProto.FLOAT, [B, T, DV]),
+        helper.make_tensor_value_info("y", TensorProto.FLOAT, [B, DV]),
+        helper.make_tensor_value_info("C", TensorProto.FLOAT, [B, DQ*DV]),
+        helper.make_tensor_value_info("n", TensorProto.FLOAT, [B, DQ]),
         helper.make_tensor_value_info("m", TensorProto.FLOAT, [B, 1]),
     ]
     node = helper.make_node(
@@ -239,29 +242,37 @@ def test_slstm_s8(name, tc):
 
 def test_mlstm_s8(name, tc):
     """Run one mLSTM case through the INT8 custom op."""
-    B, T, I, H = tc["B"], tc["T"], tc["I"], tc["H"]
+    reason = adapter_skip(tc)
+    if reason:
+        print(f"[SKIP] mLSTM INT8 {name} ({reason})")
+        return True
+
+    B, T, I = tc["B"], tc["T"], tc["I"]
+    DQ, DV = tc["DQ"], tc["DV"]
+    R = 2*DQ + 2*DV + 2
     s = tc["s8"]
 
     shapes = {
-        "X": [B, T, I], "W": [4*H+2, I], "b": [4*H+2],
-        "y_init": [B, H], "C_init": [B, H*H], "n_init": [B, H], "m_init": [B, 1],
+        "X": [B, T, I], "W": [R, I], "b": [R],
+        "y_init": [B, DV], "C_init": [B, DQ*DV], "n_init": [B, DQ],
+        "m_init": [B, 1],
         "x_scale": [1], "x_zero_point": [1], "W_scale": [1],
         "y_scale": [1], "y_zero_point": [1], "C_scale": [1], "n_scale": [1],
     }
-    outs = [("output", TensorProto.INT8, [B, T, H]),
-            ("y", TensorProto.INT8, [B, H]),
-            ("C", TensorProto.INT16, [B, H*H]),
-            ("n", TensorProto.INT16, [B, H]),
+    outs = [("output", TensorProto.INT8, [B, T, DV]),
+            ("y", TensorProto.INT8, [B, DV]),
+            ("C", TensorProto.INT16, [B, DQ*DV]),
+            ("n", TensorProto.INT16, [B, DQ]),
             ("m", TensorProto.FLOAT, [B, 1])]
     model = make_s8_model("MLSTM_S8", MLSTM_S8_INPUTS, shapes, outs)
 
     feeds = {
         "X": np.array(s["x_q"], dtype=np.int8).reshape(B, T, I),
-        "W": np.array(s["W_q"], dtype=np.int8).reshape(4*H+2, I),
-        "b": np.array(s["b_q"], dtype=np.int32).reshape(4*H+2),
-        "y_init": np.zeros((B, H), dtype=np.int8),
-        "C_init": np.zeros((B, H*H), dtype=np.int16),
-        "n_init": np.zeros((B, H), dtype=np.int16),
+        "W": np.array(s["W_q"], dtype=np.int8).reshape(R, I),
+        "b": np.array(s["b_q"], dtype=np.int32).reshape(R),
+        "y_init": np.zeros((B, DV), dtype=np.int8),
+        "C_init": np.zeros((B, DQ*DV), dtype=np.int16),
+        "n_init": np.zeros((B, DQ), dtype=np.int16),
         "m_init": np.zeros((B, 1), dtype=np.float32),
         "x_scale": np.array([s["x_scale"]], dtype=np.float32),
         "x_zero_point": np.array([s["x_zero_point"]], dtype=np.int8),
@@ -283,7 +294,7 @@ def test_mlstm_s8(name, tc):
     if not np.allclose(m.flatten(), np.array(s["expected_m"], dtype=np.float32), atol=1e-5):
         print(f"  FAIL m: got {m.flatten()}, expected {s['expected_m']}")
         ok = False
-    ok &= check_dequantized_vs_f32(name, tc, s, output, B, T, H)
+    ok &= check_dequantized_vs_f32(name, tc, s, output, B, T, DV)
 
     print(f"[{'OK' if ok else 'FAILED'}] mLSTM INT8 {name}")
     return ok
@@ -352,18 +363,35 @@ def test_slstm(name, tc):
     return ok
 
 
+def adapter_skip(tc):
+    """Kernel knobs this op schema does not carry - the same choice already
+    made for cell_clip, which no adapter exposes either. Returns a reason to
+    print, or None. A case stops being skipped the day the schema grows the
+    attribute, with no edit here."""
+    if tc.get("gate_soft_cap", 0.0):
+        return "gate_soft_cap is not an attribute of this op"
+    return None
+
+
 def test_mlstm(name, tc):
     """Run one mLSTM test case."""
-    B, T, I, H = tc["B"], tc["T"], tc["I"], tc["H"]
-    model = make_mlstm_model(B, T, I, H)
+    reason = adapter_skip(tc)
+    if reason:
+        print(f"[SKIP] mLSTM {name} ({reason})")
+        return True
+
+    B, T, I = tc["B"], tc["T"], tc["I"]
+    DQ, DV = tc["DQ"], tc["DV"]
+    R = 2*DQ + 2*DV + 2
+    model = make_mlstm_model(B, T, I, DQ, DV)
 
     feeds = {
         "X":      np.array(tc["input"], dtype=np.float32).reshape(B, T, I),
-        "W":      np.array(tc["W"], dtype=np.float32).reshape(4*H+2, I),
-        "b":      np.array(tc["b"], dtype=np.float32).reshape(4*H+2),
-        "y_init": np.zeros((B, H), dtype=np.float32),
-        "C_init": np.zeros((B, H*H), dtype=np.float32),
-        "n_init": np.zeros((B, H), dtype=np.float32),
+        "W":      np.array(tc["W"], dtype=np.float32).reshape(R, I),
+        "b":      np.array(tc["b"], dtype=np.float32).reshape(R),
+        "y_init": np.zeros((B, DV), dtype=np.float32),
+        "C_init": np.zeros((B, DQ*DV), dtype=np.float32),
+        "n_init": np.zeros((B, DQ), dtype=np.float32),
         "m_init": np.zeros((B, 1), dtype=np.float32),
     }
 

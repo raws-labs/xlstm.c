@@ -68,18 +68,34 @@ def test_slstm(name, tc):
     return ok
 
 
+def adapter_skip(tc):
+    """Kernel knobs this packed function does not carry - the same choice
+    already made for cell_clip, which no adapter exposes either. Returns a
+    reason to print, or None."""
+    if tc.get("gate_soft_cap", 0.0):
+        return "gate_soft_cap is not an argument of this packed function"
+    return None
+
+
 def test_mlstm(name, tc):
     """Run one mLSTM test case via TVM packed function."""
-    B, T, I, H = tc["B"], tc["T"], tc["I"], tc["H"]
+    reason = adapter_skip(tc)
+    if reason:
+        print(f"[SKIP] mLSTM {name} ({reason})")
+        return True
+
+    B, T, I = tc["B"], tc["T"], tc["I"]
+    DQ, DV = tc["DQ"], tc["DV"]
+    R = 2*DQ + 2*DV + 2
 
     x = nd.array(np.array(tc["input"], dtype=np.float32).reshape(B, T, I))
-    W = nd.array(np.array(tc["W"], dtype=np.float32).reshape(4*H+2, I))
-    b = nd.array(np.array(tc["b"], dtype=np.float32).reshape(4*H+2))
-    y = nd.array(np.zeros((B, H), dtype=np.float32))
-    C = nd.array(np.zeros((B, H*H), dtype=np.float32))
-    n = nd.array(np.zeros((B, H), dtype=np.float32))
+    W = nd.array(np.array(tc["W"], dtype=np.float32).reshape(R, I))
+    b = nd.array(np.array(tc["b"], dtype=np.float32).reshape(R))
+    y = nd.array(np.zeros((B, DV), dtype=np.float32))
+    C = nd.array(np.zeros((B, DQ*DV), dtype=np.float32))
+    n = nd.array(np.zeros((B, DQ), dtype=np.float32))
     m = nd.array(np.zeros((B, 1), dtype=np.float32))
-    output = nd.array(np.zeros((B, T, H), dtype=np.float32))
+    output = nd.array(np.zeros((B, T, DV), dtype=np.float32))
 
     f = tvm.get_global_func("xlstm.mlstm_eval")
     f(x, W, b, y, C, n, m, output)
@@ -199,17 +215,24 @@ def test_slstm_s8(name, tc):
 
 def test_mlstm_s8(name, tc):
     """Run one mLSTM case through the INT8 packed function."""
-    B, T, I, H = tc["B"], tc["T"], tc["I"], tc["H"]
+    reason = adapter_skip(tc)
+    if reason:
+        print(f"[SKIP] mLSTM INT8 {name} ({reason})")
+        return True
+
+    B, T, I = tc["B"], tc["T"], tc["I"]
+    DQ, DV = tc["DQ"], tc["DV"]
+    R = 2*DQ + 2*DV + 2
     s = tc["s8"]
 
     x = nd.array(np.array(s["x_q"], dtype=np.int8).reshape(B, T, I))
-    W = nd.array(np.array(s["W_q"], dtype=np.int8).reshape(4*H+2, I))
-    b = nd.array(np.array(s["b_q"], dtype=np.int32).reshape(4*H+2))
-    y = nd.array(np.zeros((B, H), dtype=np.int8))
-    C = nd.array(np.zeros((B, H*H), dtype=np.int16))
-    n = nd.array(np.zeros((B, H), dtype=np.int16))
+    W = nd.array(np.array(s["W_q"], dtype=np.int8).reshape(R, I))
+    b = nd.array(np.array(s["b_q"], dtype=np.int32).reshape(R))
+    y = nd.array(np.zeros((B, DV), dtype=np.int8))
+    C = nd.array(np.zeros((B, DQ*DV), dtype=np.int16))
+    n = nd.array(np.zeros((B, DQ), dtype=np.int16))
     m = nd.array(np.zeros((B, 1), dtype=np.float32))
-    output = nd.array(np.zeros((B, T, H), dtype=np.int8))
+    output = nd.array(np.zeros((B, T, DV), dtype=np.int8))
 
     f = tvm.get_global_func("xlstm.mlstm_eval")
     f(x, W, b, y, C, n, m, output,
@@ -227,7 +250,7 @@ def test_mlstm_s8(name, tc):
                        np.array(s["expected_m"], dtype=np.float32), atol=1e-5):
         print(f"  FAIL m: got {m.numpy().flatten()}, expected {s['expected_m']}")
         ok = False
-    ok &= check_dequantized_vs_f32(tc, s, output.numpy(), H)
+    ok &= check_dequantized_vs_f32(tc, s, output.numpy(), DV)
 
     print(f"[{'OK' if ok else 'FAILED'}] mLSTM INT8 {name}")
     return ok

@@ -74,9 +74,13 @@ sLSTM is linear in `H` and stays cheap at any width worth deploying. mLSTM is
 quadratic, because its state is a matrix rather than a vector, and past roughly
 H = 32 that term dominates everything else in the budget. At H = 64 it is
 16,644 B per head, and it stays that size no matter how long the sequence runs.
-`tools/footprint.py 64 64 8` adds weights and scratch to this and sizes a whole
-configuration against an SRAM budget, which is usually the form the question
-actually takes.
+
+mLSTM's two widths need not be equal. `mlstm_step_f32` takes `qk_size` and
+`v_size` separately, C is `[qk_size x v_size]` and n is `[qk_size]`, so the
+table above is the case where they match. Pass `--dv` to size one where they do
+not. `tools/footprint.py 64 64 8` adds weights and scratch to this and sizes a
+whole configuration against an SRAM budget, which is usually the form the
+question actually takes.
 
 Precision is the other lever, and it does not pull evenly on the two cells.
 Quantizing sLSTM buys speed, several times over on the wider heads. Quantizing

@@ -484,4 +484,14 @@ static inline float xlstm_gate_tanhf(float x) {
 
 #endif /* XLSTM_APPROX_GATES */
 
+/* Soft cap on a gate preactivation: cap * tanh(x / cap), and the identity when
+ * cap is not positive. The reference applies this to the mLSTM input and
+ * forget preactivations before the stabilizer, so a large logit cannot run
+ * away; a cap of 0 is the uncapped arithmetic this library has always done.
+ *
+ * Shared by both mLSTM kernels so the f32 and INT8 spellings cannot drift. */
+static inline float xlstm_soft_cap(float x, float cap) {
+    return cap > 0.0f ? cap * xlstm_gate_tanhf(x / cap) : x;
+}
+
 #endif /* XLSTM_UTIL_H_ */

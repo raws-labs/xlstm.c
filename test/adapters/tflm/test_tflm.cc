@@ -18,6 +18,7 @@
 
 #include "slstm_model_data.h"
 #include "mlstm_model_data.h"
+#include "mlstm_rect_model_data.h"
 #include "slstm_s8_model_data.h"
 #include "mlstm_s8_model_data.h"
 #include "slstm_s8_big_model_data.h"
@@ -178,6 +179,58 @@ bool TestMLstmSingleTimestep() {
     ok &= ExpectNear("n", kMTest1_expected_n, interpreter.input(5)->data.f, H, 1e-5f);
     ok &= ExpectNear("m", kMTest1_expected_m, interpreter.input(6)->data.f, 1, 1e-5f);
 
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
+// mLSTM with the two widths different (DQ=4, DV=12). The adapter reads DV
+// off y and DQ off n; a square model cannot tell the two apart, so this is
+// the only case that catches taking one where the other belongs.
+// ---------------------------------------------------------------------------
+bool TestMLstmRectangular() {
+    const tflite::Model* model = tflite::GetModel(mlstm_rect_model_data);
+    if (model->version() != TFLITE_SCHEMA_VERSION) {
+        printf("  Model schema version mismatch\n");
+        return false;
+    }
+
+    tflite::MicroMutableOpResolver<1> resolver;
+    TFLMRegistration mlstm_reg = tflite::Register_MLSTM();
+    resolver.AddCustom("MLSTM", &mlstm_reg);
+
+    tflite::MicroInterpreter interpreter(model, resolver, arena, kArenaSize);
+    if (interpreter.AllocateTensors() != kTfLiteOk) {
+        printf("  AllocateTensors failed\n");
+        return false;
+    }
+
+    // B=1, T=3, I=12, DQ=4, DV=12
+    const int T = 3, I = 12, DQ = 4, DV = 12;
+    const int R = 2 * DQ + 2 * DV + 2;
+
+    FillTensor(interpreter.input(0), kRectM4x12_input, 1 * T * I);
+    FillTensor(interpreter.input(1), kRectM4x12_W, R * I);
+    FillTensor(interpreter.input(2), kRectM4x12_b, R);
+    ZeroTensor(interpreter.input(3), 1 * DV);
+    ZeroTensor(interpreter.input(4), 1 * DQ * DV);
+    ZeroTensor(interpreter.input(5), 1 * DQ);
+    ZeroTensor(interpreter.input(6), 1 * 1);
+
+    if (interpreter.Invoke() != kTfLiteOk) {
+        printf("  Invoke failed\n");
+        return false;
+    }
+
+    bool ok = ExpectNear("output", kRectM4x12_expected_output,
+                         interpreter.output(0)->data.f, T * DV, 1e-5f);
+    ok &= ExpectNear("y", kRectM4x12_expected_y,
+                     interpreter.input(3)->data.f, DV, 1e-5f);
+    ok &= ExpectNear("C", kRectM4x12_expected_C,
+                     interpreter.input(4)->data.f, DQ * DV, 1e-5f);
+    ok &= ExpectNear("n", kRectM4x12_expected_n,
+                     interpreter.input(5)->data.f, DQ, 1e-5f);
+    ok &= ExpectNear("m", kRectM4x12_expected_m,
+                     interpreter.input(6)->data.f, 1, 1e-5f);
     return ok;
 }
 
@@ -343,6 +396,7 @@ int main() {
 
     RUN_TEST(TestSLstmSingleTimestep);
     RUN_TEST(TestMLstmSingleTimestep);
+    RUN_TEST(TestMLstmRectangular);
     RUN_TEST(TestSLstmInt8);
     RUN_TEST(TestMLstmInt8);
 

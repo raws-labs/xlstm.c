@@ -38,36 +38,40 @@ void MLstmOrtKernel(
     auto x_shape = x.Shape();
     auto y_shape = y_init.Shape();
     auto C_shape = C_init.Shape();
+    auto n_shape = n_init.Shape();
     auto m_shape = m_init.Shape();
 
     int batch_size  = static_cast<int>(x_shape[0]);
     int time_steps  = static_cast<int>(x_shape[1]);
     int input_size  = static_cast<int>(x_shape[2]);
-    int hidden_size = static_cast<int>(y_shape[1]);
+    // y is sized by the value width; the normalizer carries the query/key
+    // width. Both equal the hidden size for a square cell.
+    int v_size      = static_cast<int>(y_shape[1]);
+    int qk_size     = static_cast<int>(n_shape[1]);
 
     // Allocate outputs
     float* out_data = output.Allocate({x_shape[0], x_shape[1], y_shape[1]});
     float* y_data   = y_out.Allocate(y_shape);
     float* C_data   = C_out.Allocate(C_shape);
-    float* n_data   = n_out.Allocate(y_shape);
+    float* n_data   = n_out.Allocate(n_shape);
     float* m_data   = m_out.Allocate(m_shape);
 
     // Copy initial states into mutable outputs
-    std::memcpy(y_data, y_init.Data(), batch_size * hidden_size * sizeof(float));
-    std::memcpy(C_data, C_init.Data(), batch_size * hidden_size * hidden_size * sizeof(float));
-    std::memcpy(n_data, n_init.Data(), batch_size * hidden_size * sizeof(float));
+    std::memcpy(y_data, y_init.Data(), batch_size * v_size * sizeof(float));
+    std::memcpy(C_data, C_init.Data(), batch_size * qk_size * v_size * sizeof(float));
+    std::memcpy(n_data, n_init.Data(), batch_size * qk_size * sizeof(float));
     std::memcpy(m_data, m_init.Data(), batch_size * 1 * sizeof(float));
 
     // Scratch buffer for gate pre-activations
-    std::vector<float> scratch(4 * hidden_size + 2);
+    std::vector<float> scratch(2 * qk_size + 2 * v_size + 2);
 
-    MlstmParams params = {0.0f};
+    MlstmParams params = {};
 
     mlstm_eval_f32(
         x.Data(), W.Data(), b.Data(),
         y_data, C_data, n_data, m_data,
         out_data, scratch.data(),
-        batch_size, time_steps, input_size, hidden_size,
+        batch_size, time_steps, input_size, qk_size, v_size,
         &params);
 }
 
@@ -95,32 +99,36 @@ void MLstmOrtKernelS8(
     auto x_shape = x.Shape();
     auto y_shape = y_init.Shape();
     auto C_shape = C_init.Shape();
+    auto n_shape = n_init.Shape();
     auto m_shape = m_init.Shape();
 
     int batch_size  = static_cast<int>(x_shape[0]);
     int time_steps  = static_cast<int>(x_shape[1]);
     int input_size  = static_cast<int>(x_shape[2]);
-    int hidden_size = static_cast<int>(y_shape[1]);
+    // y is sized by the value width; the normalizer carries the query/key
+    // width. Both equal the hidden size for a square cell.
+    int v_size      = static_cast<int>(y_shape[1]);
+    int qk_size     = static_cast<int>(n_shape[1]);
 
     // Allocate outputs
     int8_t*  out_data = output.Allocate({x_shape[0], x_shape[1], y_shape[1]});
     int8_t*  y_data   = y_out.Allocate(y_shape);
     int16_t* C_data   = C_out.Allocate(C_shape);
-    int16_t* n_data   = n_out.Allocate(y_shape);
+    int16_t* n_data   = n_out.Allocate(n_shape);
     float*   m_data   = m_out.Allocate(m_shape);
 
     // Copy initial states into mutable outputs
-    std::memcpy(y_data, y_init.Data(), batch_size * hidden_size * sizeof(int8_t));
-    std::memcpy(C_data, C_init.Data(), batch_size * hidden_size * hidden_size * sizeof(int16_t));
-    std::memcpy(n_data, n_init.Data(), batch_size * hidden_size * sizeof(int16_t));
+    std::memcpy(y_data, y_init.Data(), batch_size * v_size * sizeof(int8_t));
+    std::memcpy(C_data, C_init.Data(), batch_size * qk_size * v_size * sizeof(int16_t));
+    std::memcpy(n_data, n_init.Data(), batch_size * qk_size * sizeof(int16_t));
     std::memcpy(m_data, m_init.Data(), batch_size * 1 * sizeof(float));
 
     // Scratch buffer for gate accumulators (int32 on the quantized path)
-    std::vector<int32_t> scratch(4 * hidden_size + 2);
+    std::vector<int32_t> scratch(2 * qk_size + 2 * v_size + 2);
 
     // Every scale/zero-point is a scalar tensor input: read element 0 and
     // hand it to the kernel. No arithmetic on this side.
-    MlstmS8Params params;
+    MlstmS8Params params = {};
     params.cell_clip = 0.0f;
     params.W_scale = W_scale.Data()[0];
     params.x_quant = {x_scale.Data()[0], x_zero_point.Data()[0]};
@@ -132,6 +140,6 @@ void MLstmOrtKernelS8(
         x.Data(), W.Data(), b.Data(),
         y_data, C_data, n_data, m_data,
         out_data, scratch.data(),
-        batch_size, time_steps, input_size, hidden_size,
+        batch_size, time_steps, input_size, qk_size, v_size,
         &params);
 }

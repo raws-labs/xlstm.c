@@ -29,11 +29,13 @@ TFLMRegistration Register_MLSTM();
 // Input tensor indices for mLSTM (no recurrent weights)
 enum MLstmTensorIndex {
     kMLstmInputTensor = 0,              // [batch, time, features]
-    kMLstmInputWeightsTensor = 1,       // [(4*hidden+2), input]
-    kMLstmBiasTensor = 2,              // [4*hidden+2]
-    kMLstmHiddenStateTensor = 3,       // y: [batch, hidden]
-    kMLstmCellStateTensor = 4,         // C: [batch, hidden*hidden]
-    kMLstmNormalizerStateTensor = 5,   // n: [batch, hidden]
+    // DQ is the query/key width and DV the value width, taken from n's and
+    // y's shapes; they are equal for a square cell. R = 2*DQ + 2*DV + 2.
+    kMLstmInputWeightsTensor = 1,       // [R, input]
+    kMLstmBiasTensor = 2,              // [R]
+    kMLstmHiddenStateTensor = 3,       // y: [batch, DV]
+    kMLstmCellStateTensor = 4,         // C: [batch, DQ*DV]
+    kMLstmNormalizerStateTensor = 5,   // n: [batch, DQ]
     kMLstmStabilizerStateTensor = 6,   // m: [batch, 1]
     kMLstmNumInputs = 7
 };
@@ -52,12 +54,15 @@ enum MLstmOutputIndex {
 // stabilizer is not quantized. Scale and zero-point come from each
 // tensor's own TfLiteQuantizationParams; nothing is calibrated here.
 struct OpDataMLstm {
-    int scratch_buffer_index;  // For gate computations [4*hidden+2]
+    int scratch_buffer_index;  // For gate computations [2*qk+2*v+2]
 
     int batch_size;
     int time_steps;
     int input_size;
-    int hidden_size;
+    // The value width sizes y and the output; the query/key width sizes the
+    // normalizer. Both equal the hidden size for a square cell.
+    int v_size;
+    int qk_size;
 
     float cell_clip;
 };

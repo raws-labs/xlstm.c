@@ -386,22 +386,22 @@ void xlstm_matvec_f32(const float* M, const float* v,
  * ------------------------------------------------------------------------ */
 
 void xlstm_rank1_update_f32(float* C, float f_gate, float i_gate,
-                            const float* k, const float* v, int H)
+                            const float* k, const float* v, int rows, int cols)
 {
-    const int nb = H & ~3;
-    const int tail = H & 3;
+    const int nb = cols & ~3;
+    const int tail = cols & 3;
     int r;
 
-    if (H <= 0) {
+    if (rows <= 0 || cols <= 0) {
         XLSTM_HL_COUNT(rank1_f32, 0, 0);
-        xlstm_scalar_rank1_update_f32(C, f_gate, i_gate, k, v, H);
+        xlstm_scalar_rank1_update_f32(C, f_gate, i_gate, k, v, rows, cols);
         return;
     }
     XLSTM_HL_COUNT(rank1_f32, 1, tail != 0);
 
-    for (r = 0; r < H; ++r) {
+    for (r = 0; r < rows; ++r) {
         const float ik_r = i_gate * k[r];
-        float* Cr = C + (size_t)r * (size_t)H;
+        float* Cr = C + (size_t)r * (size_t)cols;
         int c;
 
         for (c = 0; c < nb; c += 4) {
@@ -413,9 +413,9 @@ void xlstm_rank1_update_f32(float* C, float f_gate, float i_gate,
         }
         if (tail != 0) {
             /* The same three instructions over fewer lanes. An inactive lane
-             * is neither read nor written, so the columns past H keep
-             * whatever the caller had there - which for a row-major H x H
-             * state is the next row, and must not be touched. */
+             * is neither read nor written, so the columns past cols keep
+             * whatever the caller had there - which for a row-major
+             * rows x cols state is the next row, and must not be touched. */
             const mve_pred16_t p = vctp32q((uint32_t)tail);
             const float32x4_t cv = vldrwq_z_f32(Cr + c, p);
             const float32x4_t vv = vldrwq_z_f32(v + c, p);
@@ -505,10 +505,10 @@ void xlstm_matvec_f32(const float* M, const float* v,
 }
 
 void xlstm_rank1_update_f32(float* C, float f_gate, float i_gate,
-                            const float* k, const float* v, int H)
+                            const float* k, const float* v, int rows, int cols)
 {
     XLSTM_HL_COUNT(rank1_f32, 0, 0);
-    xlstm_scalar_rank1_update_f32(C, f_gate, i_gate, k, v, H);
+    xlstm_scalar_rank1_update_f32(C, f_gate, i_gate, k, v, rows, cols);
 }
 
 void xlstm_vecmat_f32(const float* q, const float* M,

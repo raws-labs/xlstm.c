@@ -38,19 +38,22 @@ void mlstm_step_s8(
     float* m,
     int32_t* scratch,
     int input_size,
-    int hidden_size,
+    int qk_size,
+    int v_size,
     const MlstmS8Params* params)
 {
-    int H = hidden_size;
+    int DQ = qk_size;
+    int DV = v_size;
     int I = input_size;
-    int total = 4 * H + 2;
+    int total = 2 * DQ + 2 * DV + 2;
     int i, j, r, c;
 
     float wx_scale = params->W_scale * params->x_quant.scale;
     int32_t x_zp = params->x_quant.zero_point;
 
     /* 1+2. INT8xINT8 matmul -> float pre-activations.
-     *       scratch layout: [q(H), k(H), v(H), i_raw(1), f_raw(1), o_raw(H)] */
+     *       scratch layout:
+     *         [q(DQ), k(DQ), v(DV), i_raw(1), f_raw(1), o_raw(DV)] */
     int32_t acc[4 * XLSTM_MAX_HIDDEN + 2];
     xlstm_matvec_s8(W_q, x, acc, total, I, x_zp);
 
@@ -60,17 +63,25 @@ void mlstm_step_s8(
     }
 
     /* Extract projections from pre-activations */
-    float* q     = preact;              /* [H] */
-    float* k     = preact + H;          /* [H] */
-    float* v     = preact + 2 * H;      /* [H] */
-    float i_raw  = preact[3 * H];       /* scalar */
-    float f_raw  = preact[3 * H + 1];   /* scalar */
-    float* o_raw = preact + 3 * H + 2;  /* [H] */
+    float* q     = preact;                        /* [DQ] */
+    float* k     = preact + DQ;                   /* [DQ] */
+    float* v     = preact + 2 * DQ;               /* [DV] */
+    float i_raw  = preact[2 * DQ + DV];           /* scalar */
+    float f_raw  = preact[2 * DQ + DV + 1];       /* scalar */
+    float* o_raw = preact + 2 * DQ + DV + 2;      /* [DV] */
 
-    /* 3. Scale key: k /= sqrt(H) */
-    float k_scale = 1.0f / sqrtf((float)H);
-    for (i = 0; i < H; ++i) {
-        k[i] *= k_scale;
+    /* 3. Scale query: q /= sqrt(DQ) - the q/k contraction sets it, not DV.
+     *    Applied to q at readout, not to k on the way in, so C and n store
+     *    unscaled k and match the reference's state. See mlstm.c. */
+    float q_scale = 1.0f / sqrtf((float)DQ);
+    for (i = 0; i < DQ; ++i) {
+        q[i] *= q_scale;
+    }
+
+    /* 3b. Optional soft cap on the two gate preactivations. */
+    if (params->gate_soft_cap > 0.0f) {
+        i_raw = xlstm_soft_cap(i_raw, params->gate_soft_cap);
+        f_raw = xlstm_soft_cap(f_raw, params->gate_soft_cap);
     }
 
     /* 4. Stabilized gates (scalar m) */
@@ -84,14 +95,14 @@ void mlstm_step_s8(
      * i_raw == +inf the shortcut would answer 1 where the exponential
      * answers NaN. Its worth is what settles it: these two are per TIMESTEP,
      * not per hidden unit, so the shortcut would remove one exponential from
-     * a step whose cost is the O(H^2) loop below. */
+     * a step whose cost is the O(DQ*DV) loop below. */
     float f_gate = xlstm_gate_expf(log_f_plus_m - m_new);
     float i_gate = xlstm_gate_expf(i_raw - m_new);
 
     /* 5. Update C: dequant -> float update -> requant */
-    for (r = 0; r < H; ++r) {
-        for (c = 0; c < H; ++c) {
-            float C_prev = (float)C[r * H + c] * params->C_quant.scale;
+    for (r = 0; r < DQ; ++r) {
+        for (c = 0; c < DV; ++c) {
+            float C_prev = (float)C[r * DV + c] * params->C_quant.scale;
             float C_new = f_gate * C_prev + i_gate * k[r] * v[c];
 
             if (params->cell_clip > 0.0f) {
@@ -112,12 +123,13 @@ void mlstm_step_s8(
              * Measured and rejected - do not "optimize" this without redoing
              * that measurement. */
             float C_q = C_new / params->C_quant.scale;
-            C[r * H + c] = (int16_t)xlstm_round_clamp_i32(C_q, -32768.0f, 32767.0f);
+            C[r * DV + c] = (int16_t)xlstm_round_clamp_i32(C_q, -32768.0f,
+                                                           32767.0f);
         }
     }
 
     /* 6. Update n: dequant -> float update -> requant */
-    for (i = 0; i < H; ++i) {
+    for (i = 0; i < DQ; ++i) {
         float n_prev = (float)n[i] * params->n_quant.scale;
         float n_new = f_gate * n_prev + i_gate * k[i];
         float n_q = n_new / params->n_quant.scale;
@@ -130,19 +142,21 @@ void mlstm_step_s8(
     /* 8. Compute output: y = sigmoid(o) * (q^T C) / max(|q^T n|, exp(-m)) + eps
      *    Read back quantized states for output computation. */
     float qn = 0.0f;
-    for (i = 0; i < H; ++i) {
+    for (i = 0; i < DQ; ++i) {
         float n_f = (float)n[i] * params->n_quant.scale;
         qn += q[i] * n_f;
     }
     float denom = xlstm_maxf(fabsf(qn), xlstm_gate_expf(-m_new)) + 1e-6f;
 
-    for (j = 0; j < H; ++j) {
+    for (j = 0; j < DV; ++j) {
         float qC_j = 0.0f;
-        for (i = 0; i < H; ++i) {
-            float C_f = (float)C[i * H + j] * params->C_quant.scale;
+        for (i = 0; i < DQ; ++i) {
+            float C_f = (float)C[i * DV + j] * params->C_quant.scale;
             qC_j += q[i] * C_f;
         }
-        float y_new = xlstm_gate_sigmoidf(o_raw[j]) * (qC_j / denom);
+        float y_new = params->skip_output_gate
+                          ? (qC_j / denom)
+                          : xlstm_gate_sigmoidf(o_raw[j]) * (qC_j / denom);
 
         /* Requantize output to INT8 */
         float y_q = y_new / params->y_quant.scale + (float)params->y_quant.zero_point;
@@ -163,13 +177,15 @@ void mlstm_eval_s8(
     int batch_size,
     int time_steps,
     int input_size,
-    int hidden_size,
+    int qk_size,
+    int v_size,
     const MlstmS8Params* params)
 {
     int B = batch_size;
     int T = time_steps;
     int I = input_size;
-    int H = hidden_size;
+    int DQ = qk_size;
+    int DV = v_size;
     int batch, t, i;
 
     for (batch = 0; batch < B; ++batch) {
@@ -178,16 +194,16 @@ void mlstm_eval_s8(
 
             mlstm_step_s8(
                 x_t, W_q, b_q,
-                y + batch * H,
-                C + batch * H * H,
-                n + batch * H,
+                y + batch * DV,
+                C + batch * DQ * DV,
+                n + batch * DQ,
                 m + batch * 1,
                 scratch,
-                I, H, params);
+                I, DQ, DV, params);
 
             /* Copy hidden state to output */
-            for (i = 0; i < H; ++i) {
-                output[(batch * T + t) * H + i] = y[batch * H + i];
+            for (i = 0; i < DV; ++i) {
+                output[(batch * T + t) * DV + i] = y[batch * DV + i];
             }
         }
     }

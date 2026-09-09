@@ -95,8 +95,8 @@ static_assert(kStateHeadroom == XLSTM_GENERATOR_HEADROOM,
  * tuned 8x n_quant.scale for the one case that needed it, H=64 - removed
  * because that case now stores C directly.) */
 static void PrepareMlstmS8(const XlstmRefCase* tc, MlstmS8Setup* s) {
-    const int H = tc->H, T = tc->T, I = tc->I;
-    const int total = 4 * H + 2;
+    const int T = tc->T, I = tc->I;
+    const int total = 2 * tc->DQ + 2 * tc->DV + 2;
 
     XlstmQuantParam w_qp, x_qp, b_qp;
     DeriveScales(tc->W, total * I, tc->input, T * I, &w_qp, &x_qp);
@@ -109,16 +109,20 @@ static void PrepareMlstmS8(const XlstmRefCase* tc, MlstmS8Setup* s) {
     xlstm_quantize_f32_to_s32(tc->b, s->b_q, total, &b_qp);
 
     s->params.cell_clip = 0.0f;
+    s->params.gate_soft_cap = tc->gate_soft_cap;
+    s->params.skip_output_gate = 0;
     s->params.W_scale = w_qp.scale;
     s->params.x_quant = x_qp;
 
     const float* y_cal = tc->expected_output ? tc->expected_output : tc->expected_y;
-    int y_cal_len = tc->expected_output ? T * H : H;
+    int y_cal_len = tc->expected_output ? T * tc->DV : tc->DV;
     xlstm_quant_asymmetric(y_cal, y_cal_len, &s->params.y_quant);
-    xlstm_quant_symmetric_s16(tc->expected_n, H, kStateHeadroom, &s->params.n_quant);
+    xlstm_quant_symmetric_s16(tc->expected_n, tc->DQ, kStateHeadroom,
+                              &s->params.n_quant);
 
     if (tc->expected_state) {
-        xlstm_quant_symmetric_s16(tc->expected_state, H * H, kStateHeadroom, &s->params.C_quant);
+        xlstm_quant_symmetric_s16(tc->expected_state, tc->DQ * tc->DV,
+                                  kStateHeadroom, &s->params.C_quant);
     } else {
         s->params.C_quant.scale = s->params.n_quant.scale;
         s->params.C_quant.zero_point = 0;
@@ -145,7 +149,8 @@ static void PrepareMlstmS8(const XlstmRefCase* tc, MlstmS8Setup* s) {
 static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
                               float* m_out, float* C_out, float* n_out,
                               float* output_out) {
-    const int H = tc->H, T = tc->T, I = tc->I;
+    /* DQ sizes n, DV sizes y and the output, and C is their product. */
+    const int DQ = tc->DQ, DV = tc->DV, T = tc->T, I = tc->I;
 
     static MlstmS8Setup s;
     PrepareMlstmS8(tc, &s);
@@ -156,27 +161,30 @@ static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
     static float m_state[XLSTM_TEST_MAX_H];
     static int8_t output[3 * XLSTM_TEST_MAX_H];
     static int32_t scratch[4 * XLSTM_TEST_MAX_H + 2];
-    for (int i = 0; i < H; ++i) { y[i] = 0; n_state[i] = 0; }
-    for (int i = 0; i < H * H; ++i) C[i] = 0;
+    for (int i = 0; i < DV; ++i) y[i] = 0;
+    for (int i = 0; i < DQ; ++i) n_state[i] = 0;
+    for (int i = 0; i < DQ * DV; ++i) C[i] = 0;
     m_state[0] = 0;
-    for (int i = 0; i < T * H; ++i) output[i] = 0;
-    for (int i = 0; i < 4 * H + 2; ++i) scratch[i] = 0;
+    for (int i = 0; i < T * DV; ++i) output[i] = 0;
+    for (int i = 0; i < 2 * DQ + 2 * DV + 2; ++i) scratch[i] = 0;
 
     mlstm_eval_s8(s.input_q, s.W_q, s.b_q,
                   y, C, n_state, m_state, output, scratch,
-                  tc->B, T, I, H, &s.params);
+                  tc->B, T, I, DQ, DV, &s.params);
 
-    xlstm_dequantize_s8_to_f32(y, y_out, H, &s.params.y_quant);
+    xlstm_dequantize_s8_to_f32(y, y_out, DV, &s.params.y_quant);
     if (m_out) m_out[0] = m_state[0];
     /* C and n are INT16 and strictly symmetric (zero_point is never read
      * by mlstm_s8.c), so dequantizing is a plain scale multiply with the
      * very scales PrepareMlstmS8 handed the kernel - no xlstm_dequantize
      * helper exists for int16_t. */
     if (C_out) {
-        for (int i = 0; i < H * H; ++i) C_out[i] = (float)C[i] * s.params.C_quant.scale;
+        for (int i = 0; i < DQ * DV; ++i)
+            C_out[i] = (float)C[i] * s.params.C_quant.scale;
     }
     if (n_out) {
-        for (int i = 0; i < H; ++i) n_out[i] = (float)n_state[i] * s.params.n_quant.scale;
+        for (int i = 0; i < DQ; ++i)
+            n_out[i] = (float)n_state[i] * s.params.n_quant.scale;
     }
     /* Always dequantize output locally, even if the caller doesn't want it
      * back, so max_err below reflects the whole trajectory, not just the
@@ -187,18 +195,18 @@ static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
      *). Reporting only the final-y number would
      * understate what tolerance the case actually needs. */
     static float output_local[3 * XLSTM_TEST_MAX_H];
-    xlstm_dequantize_s8_to_f32(output, output_local, T * H, &s.params.y_quant);
+    xlstm_dequantize_s8_to_f32(output, output_local, T * DV, &s.params.y_quant);
     if (output_out) {
-        for (int i = 0; i < T * H; ++i) output_out[i] = output_local[i];
+        for (int i = 0; i < T * DV; ++i) output_out[i] = output_local[i];
     }
 
     float max_err = 0.0f;
-    for (int j = 0; j < H; ++j) {
+    for (int j = 0; j < DV; ++j) {
         float d = std::abs(tc->expected_y[j] - y_out[j]);
         if (d > max_err) max_err = d;
     }
     if (tc->expected_output) {
-        for (int i = 0; i < T * H; ++i) {
+        for (int i = 0; i < T * DV; ++i) {
             float d = std::abs(tc->expected_output[i] - output_local[i]);
             if (d > max_err) max_err = d;
         }
@@ -223,7 +231,7 @@ static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
  * Every case, including the ones with no unusually-small channels, goes
  * through the same per-channel loop below. */
 static bool RunMlstmS8Case(const XlstmRefCase* tc) {
-    /* Buffers below hold one batch (T*H for output, H*H for C), and the
+    /* Buffers below hold one batch (T*DV for output, DQ*DV for C), and the
      * assertions read batch 0's slice only, so a B>1 case would both
      * overflow output_f at H=256 and check a third of what it ran. Every
      * case in reference_data.h is B=1; fail loudly rather than silently if
@@ -241,10 +249,10 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
      * per-tensor assertions below are what decide this case. */
     (void)EvalMlstmS8Case(tc, y_f, m_f, C_f, n_f, output_f);
     bool ok = true;
-    ok &= ExpectFinite("y", y_f, tc->H);
+    ok &= ExpectFinite("y", y_f, tc->DV);
     ok &= ExpectFinite("m", m_f, 1);
-    ok &= ExpectFinite("C", C_f, tc->H * tc->H);
-    ok &= ExpectFinite("n", n_f, tc->H);
+    ok &= ExpectFinite("C", C_f, tc->DQ * tc->DV);
+    ok &= ExpectFinite("n", n_f, tc->DQ);
 
     /* Value assertions on the exit state, one bound per element. Without
      * these the suite is finiteness-only on C/n/m: a kernel that zeroes all
@@ -261,9 +269,9 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
                              tc->tol_s8_m_per_elem, 1, &unasserted);
     if (tc->expected_state)
         ok &= ExpectStatePerElem("C", tc->expected_state, C_f,
-                                 tc->tol_s8_state_per_elem, tc->H * tc->H, &unasserted);
+                                 tc->tol_s8_state_per_elem, tc->DQ * tc->DV, &unasserted);
     ok &= ExpectStatePerElem("n", tc->expected_n, n_f,
-                             tc->tol_s8_n_per_elem, tc->H, &unasserted);
+                             tc->tol_s8_n_per_elem, tc->DQ, &unasserted);
     if (unasserted > 0) {
         /* Reported, not hidden: these are elements whose golden is exactly
          * zero or whose honest measured error already spans their whole
@@ -273,7 +281,7 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
         std::printf("  note: %d of %d exit-state elements have no usable bound "
                     "(unassertable, see compute_state_tol_per_elem; still "
                     "drift-checked)\n",
-                    unasserted, tc->H * tc->H + tc->H + 1);
+                    unasserted, tc->DQ * tc->DV + tc->DQ + 1);
     }
 
     /* Exit-state drift consistency - the twin of the output floor check
@@ -286,9 +294,9 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
     if (tc->expected_state)
         ok &= ExpectStateFloorConsistent("C", tc->expected_state, C_f,
                                          tc->tol_s8_state_floor_per_elem,
-                                         tc->H * tc->H);
+                                         tc->DQ * tc->DV);
     ok &= ExpectStateFloorConsistent("n", tc->expected_n, n_f,
-                                     tc->tol_s8_n_floor_per_elem, tc->H);
+                                     tc->tol_s8_n_floor_per_elem, tc->DQ);
 
     /* tol_s8_per_channel is populated for every case in reference_data.h
      * today (build_cases()'s post-processing pass in
@@ -302,7 +310,7 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
     static float uniform_tol[XLSTM_TEST_MAX_H];
     const float* per_channel_tol = tc->tol_s8_per_channel;
     if (!per_channel_tol) {
-        for (int j = 0; j < tc->H; ++j) uniform_tol[j] = tc->tol_s8;
+        for (int j = 0; j < tc->DV; ++j) uniform_tol[j] = tc->tol_s8;
         per_channel_tol = uniform_tol;
     }
 
@@ -310,9 +318,9 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
      * y and every stored output timestep - the scale the floor check's
      * relative term is measured against below. */
     static float channel_err[XLSTM_TEST_MAX_H], channel_ref[XLSTM_TEST_MAX_H];
-    for (int j = 0; j < tc->H; ++j) { channel_err[j] = 0.0f; channel_ref[j] = 0.0f; }
+    for (int j = 0; j < tc->DV; ++j) { channel_err[j] = 0.0f; channel_ref[j] = 0.0f; }
 
-    for (int j = 0; j < tc->H; ++j) {
+    for (int j = 0; j < tc->DV; ++j) {
         float tol = per_channel_tol[j];
         float diff = std::abs(tc->expected_y[j] - y_f[j]);
         if (diff > channel_err[j]) channel_err[j] = diff;
@@ -326,8 +334,8 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
     }
     if (tc->expected_output) {
         for (int t = 0; t < tc->T; ++t) {
-            for (int j = 0; j < tc->H; ++j) {
-                int idx = t * tc->H + j;
+            for (int j = 0; j < tc->DV; ++j) {
+                int idx = t * tc->DV + j;
                 float tol = per_channel_tol[j];
                 float diff = std::abs(tc->expected_output[idx] - output_f[idx]);
                 if (diff > channel_err[j]) channel_err[j] = diff;
@@ -368,7 +376,7 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
      * kFloorEps + kRelTol: see kFloorEps in test_util.h. Without them a
      * channel whose floor is exactly 0.0 demands bit-exact float output. */
     if (tc->tol_s8_floor_per_channel) {
-        for (int j = 0; j < tc->H; ++j) {
+        for (int j = 0; j < tc->DV; ++j) {
             float floor = tc->tol_s8_floor_per_channel[j];
             float bound = floor * 1.5f + kFloorEps + kRelTol * channel_ref[j];
             if (channel_err[j] > bound) {
@@ -404,8 +412,10 @@ static bool TestMlstmS8QuantizationBound() {
             return false;
         }
         float err = EvalMlstmS8Case(tc, y_f, NULL, NULL, NULL, NULL);
-        std::printf("  %-10s H=%-3d max abs error vs f32: %.6f (worst-channel bound: %.4f)\n",
-                     tc->name, tc->H, err, tc->tol_s8);
+        char shape[16];
+        std::snprintf(shape, sizeof shape, "%dx%d", tc->DQ, tc->DV);
+        std::printf("  %-10s %-7s max abs error vs f32: %.6f (worst-channel bound: %.4f)\n",
+                     tc->name, shape, err, tc->tol_s8);
         if (err > max_err) max_err = err;
     }
     std::printf("  max absolute error vs f32 across all cases: %.6f\n", max_err);
@@ -447,7 +457,8 @@ int XLSTM_TEST_MAIN(void) {
     for (int i = 0; i < kMlstmCasesCount; ++i) {
         const XlstmRefCase* tc = &kMlstmCases[i];
         g_tests_run++;
-        std::printf("[ RUN      ] mLSTM INT8 %s (H=%d, T=%d)\n", tc->name, tc->H, tc->T);
+        std::printf("[ RUN      ] mLSTM INT8 %s (%dx%d, T=%d)\n", tc->name, tc->DQ,
+                tc->DV, tc->T);
         if (RunMlstmS8Case(tc)) {
             g_tests_passed++;
             std::printf("[       OK ] mLSTM INT8 %s\n", tc->name);

@@ -420,9 +420,9 @@ void xlstm_matvec_f32(const float* M, const float* v,
 }
 
 void xlstm_rank1_update_f32(float* C, float f_gate, float i_gate,
-                            const float* k, const float* v, int H)
+                            const float* k, const float* v, int rows, int cols)
 {
-    xlstm_scalar_rank1_update_f32(C, f_gate, i_gate, k, v, H);
+    xlstm_scalar_rank1_update_f32(C, f_gate, i_gate, k, v, rows, cols);
 }
 
 void xlstm_vecmat_f32(const float* q, const float* M,

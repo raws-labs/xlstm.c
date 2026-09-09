@@ -15,9 +15,12 @@
  * mLSTM microTVM adapter - DLTensor-based packed function.
  *
  * Args (DLTensor*):
- *   [0] X[B,T,I]    [1] W[4H+2,I]  [2] b[4H+2]
- *   [3] y[B,H]      [4] C[B,H*H]   [5] n[B,H]   [6] m[B,1]
- *   [7] output[B,T,H]
+ *   [0] X[B,T,I]    [1] W[R,I]     [2] b[R]
+ *   [3] y[B,DV]     [4] C[B,DQ*DV] [5] n[B,DQ]  [6] m[B,1]
+ *   [7] output[B,T,DV]
+ *
+ * DQ is the query/key width and DV the value width, read off y's and n's
+ * shapes; they are equal for a square cell. R = 2*DQ + 2*DV + 2.
  *
  * States y/C/n/m are updated in-place.
  *

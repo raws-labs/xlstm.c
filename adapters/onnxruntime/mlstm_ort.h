@@ -14,9 +14,13 @@
  * =========================================================================
  * mLSTM ONNX Runtime custom op - lite API.
  *
- * Inputs:  X[B,T,I], W[4H+2,I], b[4H+2],
- *          y_init[B,H], C_init[B,H*H], n_init[B,H], m_init[B,1]
- * Outputs: output[B,T,H], y[B,H], C[B,H*H], n[B,H], m[B,1]
+ * DQ is the query/key width and DV the value width; they are equal for a
+ * square cell. Both are read off the state shapes, so no attribute carries
+ * them. R = 2*DQ + 2*DV + 2.
+ *
+ * Inputs:  X[B,T,I], W[R,I], b[R],
+ *          y_init[B,DV], C_init[B,DQ*DV], n_init[B,DQ], m_init[B,1]
+ * Outputs: output[B,T,DV], y[B,DV], C[B,DQ*DV], n[B,DQ], m[B,1]
  *
  * MLSTM_S8 is the quantized variant - see slstm_ort.h for how scale and
  * zero-point are carried. mLSTM has no recurrent weight.

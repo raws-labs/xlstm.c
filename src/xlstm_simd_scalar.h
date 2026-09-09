@@ -59,13 +59,14 @@ static inline void xlstm_scalar_matvec_s8(const int8_t* M, const int8_t* v,
 
 static inline void xlstm_scalar_rank1_update_f32(float* C, float f_gate,
                                                  float i_gate, const float* k,
-                                                 const float* v, int H)
+                                                 const float* v, int rows,
+                                                 int cols)
 {
     int r, c;
-    for (r = 0; r < H; ++r) {
+    for (r = 0; r < rows; ++r) {
         float ik_r = i_gate * k[r];
-        for (c = 0; c < H; ++c) {
-            C[r * H + c] = f_gate * C[r * H + c] + ik_r * v[c];
+        for (c = 0; c < cols; ++c) {
+            C[r * cols + c] = f_gate * C[r * cols + c] + ik_r * v[c];
         }
     }
 }

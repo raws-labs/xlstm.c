@@ -309,8 +309,8 @@ alignas(16) float g_kv[kMaxH + 4];
  * representable and a contraction difference has somewhere to show up. */
 float CSeed(int i) { return 0.75f - (float)((i * 29) % 97) / 96.0f; }
 
-bool CheckRank1(int H, int coff, int koff, int voff, float f_gate,
-                float i_gate, unsigned long want_fast,
+bool CheckRank1(int rows, int cols, int coff, int koff, int voff,
+                float f_gate, float i_gate, unsigned long want_fast,
                 unsigned long want_scalar) {
   float* C = g_C + coff;
   const float* k = g_k + koff;
@@ -319,28 +319,30 @@ bool CheckRank1(int H, int coff, int koff, int voff, float f_gate,
   const unsigned long scalar0 = xlstm_esp_rank1_f32_scalar;
   bool ok = true;
 
-  for (int i = 0; i < H * H; ++i) C[i] = g_Cref[i] = CSeed(i);
-  xlstm_rank1_update_f32(C, f_gate, i_gate, k, v, H);
-  xlstm_scalar_rank1_update_f32(g_Cref, f_gate, i_gate, k, v, H);
+  for (int i = 0; i < rows * cols; ++i) C[i] = g_Cref[i] = CSeed(i);
+  xlstm_rank1_update_f32(C, f_gate, i_gate, k, v, rows, cols);
+  xlstm_scalar_rank1_update_f32(g_Cref, f_gate, i_gate, k, v, rows, cols);
 
   const unsigned long d_fast = xlstm_esp_rank1_f32_fast - fast0;
   const unsigned long d_scalar = xlstm_esp_rank1_f32_scalar - scalar0;
   if (d_fast != want_fast || d_scalar != want_scalar) {
-    std::printf("  FAIL rank1 H=%d C+%d k+%d v+%d: expected fast+%lu "
+    std::printf("  FAIL rank1 %dx%d C+%d k+%d v+%d: expected fast+%lu "
                 "scalar+%lu, got fast+%lu scalar+%lu. Which path a call takes "
-                "is a property of H alone; a gate that cannot prove "
-                "EE.STF.128.IP ran proves nothing.\n",
-                H, coff, koff, voff, want_fast, want_scalar, d_fast, d_scalar);
+                "is a property of the column count alone; a gate that cannot "
+                "prove EE.STF.128.IP ran proves nothing.\n",
+                rows, cols, coff, koff, voff, want_fast, want_scalar, d_fast,
+                d_scalar);
     ok = false;
   }
 
-  for (int i = 0; i < H * H; ++i) {
+  for (int i = 0; i < rows * cols; ++i) {
     if (C[i] != g_Cref[i]) {
-      std::printf("  FAIL rank1 H=%d C+%d k+%d v+%d C[%d] (row %d col %d): "
+      std::printf("  FAIL rank1 %dx%d C+%d k+%d v+%d C[%d] (row %d col %d): "
                   "got %.9g, reference %.9g (diff %.2e). Nothing here sums "
                   "across elements - a difference is a lane order or a "
                   "contraction that stopped matching the scalar body.\n",
-                  H, coff, koff, voff, i, i / H, i % H, (double)C[i],
+                  rows, cols, coff, koff, voff, i, i / cols, i % cols,
+                  (double)C[i],
                   (double)g_Cref[i], (double)std::fabs(C[i] - g_Cref[i]));
       ok = false;
       break;
@@ -358,12 +360,22 @@ bool TestRank1(void) {
   /* Spelled out, not recomputed from the kernel's own rule. H straddles the
    * seven-column dispatch both ways and covers the three step classes an
    * odd, an even and a multiple-of-four H put the four-row block into. */
-  static const struct { int H; unsigned long fast, scalar; } kCases[] = {
-      {0, 0, 0},                                    /* neither body runs */
-      {1, 0, 1}, {2, 0, 1}, {3, 0, 1}, {6, 0, 1},   /* under one group */
-      {7, 1, 0},  {8, 1, 0},  {9, 1, 0},  {10, 1, 0},
-      {15, 1, 0}, {16, 1, 0}, {17, 1, 0}, {20, 1, 0},
-      {32, 1, 0}, {64, 1, 0},
+  /* Which body runs is a property of the COLUMN count - seven columns is what
+   * a prefix plus one whole group needs. Rows only choose how many blocks the
+   * fast body walks, so the rectangular rows carry the same fast/scalar rule
+   * as the square ones, which is exactly the claim worth gating. The column
+   * counts below also spread the block stride: odd cols give step 4, even-not-
+   * four give 2, and a multiple of four gives 1. */
+  static const struct { int rows, cols; unsigned long fast, scalar; } kCases[] = {
+      {0, 0, 0, 0},                                          /* neither runs */
+      {1, 1, 0, 1}, {2, 2, 0, 1}, {3, 3, 0, 1}, {6, 6, 0, 1},
+      {7, 7, 1, 0},  {8, 8, 1, 0},  {9, 9, 1, 0},  {10, 10, 1, 0},
+      {15, 15, 1, 0}, {16, 16, 1, 0}, {17, 17, 1, 0}, {20, 20, 1, 0},
+      {32, 32, 1, 0}, {64, 64, 1, 0},
+      /* Rectangular, both orders. */
+      {5, 13, 1, 0},  {13, 5, 0, 1},  {3, 16, 1, 0},  {16, 3, 0, 1},
+      {8, 12, 1, 0},  {12, 8, 1, 0},  {1, 7, 1, 0},   {7, 1, 0, 1},
+      {17, 8, 1, 0},  {8, 17, 1, 0},  {2, 64, 1, 0},  {64, 2, 0, 1},
   };
   /* One pair with both gates ordinary, one with a tiny i_gate, so the two
    * products differ in exponent by enough that the order they are combined
@@ -380,8 +392,9 @@ bool TestRank1(void) {
       for (int coff = 0; coff < 4; ++coff) {
         for (int koff = 0; koff < 4; ++koff) {
           for (int voff = 0; voff < 4; ++voff) {
-            ok &= CheckRank1(kCases[s].H, coff, koff, voff, kGates[g].f,
-                             kGates[g].i, kCases[s].fast, kCases[s].scalar);
+            ok &= CheckRank1(kCases[s].rows, kCases[s].cols, coff, koff,
+                               voff, kGates[g].f, kGates[g].i,
+                               kCases[s].fast, kCases[s].scalar);
           }
         }
       }
@@ -599,10 +612,10 @@ bool TestEdge(void) {
       float* ev = (float*)Edge(n * (int)sizeof(float));
 
       for (int i = 0; i < nn; ++i) eC[i] = 0.25f * (float)(i % 11);
-      xlstm_rank1_update_f32(eC, 0.9f, 0.1f, g_k, g_kv, n);
+      xlstm_rank1_update_f32(eC, 0.9f, 0.1f, g_k, g_kv, n, n);
 
       for (int i = 0; i < n; ++i) ev[i] = 0.5f - (float)(i % 5);
-      xlstm_rank1_update_f32(g_C, 0.9f, 0.1f, g_k, ev, n);
+      xlstm_rank1_update_f32(g_C, 0.9f, 0.1f, g_k, ev, n, n);
     }
 
     /* vecmat holds four columns of out[] in registers across the row loop,

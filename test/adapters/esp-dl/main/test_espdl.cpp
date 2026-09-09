@@ -121,9 +121,9 @@ bool TestMLstmConstruction() {
     const int H = 2, I = 3;
     dl::module::MLSTM mlstm("test_mlstm", H, I);
 
-    if (mlstm.m_hidden_size != H || mlstm.m_input_size != I) {
-        printf("  FAIL: wrong dimensions %d,%d (expected %d,%d)\n",
-               mlstm.m_hidden_size, mlstm.m_input_size, H, I);
+    if (mlstm.m_v_size != H || mlstm.m_qk_size != H || mlstm.m_input_size != I) {
+        printf("  FAIL: wrong dimensions %d,%d,%d (expected %d,%d,%d)\n",
+               mlstm.m_qk_size, mlstm.m_v_size, mlstm.m_input_size, H, H, I);
         return false;
     }
 
@@ -133,6 +133,23 @@ bool TestMLstmConstruction() {
 
     if (out_shapes.size() != 1) {
         printf("  FAIL: expected 1 output shape, got %d\n", (int)out_shapes.size());
+        return false;
+    }
+
+    // A rectangular cell: qk_size is the trailing ctor argument, and the
+    // output is sized by the value width, not the query/key one.
+    dl::module::MLSTM rect("test_mlstm_rect", /*v_size=*/12, I,
+                           dl::MODULE_NON_INPLACE, dl::QUANT_TYPE_NONE,
+                           0, 0, /*qk_size=*/4);
+    if (rect.m_qk_size != 4 || rect.m_v_size != 12) {
+        printf("  FAIL: rectangular dims %d,%d (expected 4,12)\n",
+               rect.m_qk_size, rect.m_v_size);
+        return false;
+    }
+    std::vector<std::vector<int>> rect_in = {{1, 1, I}};
+    std::vector<int> rect_expected = {1, 1, 12};
+    if (rect.get_output_shape(rect_in)[0] != rect_expected) {
+        printf("  FAIL: rectangular output shape not sized by the value width\n");
         return false;
     }
 
@@ -281,7 +298,7 @@ bool TestMLstmInt8Forward() {
     std::vector<dl::TensorBase*> tensors = {&t_x, &t_W, &t_b, &t_out};
     mod.forward(tensors);
 
-    MlstmS8Params params;
+    MlstmS8Params params = {};
     params.cell_clip = 0.0f;
     params.W_scale = DL_SCALE(W_exp);
     params.x_quant.scale = DL_SCALE(x_exp); params.x_quant.zero_point = 0;
@@ -294,14 +311,14 @@ bool TestMLstmInt8Forward() {
     float ref_m[1] = {0};
     int32_t scratch[4 * H + 2] = {0};
     mlstm_eval_s8(x, W, b, ref_y, ref_C, ref_n, ref_m, ref_out, scratch,
-                  B, T, I, H, &params);
+                  B, T, I, H, H, &params);
 
     ok &= ExpectNonTrivial(ref_out, T * H);
     ok &= ExpectEqual("output", ref_out, t_out.get_element_ptr<int8_t>(), T * H);
 
     mod.forward(tensors);
     mlstm_eval_s8(x, W, b, ref_y, ref_C, ref_n, ref_m, ref_out, scratch,
-                  B, T, I, H, &params);
+                  B, T, I, H, H, &params);
     ok &= ExpectEqual("output (2nd call, state carried forward)",
                       ref_out, t_out.get_element_ptr<int8_t>(), T * H);
     return ok;

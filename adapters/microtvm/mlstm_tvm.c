@@ -78,12 +78,15 @@ int32_t xlstm_tvm_mlstm_eval(
     int batch_size  = (int)x->shape[0];
     int time_steps  = (int)x->shape[1];
     int input_size  = (int)x->shape[2];
-    int hidden_size = (int)y->shape[1];
+    /* y is sized by the value width; the normalizer carries the query/key
+     * width. Both equal the hidden size for a square cell. */
+    int v_size      = (int)y->shape[1];
+    int qk_size     = (int)n->shape[1];
 
     /* Scratch buffer on stack */
-    float scratch[4 * hidden_size + 2];
+    float scratch[2 * qk_size + 2 * v_size + 2];
 
-    MlstmParams params = {0.0f};
+    MlstmParams params = {0};
 
     mlstm_eval_f32(
         dl_float_ptr(x),
@@ -95,7 +98,7 @@ int32_t xlstm_tvm_mlstm_eval(
         dl_float_ptr(m),
         dl_float_ptr(output),
         scratch,
-        batch_size, time_steps, input_size, hidden_size,
+        batch_size, time_steps, input_size, qk_size, v_size,
         &params);
 
     return 0;
@@ -114,12 +117,15 @@ static int32_t mlstm_eval_s8_packed(TVMValue* args, int* type_codes) {
     int batch_size  = (int)x->shape[0];
     int time_steps  = (int)x->shape[1];
     int input_size  = (int)x->shape[2];
-    int hidden_size = (int)y->shape[1];
+    /* y is sized by the value width; the normalizer carries the query/key
+     * width. Both equal the hidden size for a square cell. */
+    int v_size      = (int)y->shape[1];
+    int qk_size     = (int)n->shape[1];
 
     /* Gate accumulators are int32 on this path, not float */
-    int32_t scratch[4 * hidden_size + 2];
+    int32_t scratch[2 * qk_size + 2 * v_size + 2];
 
-    MlstmS8Params params;
+    MlstmS8Params params = {0};
     params.cell_clip = 0.0f;
     params.W_scale = dl_arg_float(args, type_codes, 10);
     params.x_quant.scale      = dl_arg_float(args, type_codes, 8);
@@ -142,7 +148,7 @@ static int32_t mlstm_eval_s8_packed(TVMValue* args, int* type_codes) {
         dl_float_ptr(m),
         (int8_t*)dl_ptr(output),
         scratch,
-        batch_size, time_steps, input_size, hidden_size,
+        batch_size, time_steps, input_size, qk_size, v_size,
         &params);
 
     return 0;

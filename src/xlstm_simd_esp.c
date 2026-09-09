@@ -695,10 +695,10 @@ void xlstm_matvec_s8(const int8_t* M, const int8_t* v,
  * sequence to v's own alignment, which is independent of C's. */
 static inline __attribute__((always_inline)) void
 xlstm_esp_rank1_block(float* C, float f_gate, float i_gate, const float* k,
-                      const float* v, int H, int r0, int rstep, int nrows)
+                      const float* v, int cols, int r0, int rstep, int nrows)
 {
-    const size_t d = (size_t)rstep * (size_t)H;
-    float* p0 = C + (size_t)r0 * (size_t)H;
+    const size_t d = (size_t)rstep * (size_t)cols;
+    float* p0 = C + (size_t)r0 * (size_t)cols;
     float* p1 = (nrows > 1) ? p0 + d : p0;
     float* p2 = (nrows > 1) ? p1 + d : p0;
     float* p3 = (nrows > 1) ? p2 + d : p0;
@@ -727,7 +727,7 @@ xlstm_esp_rank1_block(float* C, float f_gate, float i_gate, const float* k,
 
     /* q0..q3 are aligned here and stay aligned: the load leaves the cursor
      * alone and the store to the same address advances it one group. */
-    for (; c + 3 < H; c += 4) {
+    for (; c + 3 < cols; c += 4) {
         float x0 = v[c];
         float x1 = v[c + 1];
         float x2 = v[c + 2];
@@ -765,7 +765,7 @@ xlstm_esp_rank1_block(float* C, float f_gate, float i_gate, const float* k,
         }
     }
 
-    for (; c < H; ++c) {
+    for (; c < cols; ++c) {
         float x = v[c];
         p0[c] = f_gate * p0[c] + ik0 * x;
         if (nrows > 1) {
@@ -777,55 +777,55 @@ xlstm_esp_rank1_block(float* C, float f_gate, float i_gate, const float* k,
 }
 
 void xlstm_rank1_update_f32(float* C, float f_gate, float i_gate,
-                            const float* k, const float* v, int H)
+                            const float* k, const float* v, int rows, int cols)
 {
     /* Rows r and r + step agree modulo a 16-byte group exactly when
-     * step * H is a multiple of 4 floats, so step = 4 / gcd(H, 4): 1 for an H
+     * step * cols is a multiple of 4 floats, so step = 4 / gcd(cols, 4): 1 for a cols
      * divisible by four, 2 for an even one, 4 for an odd one. */
-    const int step = (H % 4 == 0) ? 1 : ((H % 2 == 0) ? 2 : 4);
+    const int step = (cols % 4 == 0) ? 1 : ((cols % 2 == 0) ? 2 : 4);
     const int tile = 4 * step;
     /* Seven columns is the whole dispatch: a prefix of up to 3 plus one group
      * of 4 needs that many to be certain of fitting, and certain is the point
      * - at 4 to 6 whether a group fits would depend on where the caller's C
      * landed. Nothing else is asked, because the one-row form covers any row
-     * a four-row block cannot reach, so every row of every H >= 7 runs on the
+     * a four-row block cannot reach, so every row of every cols >= 7 runs on the
      * vector body. */
-    const int fast = H >= 7;
+    const int fast = cols >= 7;
     int base = 0;
     int r;
 
-    /* Counted after the empty case, not before it: an H of 0 runs neither
+    /* Counted after the empty case, not before it: an empty shape runs neither
      * body, and a counter that ticked for it would let "the wide path was
      * entered" mean "a call with that shape arrived". The gate asserts the
      * stronger reading - every fast tick executed at least one 128-bit move,
-     * which H >= 7 with one row guarantees. */
-    if (H <= 0) {
+     * which cols >= 7 with one row guarantees. */
+    if (rows <= 0 || cols <= 0) {
         return;
     }
 
     XLSTM_ESP_COUNT_RANK1(fast);
 
     if (!fast) {
-        xlstm_scalar_rank1_update_f32(C, f_gate, i_gate, k, v, H);
+        xlstm_scalar_rank1_update_f32(C, f_gate, i_gate, k, v, rows, cols);
         return;
     }
 
-    for (; base + tile <= H; base += tile) {
+    for (; base + tile <= rows; base += tile) {
         int q;
         /* The step blocks starting at base + 0 .. base + step - 1 cover rows
          * base .. base + tile - 1 between them, each taking every step'th. */
         for (q = 0; q < step; ++q) {
-            xlstm_esp_rank1_block(C, f_gate, i_gate, k, v, H,
+            xlstm_esp_rank1_block(C, f_gate, i_gate, k, v, cols,
                                   base + q, step, 4);
         }
     }
 
     /* Fewer rows left than a block. Each takes its own prefix, which is what
      * lets the leftovers stay on the 128-bit path instead of falling back to
-     * a second definition of the arithmetic - at H = 17 that is 1 row, and at
-     * an odd H below 16 it is all of them. */
-    for (r = base; r < H; ++r) {
-        xlstm_esp_rank1_block(C, f_gate, i_gate, k, v, H, r, 1, 1);
+     * a second definition of the arithmetic - at 17 rows that is 1 row, and at
+     * an odd row count below 16 it is all of them. */
+    for (r = base; r < rows; ++r) {
+        xlstm_esp_rank1_block(C, f_gate, i_gate, k, v, cols, r, 1, 1);
     }
 }
 

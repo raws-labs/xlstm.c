@@ -108,7 +108,7 @@ jobs:
   # Host backends only. This says nothing about cortexm or esp performance.
   perf:
     runs-on: ubuntu-latest
-    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:22d87d923258
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:0bba8b301762
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -124,7 +124,7 @@ jobs:
   # alignment, accumulator width) before they reach a real target.
   cross-neon:
     runs-on: ubuntu-latest
-    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:22d87d923258
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:0bba8b301762
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -150,7 +150,7 @@ jobs:
   # about cycles. See the make target.
   cross-cortexm:
     runs-on: ubuntu-latest
-    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:22d87d923258
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:0bba8b301762
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -187,7 +187,7 @@ jobs:
   # run does and does not assert.
   emulated-esp:
     runs-on: ubuntu-latest
-    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:22d87d923258
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:0bba8b301762
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -211,7 +211,7 @@ jobs:
   # assert.
   emulated-helium:
     runs-on: ubuntu-latest
-    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:22d87d923258
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:0bba8b301762
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4

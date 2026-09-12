@@ -33,3 +33,4 @@ venv/
 !README.md
 !CONTRIBUTING.md
 !.github/pull_request_template.md
+!AGENTS.md

@@ -17,24 +17,23 @@ permissions:
 # about 90% of every cross job, and against a throttled Ubuntu mirror one job
 # spent 34 minutes installing a compiler for a 3-second test. The image tag is
 # the content hash of .github/toolchain.Dockerfile, so this pins an exact image
-# rather than floating onto whatever was pushed last; the hygiene job fails if
+# rather than floating onto whatever was pushed last; the refs job fails if
 # the pin and the Dockerfile have drifted apart.
 #
-# hygiene and build-and-test stay on a plain runner deliberately. Neither
+# refs and build-and-test stay on a plain runner deliberately. Neither
 # installs anything today, so the image could only make them slower - and
 # build-and-test's whole point is the host compiler pair, clang included, which
 # is the one toolchain here that is meant to be the runner's and not ours.
 
 jobs:
-  # This repository is public. Tracked files must not cite paths that exist only
-  # on a maintainer's machine - they leak internal structure and are broken
-  # references in a clone.
-  hygiene:
+  # Every path and document a tracked file cites must resolve inside the
+  # repository, so a clone is self-contained.
+  refs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
-      - run: make check-internal-refs
+      - run: make check-refs
       - name: Head-slicing example stays correct
         run: python3 test/head_slicing_example.py
       - name: Adoption helpers stay correct

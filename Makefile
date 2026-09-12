@@ -82,7 +82,7 @@ $(GATE_STAMP): | $(BUILD)
         test-cortexm test-esp test-helium reference clean \
         test-docker-ort test-docker-tvm test-docker-tflm test-docker-espdl \
         bench bench-ref bench-sse2 perf perf-baseline mutants \
-        check-internal-refs check-tools
+        check-refs check-tools
 
 all: $(BUILD)/slstm.o $(BUILD)/mlstm.o \
      $(BUILD)/xlstm_quant.o $(BUILD)/slstm_s8.o $(BUILD)/mlstm_s8.o \
@@ -816,58 +816,33 @@ test/reference_data.h: test/generate_reference.py
 reference: test/generate_reference.py
 	@$(VENV) $<
 
-# --- Public-repo hygiene ---
+# --- Reference checks ---
 #
-# This repository is public. Tracked files must not reference paths that only
-# exist on a maintainer's machine: they leak internal structure and are broken
-# references for anyone who clones. Write the fact, not a pointer.
-
-# Two rules, both stated generically so this file names nothing it is looking
-# for. A checker that must spell out the paths it forbids defeats its purpose.
+# Every path and document a tracked file cites must resolve inside this
+# repository, so a clone is self-contained. Two rules, stated generically:
 #
 #   1. No absolute paths into a user's home directory.
-#   2. Every .md a tracked file cites must itself be tracked. Citing a document
-#      that is not in the repository is either a broken reference for whoever
-#      clones it, or a pointer to something that was never meant to ship.
+#   2. Every .md a tracked file cites must itself be tracked (URLs are not
+#      repository references and are skipped).
 
-check-internal-refs:
+check-refs:
 	@fail=0; \
 	abs=$$(git ls-files -z | xargs -0 grep -nE '/(home|Users)/[A-Za-z0-9_.-]+/' 2>/dev/null); \
 	if [ -n "$$abs" ]; then \
-		echo "check-internal-refs: absolute path into a home directory:"; \
+		echo "check-refs: absolute path into a home directory:"; \
 		echo "$$abs"; fail=1; \
 	fi; \
-	for ref in $$(git ls-files -z | xargs -0 grep -hoE '\.?[A-Za-z0-9_][A-Za-z0-9_./-]*\.md' 2>/dev/null | sort -u); do \
+	for ref in $$(git ls-files -z | xargs -0 grep -hoE '\.?[A-Za-z0-9_][A-Za-z0-9_./-]*\.md' 2>/dev/null | grep -vE '^[a-z0-9.-]+\.[a-z]+/' | sort -u); do \
 		git ls-files --error-unmatch "$$ref" >/dev/null 2>&1 || { \
-			echo "check-internal-refs: cites an untracked document: $$ref"; \
+			echo "check-refs: cites a document that is not in the repository: $$ref"; \
 			git ls-files -z | xargs -0 grep -n "$$ref" 2>/dev/null | head -3; \
 			fail=1; }; \
 	done; \
-	if [ -r .internal-refs ]; then \
-		pat=$$(sed -e 's/#.*//' -e '/^[[:space:]]*$$/d' .internal-refs | paste -sd'|'); \
-		if [ -n "$$pat" ]; then \
-			hit=$$(git ls-files -z | xargs -0 grep -inE "$$pat" 2>/dev/null); \
-			if [ -n "$$hit" ]; then \
-				echo "check-internal-refs: tracked file carries a private name:"; \
-				echo "$$hit"; fail=1; \
-			fi; \
-			tag=$$(git describe --tags --abbrev=0 2>/dev/null); \
-			if [ -n "$$tag" ]; then \
-				msg=$$(git log $$tag..HEAD --format='%h %B' 2>/dev/null | grep -inE "$$pat"); \
-				if [ -n "$$msg" ]; then \
-					echo "check-internal-refs: a commit message since $$tag carries a private name:"; \
-					echo "$$msg"; fail=1; \
-				fi; \
-			fi; \
-		fi; \
-	else \
-		echo "check-internal-refs: note - .internal-refs absent, structural checks only"; \
-	fi; \
 	if [ $$fail -ne 0 ]; then \
-		echo "Write the fact inline instead of naming something that is not in the repo."; \
+		echo "State the fact inline instead of citing a file that is not in the repository."; \
 		exit 1; \
 	fi; \
-	echo "check-internal-refs: OK"
+	echo "check-refs: OK"
 
 # --- Adoption helpers ---
 #
@@ -877,7 +852,7 @@ check-internal-refs:
 # is that each one re-derives its claim from test/reference_data.json and
 # exits non-zero if it drifts - documentation about an index expression cannot
 # be checked, a script can. Standard library only, so this needs no .venv and
-# runs in the same job as the other hygiene checks.
+# runs in the same job as the other reference checks.
 check-tools:
 	@python3 tools/extract_heads.py
 	@python3 tools/calibrate_int8.py

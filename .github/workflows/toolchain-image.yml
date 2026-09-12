@@ -6,7 +6,7 @@ name: Toolchain image
 # The tag is the content hash of that Dockerfile and the perf baseline it
 # asserts against, so CI names an exact image rather than floating onto
 # whatever was pushed last: change either file and this publishes a new tag,
-# which ci.yml must then be pointed at. ci.yml's hygiene job recomputes the
+# which ci.yml must then be pointed at. ci.yml's refs job recomputes the
 # same hash and fails if the two have drifted, so a stale pin cannot pass
 # unnoticed.
 

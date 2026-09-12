@@ -103,8 +103,8 @@ ENV PATH=/opt/xtensa-esp-elf/bin:/opt/qemu/bin:$PATH
 
 # A container job checks the workspace out as root over a directory the runner
 # created as another user, which git reads as dubious ownership and refuses to
-# touch. check-internal-refs is `git ls-files`, so without this the hygiene
-# gate cannot see the tree at all.
+# touch. check-refs is `git ls-files`, so without this the refs
+# job cannot see the tree at all.
 RUN git config --system --add safe.directory '*'
 
 # Fail here rather than in the perf job. `make perf` compares gcc --version

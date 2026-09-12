@@ -1,8 +1,9 @@
 # Contributing
 
-Contributions are welcome. This project is Apache-2.0 licensed; by submitting
-a pull request you agree that your contribution will be licensed under the same
-terms.
+This repository follows the RAWS Labs contributing guide for pull requests, commit
+subjects, licensing and the code of conduct:
+https://github.com/raws-labs/.github/blob/main/CONTRIBUTING.md. Below is only what is
+specific to this repository.
 
 ## Getting started
 
@@ -20,11 +21,9 @@ integration tests are run locally, not in CI.
 
 ## Workflow
 
-1. Fork and create a feature branch
-2. Make your changes
-3. Run `make test` locally; all core tests must pass
-4. Run the relevant `make test-docker-*` if you touched an adapter
-5. Open a PR against `main`
+- This repository has no `develop` branch: open pull requests against `main`.
+- Run `make test` locally; all core tests must pass. If you touched an adapter, run
+  the matching `make test-docker-*` as well.
 
 ## Code style
 
@@ -51,8 +50,7 @@ reference implementation.
 `make check-tools` matters here because the worked examples in `tools/`
 reproduce that file's calibration and shapes from its float tensors alone. If
 a quantization convention changes and they are not updated with it, they say
-so; they are stdlib-only, so this runs in CI alongside the other hygiene
-checks.
+so; they are stdlib-only, so this runs in CI alongside the other checks.
 
 ## Testing a backend
 
@@ -290,10 +288,3 @@ Not in CI - it edits files in the working tree, which belongs in a run someone
 chose to start. It restores them on exit, on failure and on interrupt, and a
 run killed outright leaves `.mutants-backup/` for the next run to restore from.
 Run it locally, and say in the PR that you did.
-
-## Reporting issues
-
-Open an issue on GitHub. Include:
-- What you expected vs what happened
-- Minimal reproduction steps
-- Compiler/OS/framework versions if relevant

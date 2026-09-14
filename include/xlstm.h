@@ -25,8 +25,8 @@
 
 #define XLSTM_VERSION_MAJOR 0
 #define XLSTM_VERSION_MINOR 4
-#define XLSTM_VERSION_PATCH 0
-#define XLSTM_VERSION "0.4.0"
+#define XLSTM_VERSION_PATCH 1
+#define XLSTM_VERSION "0.4.1"
 
 /* Kernel APIs */
 #include "slstm.h"

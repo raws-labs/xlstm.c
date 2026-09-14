@@ -24,7 +24,8 @@ Apache-2.0.
   because it is core-dependent (faster on M4F, M7 and Xtensa LX7, slightly
   slower on M33).
 - `make bench`: wall-clock, ungated. `make perf`: callgrind instruction counts against
-  `test/perf_baseline.txt`, gated in CI (`make perf-baseline` re-pins). `make mutants`: mutation battery.
+  `test/perf_baseline.txt`, plus simulated D1 misses, gated in CI
+  (`make perf-baseline` re-pins). `make mutants`: mutation battery.
 - `make test-docker-{ort,tvm,tflm,espdl}`: adapter integration tests in Docker.
 - `make reference`: regenerate golden data (needs `.venv` with torch and xlstm).
 - `make check-refs`: no absolute home paths in tracked files, every `.md` they cite is tracked; runs in CI.

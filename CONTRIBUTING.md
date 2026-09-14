@@ -18,8 +18,9 @@ make test-docker-espdl # ESP-DL integration test (runs on an emulated ESP32-S3)
 `make test` is fast (seconds). Docker integration tests are slower and require
 Docker. On every push to `main` and every pull request CI runs `check-refs` and
 `check-tools`; `make test`, `test-ref` and `test-approx` under gcc and clang;
-the perf gate; and `test-neon`, `test-cortexm`, `test-esp` and `test-helium`
-under emulation. The Docker integration tests are run locally, not in CI.
+the perf gate; `test-neon`, `test-cortexm`, `test-esp` and `test-helium`
+under emulation; and the mutation battery on the host pair. The Docker
+integration tests are run locally, not in CI.
 
 ## Workflow
 
@@ -268,8 +269,9 @@ The harness that produced them is not part of this repository.
 ## Changing a tolerance, a bound, or the generator
 
 ```bash
-make mutants           # about a minute for the host pair, about two for all
-                       # six backends. Edits the working tree and restores it.
+make mutants           # 71 s for the host pair, 345 s for the five whose
+                       # toolchains were installed when that was measured.
+                       # Edits the working tree and restores it.
 ```
 
 Those changes fail by making a gate quietly stop failing, which a green
@@ -316,7 +318,13 @@ It covers all six backends: 50 entries, including the loop tails, zero-point
 folding, lane order and alignment instances only `neon`, `cortexm`, `esp` and
 `helium` compile. A mutation the running backend does not compile reports
 `n/a`, and a missing toolchain reports `NOT COVERED`; neither is an escape.
-Not in CI - it edits files in the working tree, which belongs in a run someone
-chose to start. It restores them on exit, on failure and on interrupt, and a
-run killed outright leaves `.mutants-backup/` for the next run to restore from.
-Run it locally, and say in the PR that you did.
+CI runs the host pair on every push and pull request. Those two carry every
+entry that exercises a tolerance, a bound or a state comparison, which is the
+part that has to be gated on each change; the cross entries exercise the
+fast-path counters, and the four emulated jobs already run those gates
+unmutated. Run all six locally when you touch a cross backend, and say in the
+PR that you did.
+
+The battery edits files in the working tree, which is why it is not part of
+`make test`. It restores them on exit, on failure and on interrupt, and a run
+killed outright leaves `.mutants-backup/` for the next run to restore from.

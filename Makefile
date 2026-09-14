@@ -839,10 +839,12 @@ perf-baseline:
 # failing, and this is the only thing here that detects it - so run it after
 # any change to tolerances, bounds, or generate_reference.py.
 #
-# Not in CI, deliberately: it edits files in the working tree, which belongs
-# in a run someone chose to start. It restores them on exit, on failure and
-# on interrupt; a run killed outright leaves .mutants-backup/, and the next
-# run restores from that before doing anything else.
+# It edits files in the working tree, which is why it is not part of `make
+# test`. It restores them on exit, on failure and on interrupt; a run killed
+# outright leaves .mutants-backup/, and the next run restores from that before
+# doing anything else. A CI checkout is discarded either way, so CI runs the
+# host pair - see the mutants job in .github/workflows/ci.yml for why those two
+# and not all six.
 #
 # All six backends, not just the two that run on the build host. The four
 # cross-compiled ones are driven through their own test- target above, so each

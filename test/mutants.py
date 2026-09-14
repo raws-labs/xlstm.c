@@ -43,10 +43,12 @@ without any gate noticing. Only a counter can see it, and the entries that
 inject it (S1 to S4, N7 to N10, M6, M7, P1 to P4, H1 to H4) are the proof that
 those counters are wired to an assertion.
 
-Deliberately not in CI: this edits files in the working tree. Sources are
-copied to .mutants-backup/ and restored on exit, on failure and on SIGINT.
-A run killed outright leaves that directory behind, and the next run restores
-from it before touching anything.
+This edits files in the working tree, which is why it is not part of `make
+test`. Sources are copied to .mutants-backup/ and restored on exit, on failure
+and on SIGINT. A run killed outright leaves that directory behind, and the next
+run restores from it before touching anything. CI runs the host pair, whose
+entries are the ones that exercise a tolerance or a bound; all six is a local
+run.
 
 Usage: make mutants   (or: python3 test/mutants.py [backend ...])
 """

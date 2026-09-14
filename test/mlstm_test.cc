@@ -161,6 +161,58 @@ static bool RunOutputGateSeam(const XlstmRefCase* tc) {
     return ok;
 }
 
+/* include/mlstm.h states that params may be NULL and that it is equivalent to
+ * an all-zero MlstmParams. Three guards spell that here (src/mlstm.c:78, :95,
+ * :126), one more than the sLSTM has, and nothing else in this suite passes
+ * NULL. Drive the first golden case both ways and require bit-identical
+ * state and output. */
+static bool TestNullParamsEqualsZeroStruct() {
+    const XlstmRefCase* tc = &kMlstmCases[0];
+    const int DQ = tc->DQ, DV = tc->DV, T = tc->T;
+    if (tc->B != 1 || DQ > XLSTM_TEST_MAX_H || DV > XLSTM_TEST_MAX_H) return true;
+
+    static float y_z[XLSTM_TEST_MAX_H], n_z[XLSTM_TEST_MAX_H], m_z[XLSTM_TEST_MAX_H];
+    static float C_z[XLSTM_TEST_MAX_H * XLSTM_TEST_MAX_H];
+    static float out_z[3 * XLSTM_TEST_MAX_H], scratch_z[4 * XLSTM_TEST_MAX_H + 2];
+    MlstmParams zero = {0.0f, 0.0f, 0};
+
+    for (int i = 0; i < DV; ++i) { g_y[i] = y_z[i] = 0; }
+    for (int i = 0; i < DQ; ++i) { g_n[i] = n_z[i] = 0; }
+    g_m[0] = m_z[0] = 0;
+    for (int i = 0; i < DQ * DV; ++i) { g_C[i] = C_z[i] = 0; }
+    for (int i = 0; i < T * DV; ++i) { g_output[i] = out_z[i] = 0; }
+
+    mlstm_eval_f32(tc->input, tc->W, tc->b, g_y, g_C, g_n, g_m, g_output,
+                   g_scratch, 1, T, tc->I, DQ, DV, NULL);
+    mlstm_eval_f32(tc->input, tc->W, tc->b, y_z, C_z, n_z, m_z, out_z,
+                   scratch_z, 1, T, tc->I, DQ, DV, &zero);
+
+    bool ok = true;
+    for (int i = 0; i < T * DV; ++i) {
+        if (g_output[i] != out_z[i]) {
+            std::printf("  FAIL: output[%d] NULL params %.9g, zero struct %.9g\n",
+                        i, (double)g_output[i], (double)out_z[i]);
+            ok = false;
+        }
+    }
+    for (int i = 0; i < DQ * DV; ++i) {
+        if (g_C[i] != C_z[i]) {
+            std::printf("  FAIL: C[%d] NULL params %.9g, zero struct %.9g\n",
+                        i, (double)g_C[i], (double)C_z[i]);
+            ok = false;
+            break;
+        }
+    }
+    for (int i = 0; i < DQ; ++i) {
+        if (g_n[i] != n_z[i]) {
+            std::printf("  FAIL: n[%d] differs\n", i); ok = false; break;
+        }
+    }
+    if (g_m[0] != m_z[0]) { std::printf("  FAIL: m differs\n"); ok = false; }
+    if (ok) std::printf("  NULL params is bit-identical to an all-zero MlstmParams\n");
+    return ok;
+}
+
 int XLSTM_TEST_MAIN(void) {
     std::printf("[==========] Running mLSTM kernel tests\n");
 
@@ -188,6 +240,8 @@ int XLSTM_TEST_MAIN(void) {
             std::printf("[  FAILED  ] mLSTM output-gate seam %s\n", tc->name);
         }
     }
+
+    RUN_TEST(TestNullParamsEqualsZeroStruct);
 
     std::printf("[==========] %d/%d tests passed\n", g_tests_passed, g_tests_run);
     return g_tests_passed == g_tests_run ? 0 : 1;

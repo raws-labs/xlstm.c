@@ -139,6 +139,154 @@ static bool TestHeadComposition() {
 #define XLSTM_TEST_MAIN main
 #endif
 
+/* include/slstm.h states that params may be NULL and that it is equivalent to
+ * an all-zero SlstmParams. The kernel spells that as a `params &&` guard
+ * (src/slstm.c:87); dropping the guard turns a documented call into a null
+ * dereference, and nothing else here passes NULL. Drive the first golden case
+ * both ways and require bit-identical state and output. */
+static bool TestNullParamsEqualsZeroStruct() {
+    const XlstmRefCase* tc = &kSlstmCases[0];
+    const int H = tc->H, T = tc->T;
+    if (tc->B != 1 || H > XLSTM_TEST_MAX_H) return true;
+
+    static float y_z[XLSTM_TEST_MAX_H], c_z[XLSTM_TEST_MAX_H];
+    static float n_z[XLSTM_TEST_MAX_H], m_z[XLSTM_TEST_MAX_H];
+    static float out_z[3 * XLSTM_TEST_MAX_H], scratch_z[4 * XLSTM_TEST_MAX_H];
+    SlstmParams zero = {0};
+
+    for (int i = 0; i < H; ++i) { g_y[i] = c_z[i] = n_z[i] = m_z[i] = 0; }
+    for (int i = 0; i < H; ++i) { g_c[i] = g_n[i] = g_m[i] = 0; y_z[i] = 0; }
+    for (int i = 0; i < T * H; ++i) { g_output[i] = out_z[i] = 0; }
+
+    slstm_eval_f32(tc->input, tc->W, tc->R, tc->b, g_y, g_c, g_n, g_m,
+                   g_output, g_scratch, 1, T, tc->I, H, NULL);
+    slstm_eval_f32(tc->input, tc->W, tc->R, tc->b, y_z, c_z, n_z, m_z,
+                   out_z, scratch_z, 1, T, tc->I, H, &zero);
+
+    bool ok = true;
+    for (int i = 0; i < T * H; ++i) {
+        if (g_output[i] != out_z[i]) {
+            std::printf("  FAIL: output[%d] NULL params %.9g, zero struct %.9g\n",
+                        i, (double)g_output[i], (double)out_z[i]);
+            ok = false;
+        }
+    }
+    const float* a[4] = { g_y, g_c, g_n, g_m };
+    const float* b[4] = { y_z, c_z, n_z, m_z };
+    const char* nm[4] = { "y", "c", "n", "m" };
+    for (int k = 0; k < 4; ++k) {
+        for (int i = 0; i < H; ++i) {
+            if (a[k][i] != b[k][i]) {
+                std::printf("  FAIL: %s[%d] NULL params %.9g, zero struct %.9g\n",
+                            nm[k], i, (double)a[k][i], (double)b[k][i]);
+                ok = false;
+            }
+        }
+    }
+    if (ok) std::printf("  NULL params is bit-identical to an all-zero SlstmParams\n");
+    return ok;
+}
+
+/* cell_clip is pinned to 0 by every golden case, so the clamp at
+ * src/slstm.c:86-88 never runs under the rest of this suite: a clamp that
+ * clamped the wrong way, or to the wrong bound, would ship green. Drive one
+ * case unclipped to learn its true |c| range, then re-drive it with a clip
+ * strictly inside that range and require every element to equal the clamp of
+ * the unclipped value. Exact equality rather than a bound: a clamp that pins
+ * every element to +clip satisfies |c| <= clip and is still wrong. The case
+ * must be T=1, because at T>1 a clamp at one step moves the next step's
+ * trajectory and the elementwise relation no longer holds. */
+static bool TestCellClipBinds() {
+    const XlstmRefCase* tc = &kSlstmCases[0];
+    const int H = tc->H, T = tc->T;
+    if (tc->B != 1 || H > XLSTM_TEST_MAX_H) return true;
+    if (T != 1) {
+        std::printf("  FAIL: %s has T=%d; this test needs T=1\n", tc->name, T);
+        return false;
+    }
+
+    for (int i = 0; i < H; ++i) { g_y[i] = g_c[i] = g_n[i] = g_m[i] = 0; }
+    for (int i = 0; i < T * H; ++i) g_output[i] = 0;
+    slstm_eval_f32(tc->input, tc->W, tc->R, tc->b, g_y, g_c, g_n, g_m,
+                   g_output, g_scratch, 1, T, tc->I, H, NULL);
+
+    float peak = 0.0f;
+    for (int i = 0; i < H; ++i) {
+        float a = g_c[i] < 0 ? -g_c[i] : g_c[i];
+        if (a > peak) peak = a;
+    }
+    if (peak <= 0.0f) {
+        std::printf("  FAIL: unclipped |c| peak is 0, nothing to clamp against\n");
+        return false;
+    }
+
+    SlstmParams clipped = {0};
+    clipped.cell_clip = peak * 0.5f;
+    static float y2[XLSTM_TEST_MAX_H], c2[XLSTM_TEST_MAX_H];
+    static float n2[XLSTM_TEST_MAX_H], m2[XLSTM_TEST_MAX_H];
+    static float out2[3 * XLSTM_TEST_MAX_H], scratch2[4 * XLSTM_TEST_MAX_H];
+    for (int i = 0; i < H; ++i) { y2[i] = c2[i] = n2[i] = m2[i] = 0; }
+    for (int i = 0; i < T * H; ++i) out2[i] = 0;
+    slstm_eval_f32(tc->input, tc->W, tc->R, tc->b, y2, c2, n2, m2,
+                   out2, scratch2, 1, T, tc->I, H, &clipped);
+
+    bool ok = true, any_clamped = false;
+    const float k = clipped.cell_clip;
+    for (int i = 0; i < H; ++i) {
+        float want = g_c[i] < -k ? -k : (g_c[i] > k ? k : g_c[i]);
+        if (c2[i] != want) {
+            std::printf("  FAIL: c[%d] = %.9g, clamp of %.9g to +/-%.9g is %.9g\n",
+                        i, (double)c2[i], (double)g_c[i], (double)k, (double)want);
+            ok = false;
+        }
+        float u = g_c[i] < 0 ? -g_c[i] : g_c[i];
+        if (u > k) any_clamped = true;
+    }
+    if (!any_clamped) {
+        std::printf("  FAIL: no element exceeded the clip, so nothing was tested\n");
+        ok = false;
+    }
+    /* peak*0.5 only binds on whichever side the large elements sit, so an
+     * error in the other bound survives it. Re-drive with a clip below the
+     * smallest magnitude, which forces every element to clamp and therefore
+     * exercises both bounds whenever the case carries both signs. */
+    float smallest = peak;
+    for (int i = 0; i < H; ++i) {
+        float a = g_c[i] < 0 ? -g_c[i] : g_c[i];
+        if (a < smallest) smallest = a;
+    }
+    SlstmParams tight = {0};
+    tight.cell_clip = smallest * 0.5f;
+    bool saw_pos = false, saw_neg = false;
+    if (tight.cell_clip > 0.0f) {
+        for (int i = 0; i < H; ++i) { y2[i] = c2[i] = n2[i] = m2[i] = 0; }
+        for (int i = 0; i < T * H; ++i) out2[i] = 0;
+        slstm_eval_f32(tc->input, tc->W, tc->R, tc->b, y2, c2, n2, m2,
+                       out2, scratch2, 1, T, tc->I, H, &tight);
+        const float t = tight.cell_clip;
+        for (int i = 0; i < H; ++i) {
+            float want = g_c[i] < -t ? -t : (g_c[i] > t ? t : g_c[i]);
+            if (c2[i] != want) {
+                std::printf("  FAIL: tight clip, c[%d] = %.9g, expected %.9g\n",
+                            i, (double)c2[i], (double)want);
+                ok = false;
+            }
+            if (g_c[i] > t) saw_pos = true;
+            if (g_c[i] < -t) saw_neg = true;
+        }
+        if (!saw_pos || !saw_neg) {
+            std::printf("  NOTE: %s clamps on one side only (pos=%d neg=%d), "
+                        "so the other bound is untested here\n",
+                        tc->name, (int)saw_pos, (int)saw_neg);
+        }
+    }
+
+    if (ok) std::printf("  cell_clip binds: |c| in [%.6g, %.6g], both bounds "
+                        "exercised: %s\n", (double)smallest, (double)peak,
+                        (saw_pos && saw_neg) ? "yes" : "no");
+    return ok;
+}
+
 int XLSTM_TEST_MAIN(void) {
     std::printf("[==========] Running sLSTM kernel tests\n");
 
@@ -155,6 +303,8 @@ int XLSTM_TEST_MAIN(void) {
     }
 
     RUN_TEST(TestHeadComposition);
+    RUN_TEST(TestNullParamsEqualsZeroStruct);
+    RUN_TEST(TestCellClipBinds);
 
     std::printf("[==========] %d/%d tests passed\n", g_tests_passed, g_tests_run);
     return g_tests_passed == g_tests_run ? 0 : 1;

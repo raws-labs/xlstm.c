@@ -287,6 +287,219 @@ static bool TestCellClipBinds() {
     return ok;
 }
 
+/* Carrying caller-owned state across calls is the contract every header here
+ * states, and no golden case exercises it: all 22 start from zeroed state and
+ * call eval once. This needs no new reference vectors, because splitting one
+ * sequence into two calls must reproduce the single call exactly - the state
+ * is the only thing that crosses the seam.
+ *
+ * It is worth a test rather than an argument because the sLSTM first-timestep
+ * reset is a value test on n_prev == 0.0f (src/slstm.c:67), not a step index:
+ * a resumed sequence whose carried n is exactly zero takes the reset branch
+ * again mid-stream and silently discards m. Every T>=2 case is run at every
+ * split point, so any state element reaching exactly zero at a seam shows up
+ * here rather than in a caller. */
+static bool TestStreamingResumption() {
+    static float y1[XLSTM_TEST_MAX_H], c1[XLSTM_TEST_MAX_H];
+    static float n1[XLSTM_TEST_MAX_H], m1[XLSTM_TEST_MAX_H];
+    static float o1[3 * XLSTM_TEST_MAX_H], s1[4 * XLSTM_TEST_MAX_H];
+    static float y2[XLSTM_TEST_MAX_H], c2[XLSTM_TEST_MAX_H];
+    static float n2[XLSTM_TEST_MAX_H], m2[XLSTM_TEST_MAX_H];
+    static float o2[3 * XLSTM_TEST_MAX_H], s2[4 * XLSTM_TEST_MAX_H];
+
+    bool ok = true;
+    int split_points = 0;
+    for (int ci = 0; ci < kSlstmCasesCount; ++ci) {
+        const XlstmRefCase* tc = &kSlstmCases[ci];
+        const int H = tc->H, T = tc->T, I = tc->I;
+        if (tc->B != 1 || T < 2 || H > XLSTM_TEST_MAX_H) continue;
+
+        for (int cut = 1; cut < T; ++cut) {
+            ++split_points;
+            for (int i = 0; i < H; ++i) { y1[i] = c1[i] = n1[i] = m1[i] = 0; }
+            for (int i = 0; i < H; ++i) { y2[i] = c2[i] = n2[i] = m2[i] = 0; }
+            for (int i = 0; i < T * H; ++i) { o1[i] = o2[i] = 0; }
+
+            slstm_eval_f32(tc->input, tc->W, tc->R, tc->b, y1, c1, n1, m1,
+                           o1, s1, 1, T, I, H, NULL);
+
+            /* Same weights, same input, split into two calls that carry
+             * y/c/n/m across the seam. */
+            slstm_eval_f32(tc->input, tc->W, tc->R, tc->b, y2, c2, n2, m2,
+                           o2, s2, 1, cut, I, H, NULL);
+            slstm_eval_f32(tc->input + (size_t)cut * I, tc->W, tc->R, tc->b,
+                           y2, c2, n2, m2, o2 + (size_t)cut * H, s2,
+                           1, T - cut, I, H, NULL);
+
+            for (int i = 0; i < T * H; ++i) {
+                if (o1[i] != o2[i]) {
+                    std::printf("  FAIL %s split %d/%d: output[%d] one call "
+                                "%.9g, resumed %.9g\n",
+                                tc->name, cut, T - cut, i,
+                                (double)o1[i], (double)o2[i]);
+                    ok = false;
+                    break;
+                }
+            }
+            const float* a[4] = { y1, c1, n1, m1 };
+            const float* b[4] = { y2, c2, n2, m2 };
+            const char* nm[4] = { "y", "c", "n", "m" };
+            for (int k = 0; k < 4 && ok; ++k) {
+                for (int i = 0; i < H; ++i) {
+                    if (a[k][i] != b[k][i]) {
+                        std::printf("  FAIL %s split %d/%d: %s[%d] one call "
+                                    "%.9g, resumed %.9g\n",
+                                    tc->name, cut, T - cut, nm[k], i,
+                                    (double)a[k][i], (double)b[k][i]);
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if (ok) std::printf("  %d split points across the T>=2 cases reproduce "
+                        "the single call exactly\n", split_points);
+    return ok;
+}
+
+/* The first-timestep reset is a value test on n_prev == 0.0f
+ * (src/slstm.c:67), so it cannot tell "no history yet" from "history whose
+ * normalizer reached exactly zero". Both reference backends do the same
+ * (vanilla tests n == 0, the CUDA kernel tests it per unit), so this is
+ * inherited rather than a divergence, and changing it would diverge.
+ *
+ * Pin the discriminating property: with n exactly zero the new stabilizer is
+ * i_raw and does not depend on the carried m at all, so changing m changes
+ * nothing; with n one denormal above zero it is
+ * max(i_raw, m + logsigmoid(f_raw)) and does. This test exists so that anyone
+ * who edits the reset predicate sees the discontinuity rather than
+ * discovering it in a resumed stream. */
+static bool TestZeroNormalizerResetsStabilizer() {
+    enum { I = 2, H = 2 };
+    float W[4 * H * I], R[4 * H * H], b[4 * H], x[I];
+    for (int i = 0; i < 4 * H * I; ++i) W[i] = 0.1f * (float)((i % 5) - 2);
+    for (int i = 0; i < 4 * H * H; ++i) R[i] = 0.05f * (float)((i % 7) - 3);
+    for (int i = 0; i < 4 * H; ++i)     b[i] = 0.02f * (float)(i % 3);
+    for (int i = 0; i < I; ++i)         x[i] = 0.3f;
+
+    /* Same call four ways: n zero or one denormal above it, crossed with two
+     * different carried stabilizers. */
+    float m_out[2][2], y_out[2][2];
+    const float m_in[2] = { 1.25f, 4.5f };
+    const float n_in[2] = { 0.0f, 1e-30f };
+    for (int ni = 0; ni < 2; ++ni) {
+        for (int mi = 0; mi < 2; ++mi) {
+            float y[H] = { 0.1f, -0.2f }, c[H] = { 0.5f, -0.4f };
+            float n[H] = { n_in[ni], n_in[ni] }, m[H] = { m_in[mi], m_in[mi] };
+            float sc[4 * H];
+            slstm_step_f32(x, W, R, b, y, c, n, m, sc, I, H, NULL);
+            m_out[ni][mi] = m[0];
+            y_out[ni][mi] = y[0];
+        }
+    }
+
+    bool ok = true;
+    if (m_out[0][0] != m_out[0][1]) {
+        std::printf("  FAIL: with n = 0 the new stabilizer still depends on "
+                    "the carried m (%.9g vs %.9g)\n",
+                    (double)m_out[0][0], (double)m_out[0][1]);
+        ok = false;
+    }
+    if (m_out[1][0] == m_out[1][1]) {
+        std::printf("  FAIL: with n = 1e-30 the new stabilizer ignores the "
+                    "carried m, so the reset no longer keys on n\n");
+        ok = false;
+    }
+    if (ok) std::printf("  n = 0 discards the carried stabilizer (m -> %.6g "
+                        "for both inputs, y %.6f); n = 1e-30 keeps it "
+                        "(m -> %.6g and %.6g, y %.6f)\n",
+                        (double)m_out[0][0], (double)y_out[0][0],
+                        (double)m_out[1][0], (double)m_out[1][1],
+                        (double)y_out[1][0]);
+    return ok;
+}
+
+/* Nothing exercises the batch loop: all 22 golden cases are B=1 and every
+ * runner refuses B != 1 rather than covering it. This needs no reference
+ * vectors either - batch elements share weights and nothing else, so running
+ * two together must equal running each alone, and the elements are given
+ * DIFFERENT inputs and different carried state so that a loop which ignored
+ * the batch index, or shared one element's state with the other, would show
+ * up as a mismatch rather than as an identical pair. */
+static bool TestBatchElementsAreIndependent() {
+    const XlstmRefCase* tc = &kSlstmCases[1];   /* Test2: B=1, T=3, I=2, H=2 */
+    const int H = tc->H, T = tc->T, I = tc->I;
+    if (H > XLSTM_TEST_MAX_H || T < 2) return true;
+
+    /* Element 0 is the golden input; element 1 is a perturbed copy, so the
+     * two trajectories differ. */
+    static float in2[2 * 3 * XLSTM_TEST_MAX_H];
+    for (int t = 0; t < T * I; ++t) {
+        in2[t] = tc->input[t];
+        in2[T * I + t] = tc->input[t] * -0.75f + 0.125f;
+    }
+
+    static float yb[2 * XLSTM_TEST_MAX_H], cb[2 * XLSTM_TEST_MAX_H];
+    static float nb[2 * XLSTM_TEST_MAX_H], mb[2 * XLSTM_TEST_MAX_H];
+    static float ob[2 * 3 * XLSTM_TEST_MAX_H], sb[4 * XLSTM_TEST_MAX_H];
+    for (int i = 0; i < 2 * H; ++i) { yb[i] = cb[i] = nb[i] = mb[i] = 0; }
+    for (int i = 0; i < 2 * T * H; ++i) ob[i] = 0;
+
+    slstm_eval_f32(in2, tc->W, tc->R, tc->b, yb, cb, nb, mb, ob, sb,
+                   2, T, I, H, NULL);
+
+    bool ok = true;
+    for (int e = 0; e < 2; ++e) {
+        static float y1[XLSTM_TEST_MAX_H], c1[XLSTM_TEST_MAX_H];
+        static float n1[XLSTM_TEST_MAX_H], m1[XLSTM_TEST_MAX_H];
+        static float o1[3 * XLSTM_TEST_MAX_H], s1[4 * XLSTM_TEST_MAX_H];
+        for (int i = 0; i < H; ++i) { y1[i] = c1[i] = n1[i] = m1[i] = 0; }
+        for (int i = 0; i < T * H; ++i) o1[i] = 0;
+
+        slstm_eval_f32(in2 + (size_t)e * T * I, tc->W, tc->R, tc->b,
+                       y1, c1, n1, m1, o1, s1, 1, T, I, H, NULL);
+
+        for (int i = 0; i < T * H; ++i) {
+            if (ob[(size_t)e * T * H + i] != o1[i]) {
+                std::printf("  FAIL element %d: output[%d] batched %.9g, "
+                            "alone %.9g\n", e, i,
+                            (double)ob[(size_t)e * T * H + i], (double)o1[i]);
+                ok = false;
+                break;
+            }
+        }
+        const float* ba[4] = { yb, cb, nb, mb };
+        const float* al[4] = { y1, c1, n1, m1 };
+        const char* nm[4] = { "y", "c", "n", "m" };
+        for (int k = 0; k < 4 && ok; ++k) {
+            for (int i = 0; i < H; ++i) {
+                if (ba[k][(size_t)e * H + i] != al[k][i]) {
+                    std::printf("  FAIL element %d: %s[%d] batched %.9g, "
+                                "alone %.9g\n", e, nm[k], i,
+                                (double)ba[k][(size_t)e * H + i],
+                                (double)al[k][i]);
+                    ok = false;
+                    break;
+                }
+            }
+        }
+    }
+    /* The two elements must actually differ, or the test proves nothing. */
+    bool differ = false;
+    for (int i = 0; i < T * H; ++i) {
+        if (ob[i] != ob[(size_t)T * H + i]) { differ = true; break; }
+    }
+    if (!differ) {
+        std::printf("  FAIL: both batch elements produced identical output, "
+                    "so independence was not tested\n");
+        ok = false;
+    }
+    if (ok) std::printf("  B=2 matches two B=1 runs, and the two elements "
+                        "differ\n");
+    return ok;
+}
+
 int XLSTM_TEST_MAIN(void) {
     std::printf("[==========] Running sLSTM kernel tests\n");
 
@@ -305,6 +518,9 @@ int XLSTM_TEST_MAIN(void) {
     RUN_TEST(TestHeadComposition);
     RUN_TEST(TestNullParamsEqualsZeroStruct);
     RUN_TEST(TestCellClipBinds);
+    RUN_TEST(TestStreamingResumption);
+    RUN_TEST(TestZeroNormalizerResetsStabilizer);
+    RUN_TEST(TestBatchElementsAreIndependent);
 
     std::printf("[==========] %d/%d tests passed\n", g_tests_passed, g_tests_run);
     return g_tests_passed == g_tests_run ? 0 : 1;

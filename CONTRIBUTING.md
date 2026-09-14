@@ -49,6 +49,14 @@ This regenerates both `test/reference_data.h` (C tests) and
 `test/reference_data.json` (Python/Docker tests) from the NX-AI/xlstm
 reference implementation.
 
+Part of what it regenerates is the INT8 output codes, which the INT8 suites
+compare as integers rather than through a bound. Those codes are the one place
+the generator has to be bit-identical to the kernel rather than merely close,
+so its quantization is float32 throughout, like `src/xlstm_quant.c` and unlike
+the float64 the rest of the replica uses. Nothing there may move to float64 for
+convenience: a scale rounded differently sends a value on a .5 boundary to a
+different integer, and no tolerance can absorb a branch.
+
 `make check-tools` matters here because the worked examples in `tools/`
 reproduce that file's calibration and shapes from its float tensors alone. If
 a quantization convention changes and they are not updated with it, they say
@@ -74,8 +82,10 @@ by CI on `cortexm`, which is the target it exists for; the arithmetic is plain
 C99 in the shared cell code with no SIMD contract behind it, so a fourth
 backend would run another instance of the same code rather than another code
 path. `test/gate_test.cc` is what actually asserts the accuracy, in ulp against
-a double reference - the golden suites quantize to INT8 and would pass whatever
-the approximation did. In the default build the same file asserts the opposite:
+a double reference - the golden suites quantize to INT8, and while they do
+compare the resulting codes as integers, an approximation has to be wrong by
+more than half a code before they see it. In the default build the same file
+asserts the opposite:
 that each wrapper is bit-identical to libm. Switching variant does not need a
 `clean` - an object file carries no record of which one built it, so the
 Makefile keeps a stamp named for the variant and makes every rule depend on
@@ -265,15 +275,18 @@ goldens turn out to be tight enough to see that - by 4.6e-05 against their own
 bound - so the suites fail first. That is luck rather than design, and it holds
 for that one body only.
 
-One mutation must **pass**: a 0.1% activation drift. That is the portability
-margin the INT8 bounds are derived with, so that a backend whose sigmoid and
-tanh are approximations rather than libm - a CMSIS-NN lookup table, say - is
-admitted rather than failed. Bounds tight enough to catch it would reject
-legitimate backends. The same drift at 0.2% must fail, which is what keeps the
-margin a margin rather than a hole.
+One mutation is about the **bounds not firing**: a 0.1% activation drift, which
+is the portability margin the INT8 bounds are derived with, so that a backend
+whose sigmoid and tanh are approximations rather than libm - a CMSIS-NN lookup
+table, say - is admitted rather than failed. Bounds tight enough to catch it
+would reject legitimate backends, so that mutation forbids every bound from
+firing. It still fails the run, because the INT8 output codes are also compared
+as integers and a 0.1% drift moves integers; both halves are recorded. The same
+drift at 0.2% must trip a bound, which is what keeps the margin a margin rather
+than a hole.
 
-Each mutation also records **which** assertion must catch it, and one caught by
-a different assertion fails the run as `WRONG CHECK`. Otherwise a check could
+Each mutation also records **which** assertion must catch it, and one whose own
+assertion never fires fails the run as `WRONG CHECK`. Otherwise a check could
 quietly stop firing while a neighbour still catches the mutation, and the
 battery would report green over a blind check - the very loosening it exists to
 detect. The recorded signatures say what actually catches what rather than what

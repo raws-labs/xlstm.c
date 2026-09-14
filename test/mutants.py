@@ -4,19 +4,22 @@
 Each entry below injects one known defect into the kernels, rebuilds, and
 asserts the suites FAIL - and that the assertion which fails is the one
 recorded for that defect. A defect the suites do not notice is an ESCAPE; a
-defect some other check happens to catch while its own has gone blind is a
+defect whose own check has gone blind while some other one catches it is a
 WRONG CHECK, and both fail this run. "The suite failed" alone would let a
 check quietly stop firing behind a neighbour that still does, which is the
 same silent loosening this battery exists to detect. Run it after any change
 to tolerances, bounds, or test/generate_reference.py - that change class fails
 by making a gate stop failing, which nothing else here detects.
 
-A1 must PASS, and is as load-bearing as the rest. It is the 0.1% activation
-drift generate_reference.py folds into every bound, standing in for a backend
-whose sigmoid/tanh are approximations rather than this one's libm (a CMSIS-NN
-LUT, say). Bounds tight enough to "catch" A1 reject that whole class of
-legitimate backend with a false failure. A2 is the same defect at 0.2% and
-must fail: the margin is deliberate, not unlimited.
+A1 carries as much as the rest and is the one to read first. It is the 0.1%
+activation drift generate_reference.py folds into every bound, standing in for
+a backend whose sigmoid/tanh are approximations rather than this one's libm (a
+CMSIS-NN LUT, say). Bounds tight enough to catch A1 reject that whole class of
+legitimate backend with a false failure, so A1 forbids every bound from firing.
+It does fail the run, because ExpectOutputCodes compares INT8 codes as integers
+and a 0.1% drift moves integers, so what A1 records is both halves at once: the
+codes move, and no bound fires. A2 is the same defect at 0.2%, where a bound is
+required to fire: the margin is deliberate, not unlimited.
 
 Backends differ in which code they compile, so several defects apply to one
 and are absent from the other; those report n/a, which is not an escape.
@@ -223,10 +226,23 @@ def after_eval(s_snippet, m_snippet):
 #
 # "The suite failed" is a weaker claim than it looks. A mutation can stay
 # caught while the check it was written to exercise has gone blind, because
-# some other check happens to fire first - and a check that quietly stopped
-# firing is the exact defect this battery exists to detect. So every mutation
-# records the assertion expected to catch it, matched against the first FAIL
-# line the suites print, and a caught-by-the-wrong-check run fails.
+# some other check still fires - and a check that quietly stopped firing is the
+# exact defect this battery exists to detect. So every mutation records the
+# assertion expected to catch it, matched against every FAIL line the suites
+# print, and a mutation whose own check no longer fires anywhere fails the run.
+#
+# Matched against every FAIL line and not just the first: the first-line rule
+# says nothing extra about a blind check - a signature absent from the whole
+# output is absent from the first line too - and it reports a false alarm
+# whenever an unrelated check happens to print earlier, for a reason as
+# arbitrary as which case in the table trips first. ExpectOutputCodes, which
+# fires on any INT8 defect at all, made that arbitrary ordering decide 32 of
+# these 48.
+#
+# A mutation may also record `forbid`, a seventh element: a pattern that must
+# NOT appear anywhere. A1 uses it to state the property it has always encoded,
+# which no "must fire" pattern can express - that at a 1.001x activation drift
+# no dequantized bound fires at all.
 #
 # Each pattern names a check and the tensor it fires on, and deliberately not
 # the element index: which element trips first is a property of the golden
@@ -251,6 +267,13 @@ def chan(t):    # Per-channel INT8 output bound, open-coded in the s8 runners.
 
 # Per-channel floor consistency, the binding bound on the INT8 output path.
 CHFLOOR = r"FAIL floor-consistency ch\["
+
+# ExpectOutputCodes: the INT8 codes themselves, against the replica's. It sees
+# any INT8 defect, so it is the recorded catcher only where nothing narrower
+# fires. NOT_CODES is its complement, for a mutation that must move codes and
+# nothing else.
+CODES = r"FAIL output_q\[\d+\]: expected -?\d+, got -?\d+$"
+NOT_CODES = r"^(?!FAIL output_q\[)"
 
 # The gate binaries' own assertions, one per kernel and not one per gate: each
 # gate compares values as well as counting bodies, so a signature that accepted
@@ -292,7 +315,14 @@ EP_OOB = r"PANIC: Unhandled exception!"
 # is final. Recording the real catcher is the point; a signature written to
 # flatter the design would enforce nothing.
 MUTANTS = [
-    ("A1", "activation drift y * 1.001", "pass", None, EVERY, drift("1.001")),
+    # A1 expected a clean pass until ExpectOutputCodes existed: at 1.001x every
+    # dequantized bound still clears, which is what makes those bounds portable
+    # to a backend whose activations are not bit-identical. They still clear -
+    # that is the NOT_CODES forbid - but the codes are compared as integers, and
+    # a 0.1% drift moves integers. Both halves are recorded rather than one
+    # replacing the other: the codes must move, and no bound may fire.
+    ("A1", "activation drift y * 1.001", "fail", CODES, EVERY, drift("1.001"),
+     NOT_CODES),
     ("A2", "activation drift y * 1.002", "fail", sfloor("m"), EVERY,
      drift("1.002")),
     ("A3", "activation drift y * 1.05", "fail", CHFLOOR, EVERY, drift("1.05")),
@@ -496,7 +526,13 @@ FILES = sorted({f for m in MUTANTS for (f, _, _) in m[5]})
 # the xtensa toolchain's handler after an unhandled exception - which is how an
 # out-of-bounds read fails on esp. \b so that the "[  FAILED  ]" summary line
 # can never stand in for the assertion above it.
-MARKER = re.compile(r"\b(FAIL|FATAL|PANIC)\b")
+# Anchored at the start of the stripped line, not searched anywhere in it: a
+# compiler diagnostic quotes the source line it is complaining about, and a
+# printf whose format string contains "FAIL" then looks exactly like an
+# assertion firing. Every real one is printed at the start of its line, with
+# leading spaces at most; "[  FAILED  ]" is a case banner and \b already
+# excludes it.
+MARKER = re.compile(r"^\s*(FAIL|FATAL|PANIC)\b")
 
 
 # --- tree handling ---------------------------------------------------------
@@ -551,8 +587,13 @@ def first_failure(text):
     return next((l.strip() for l in text.splitlines() if MARKER.search(l)), "")
 
 
+def failures(text):
+    """Every FAIL line, which is what a signature is matched against."""
+    return [l.strip() for l in text.splitlines() if MARKER.search(l)]
+
+
 def build_and_run(backend):
-    """(built, suite_result, first failing assertion). Kept apart on purpose:
+    """(built, suite_result, every failing assertion). Kept apart on purpose:
     a mutation that does not compile is a broken battery entry, not a caught
     defect, and both show up as a non-zero make."""
     if backend in CROSS:
@@ -563,12 +604,12 @@ def build_and_run(backend):
         r = make(["test-" + backend])
         out = r.stdout + r.stderr
         return ("[==========]" in out,
-                "fail" if r.returncode else "pass", first_failure(out))
+                "fail" if r.returncode else "pass", failures(out))
     b = make(BINS, backend)
     if b.returncode != 0:
-        return False, "-", b.stderr.strip().splitlines()[0] if b.stderr else ""
+        return False, "-", [b.stderr.strip().splitlines()[0]] if b.stderr else []
     r = make(["test"], backend)
-    return True, ("fail" if r.returncode else "pass"), first_failure(r.stdout)
+    return True, ("fail" if r.returncode else "pass"), failures(r.stdout)
 
 
 def have(backend):
@@ -625,22 +666,29 @@ def main(argv):
                           % (backend, " and ".join(CROSS_TOOLS[backend])))
                 return 1
             print("\n[%s] baseline green" % backend)
-            for mid, what, expect, sig, on, edits in MUTANTS:
+            for m in MUTANTS:
+                mid, what, expect, sig, on, edits = m[:6]
+                forbid = m[6] if len(m) > 6 else None
                 if backend not in on:
                     results[(mid, backend)] = "n/a"
                     continue
                 apply(edits)
-                built, suite, first = build_and_run(backend)
+                built, suite, fails = build_and_run(backend)
                 unmutate(edits)
+                first = fails[0] if fails else ""
                 if not built:
                     verdict = "BUILD FAIL"
                 elif expect == "fail":
                     verdict = "caught" if suite == "fail" else "ESCAPED"
                     # Caught by the recorded assertion, or not caught in the
-                    # sense this battery means. A different check firing says
-                    # the recorded one no longer sees this defect.
-                    if verdict == "caught" and not re.search(sig, first):
+                    # sense this battery means. Its absence from every FAIL
+                    # line says the recorded check no longer sees this defect.
+                    if verdict == "caught" and not any(re.search(sig, l)
+                                                       for l in fails):
                         verdict = "WRONG CHECK"
+                    if verdict == "caught" and forbid and any(
+                            re.search(forbid, l) for l in fails):
+                        verdict = "FORBIDDEN CHECK"
                 else:
                     verdict = "pass" if suite == "pass" else "FALSE FAIL"
                 results[(mid, backend)] = verdict
@@ -651,6 +699,10 @@ def main(argv):
                 if verdict == "WRONG CHECK":
                     print("      expected an assertion matching: %s" % sig)
                     print("      got: %s" % (first or "(no FAIL line at all)"))
+                elif verdict == "FORBIDDEN CHECK":
+                    print("      this mutation must not trip: %s" % forbid)
+                    print("      but it did: %s"
+                          % next(l for l in fails if re.search(forbid, l)))
                 elif first:
                     print("      %s" % first[:72])
     finally:
@@ -661,7 +713,7 @@ def main(argv):
     print("\n%-3s %-*s %-7s %s"
           % ("id", width, "mutation", "expect", " ".join("%-10s" % b
                                                          for b in chosen)))
-    for mid, what, expect, _, _, _ in MUTANTS:
+    for mid, what, expect in ((m[0], m[1], m[2]) for m in MUTANTS):
         print("%-3s %-*s %-7s %s"
               % (mid, width, what, expect,
                  " ".join("%-10s" % results[(mid, b)] for b in chosen)))
@@ -678,7 +730,7 @@ def main(argv):
                          "recorded for it, and the portability margin holds"
                          if not bad else
                          "FAILED - %d mutation(s) escaped, false-failed, or were "
-                         "caught by the wrong check" % bad))
+                         "caught by the wrong check or by a forbidden one" % bad))
     return 1 if bad else 0
 
 

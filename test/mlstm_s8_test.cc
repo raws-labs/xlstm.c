@@ -148,7 +148,7 @@ static void PrepareMlstmS8(const XlstmRefCase* tc, MlstmS8Setup* s) {
  * this repo - the f32 suite does not execute it at all. */
 static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
                               float* m_out, float* C_out, float* n_out,
-                              float* output_out) {
+                              float* output_out, int8_t* output_q_out) {
     /* DQ sizes n, DV sizes y and the output, and C is their product. */
     const int DQ = tc->DQ, DV = tc->DV, T = tc->T, I = tc->I;
 
@@ -198,6 +198,9 @@ static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
     xlstm_dequantize_s8_to_f32(output, output_local, T * DV, &s.params.y_quant);
     if (output_out) {
         for (int i = 0; i < T * DV; ++i) output_out[i] = output_local[i];
+    }
+    if (output_q_out) {
+        for (int i = 0; i < T * DV; ++i) output_q_out[i] = output[i];
     }
 
     float max_err = 0.0f;
@@ -258,7 +261,8 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
     /* The return value is the case-wide max error, which only
      * TestMlstmS8QuantizationBound's summary uses; the per-channel and
      * per-tensor assertions below are what decide this case. */
-    (void)EvalMlstmS8Case(tc, y_f, m_f, C_f, n_f, output_f);
+    static int8_t output_q[3 * XLSTM_TEST_MAX_H];
+    (void)EvalMlstmS8Case(tc, y_f, m_f, C_f, n_f, output_f, output_q);
     bool ok = true;
     ok &= ExpectFinite("y", y_f, tc->DV);
     ok &= ExpectFinite("m", m_f, 1);
@@ -428,6 +432,14 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
             }
         }
     }
+
+    /* Last, and after every bound above, on purpose. This one only
+     * reports that a code moved; the checks above say which tensor and
+     * by how much, and test/mutants.py records the first FAIL line as
+     * the catcher. Running it first would take that attribution away
+     * from the checks that earned it. */
+    if (tc->expected_output_q)
+        ok &= ExpectOutputCodes(tc->expected_output_q, output_q, tc->T * tc->DV);
     return ok;
 }
 
@@ -449,7 +461,7 @@ static bool TestMlstmS8QuantizationBound() {
                         tc->name, tc->B);
             return false;
         }
-        float err = EvalMlstmS8Case(tc, y_f, NULL, NULL, NULL, NULL);
+        float err = EvalMlstmS8Case(tc, y_f, NULL, NULL, NULL, NULL, NULL);
         char shape[16];
         std::snprintf(shape, sizeof shape, "%dx%d", tc->DQ, tc->DV);
         std::printf("  %-10s %-7s max abs error vs f32: %.6f (worst-channel bound: %.4f)\n",

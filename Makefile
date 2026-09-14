@@ -915,7 +915,10 @@ check-tools:
 
 # --- Cleanup ---
 
+# .mutants-backup/ is deliberately NOT removed here. test/mutants.py owns it,
+# restores from it on exit, on failure and on interrupt, and calls `make clean`
+# itself between backends: removing it here deletes the working-tree copies of
+# src/*.c out from under a live run, which then cannot put them back.
 clean:
 	@rm -rf $(BUILD)
-	@rm -rf .mutants-backup
 	@rm -f test/adapters/tflm/*.h

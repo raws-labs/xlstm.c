@@ -75,8 +75,7 @@ static void DeriveScales(const float* W, int w_len,
  * arbitrarily large. sLSTM is completely insensitive to this value (its
  * dominant error source is INT8 W/x matmul noise, not state clipping),
  * so headroom only matters for mLSTM here, but is applied uniformly to
- * keep one number to justify rather than two.
- * the sweep data. */
+ * keep one number to justify rather than two. */
 static constexpr float kStateHeadroom = 4.0f;
 
 /* generate_reference.py's numpy replica calibrates c_quant/n_quant with
@@ -204,8 +203,8 @@ static float EvalSlstmS8Case(const XlstmRefCase* tc, float* y_out,
      * back, so max_err below reflects the whole trajectory. A case can
      * have its worst error at an intermediate timestep rather than the
      * final one that y alone captures (measured for SweepM8: final-y-only
-     * showed 0.124726, but an intermediate timestep reaches 1.127354 -
-     *). Reporting only the final-y number would
+     * showed 0.124726, but an intermediate timestep reaches 1.127354).
+     * Reporting only the final-y number would
      * understate what tolerance the case actually needs. */
     static float output_local[3 * XLSTM_TEST_MAX_H];
     xlstm_dequantize_s8_to_f32(output, output_local, T * H, &s.params.y_quant);
@@ -445,16 +444,15 @@ static bool TestS8QuantizationBound() {
                  "   best case, not a deployment figure.)\n");
 
     /* Bound set to ~1.5x the measured maximum (0.231354), which is
-     * SweepS17's channel 16 at an intermediate timestep - see
-     * the per-case measurements show why H=17 is an
-     * outlier rather than a trend. This aggregate bound covers the whole
-     * table with one number, purely for a quick human-readable summary;
-     * it is not what keeps this test suite sensitive to a real regression
-     * on a specific channel. That sensitivity comes from RunSlstmS8Case,
-     * where the effective per-channel bound is
-     * min(tol_s8_per_channel, 1.5 x tol_s8_floor_per_channel + slack) -
-     * the floor term is the tighter of the two on most channels and is
-     * what actually binds. */
+     * SweepS17's channel 16 at an intermediate timestep. The per-case lines
+     * printed above show why H=17 is an outlier rather than a trend. This
+     * aggregate bound covers the whole table with one number, purely for a
+     * quick human-readable summary; it is not what keeps this test suite
+     * sensitive to a real regression on a specific channel. That sensitivity
+     * comes from RunSlstmS8Case, where the effective per-channel bound is
+     * min(tol_s8_per_channel, 1.5 x tol_s8_floor_per_channel + slack) - the
+     * floor term is the tighter of the two on most channels and is what
+     * actually binds. */
     if (max_err > 0.35f) {
         std::printf("  FAIL: max error %.6f exceeds bound 0.35\n", max_err);
         return false;

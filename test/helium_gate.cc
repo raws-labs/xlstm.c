@@ -50,8 +50,11 @@ extern "C" unsigned long xlstm_helium_vecmat_f32_predicated;
 namespace {
 
 const int kMaxRows = 20;
-const int kMaxCols = 64;
-const int kMaxH = 64;
+/* 128 and not 64: make bench sweeps H up to 128 (test/xlstm_bench.cc)
+ * and the golden table stops at 64, so these shapes are the only thing
+ * that runs a contract function above that width. */
+const int kMaxCols = 128;
+const int kMaxH = 128;
 
 /* 16-byte aligned, so +1, +2 and +3 floats are exactly the other three
  * alignments a 128-bit vector can see, and 4 floats longer than the largest
@@ -185,6 +188,7 @@ bool TestMatvecF32(void) {
             {0, 16, 0, 0}, {20, 0, 0, 0},          /* no work: scalar body */
             {4, 1, 1, 0},   {4, 3, 1, 0},   {4, 16, 1, 0},  {4, 17, 1, 0},
             {8, 64, 1, 0},  {16, 17, 1, 0}, {20, 64, 1, 0},
+            {16, 128, 1, 0},                   /* above the golden table */
             {1, 16, 1, 1},  {2, 16, 1, 1},  {3, 16, 1, 1},  /* under a block */
             {5, 16, 1, 1},  {6, 17, 1, 1},  {7, 1, 1, 1},
             {17, 17, 1, 1}, {17, 64, 1, 1}, {19, 3, 1, 1},
@@ -278,6 +282,7 @@ bool TestMatvecS8(void) {
         kCases[] = {
             {20, 0, 0, 0, 0}, {0, 16, 0, 0, 0},    /* no work: scalar body */
             {20, 16, 0, 1, 0},  {20, 32, 0, 1, 0},  {20, 64, 0, 1, 0},
+            {20, 128, 0, 1, 0},                 /* above the golden table */
             {20, 1, 0, 1, 1},   {20, 2, 0, 1, 1},   {20, 8, 0, 1, 1},
             {20, 15, 0, 1, 1},  {20, 17, 0, 1, 1},  {20, 31, 0, 1, 1},
             {20, 33, 0, 1, 1},  {20, 63, 0, 1, 1},
@@ -386,6 +391,7 @@ bool TestRank1(void) {
         {5, 13, 1, 1},  {13, 5, 1, 1},  {3, 16, 1, 0},  {16, 3, 1, 1},
         {8, 12, 1, 0},  {12, 8, 1, 0},  {1, 7, 1, 1},   {7, 1, 1, 1},
         {17, 4, 1, 0},  {4, 17, 1, 1},  {2, 64, 1, 0},  {64, 2, 1, 1},
+        {128, 128, 1, 0}, {127, 127, 1, 1},  /* above the golden table */
     };
     /* One pair with both gates ordinary, one with a tiny i_gate, so the two
      * products differ in exponent by enough that the order they are combined
@@ -477,6 +483,7 @@ bool TestVecmat(void) {
         {
             {20, 0, 0, 0}, {0, 8, 0, 0},           /* no work: scalar body */
             {20, 4, 1, 0},  {20, 8, 1, 0},  {20, 16, 1, 0}, {20, 64, 1, 0},
+            {20, 128, 1, 0},                   /* above the golden table */
             {1, 8, 1, 0},   {3, 8, 1, 0},          /* fewer rows than lanes */
             {20, 1, 1, 1},  {20, 2, 1, 1},  {20, 3, 1, 1},
             {20, 5, 1, 1},  {20, 7, 1, 1},  {20, 17, 1, 1}, {20, 31, 1, 1},

@@ -88,9 +88,13 @@ namespace {
  * the address of an n-byte operand whose last byte is the last readable one.
  */
 
-/* 32 KB at the usual page size; the largest operand below is 20 x 64
- * floats. */
-const size_t kPages = 8;
+/* 128 KB at the usual page size. Sized by the largest operand below, which
+ * is the rank-1 update's C at the widest kH entry: 128 x 128 floats is 64 KB
+ * on its own. Edge(n) subtracts n from the end of this region, so an operand
+ * larger than it lands BEFORE the mapping and faults on the first access -
+ * which reads exactly like a kernel overrun and is not one. Grow this with
+ * kH, not after a failure. */
+const size_t kPages = 32;
 
 uint8_t* g_scratch = nullptr;
 size_t g_span = 0;
@@ -193,8 +197,11 @@ bool TestGuard(void) {
  */
 
 const int kMaxRows = 20;
-const int kMaxCols = 64;
-const int kMaxH = 32;
+/* 128 and not 64: make bench sweeps H up to 128 (test/xlstm_bench.cc)
+ * and the golden table stops at 64, so these shapes are the only thing
+ * that runs a contract function above that width. */
+const int kMaxCols = 128;
+const int kMaxH = 128;
 
 alignas(16) float g_M[kMaxRows * kMaxCols + 4];
 alignas(16) float g_v[kMaxCols + 4];
@@ -305,6 +312,7 @@ bool TestMatvecS8(void) {
         {0, 16, 0, kS8Aligned}, {1, 16, 0, kS8Aligned},
         {20, 4, 0, kS8Aligned}, {20, 16, 0, kS8Aligned},
         {20, 32, 0, kS8Aligned}, {20, 64, 0, kS8Aligned},
+        {20, 128, 0, kS8Aligned},      /* above the golden table's widest */
         {20, 1, 0, kS8Unaligned}, {20, 2, 0, kS8Unaligned},
         {20, 3, 0, kS8Unaligned}, {20, 7, 0, kS8Unaligned},
         {20, 17, 0, kS8Unaligned}, {20, 31, 0, kS8Unaligned},
@@ -427,6 +435,7 @@ bool TestMatvecF32(void) {
             {1, 16, 0, 1}, {2, 17, 0, 1}, {7, 64, 0, 1},   /* under a block */
             {8, 1, 1, 0},  {8, 16, 1, 0}, {16, 17, 1, 0}, {16, 64, 1, 0},
             {9, 17, 1, 1}, {15, 3, 1, 1}, {17, 17, 1, 1}, {20, 64, 1, 1},
+            {16, 128, 1, 0}, {20, 128, 1, 1},  /* above the golden table */
         };
     const int kCaseCount = (int)(sizeof kCases / sizeof kCases[0]);
     bool ok = true;
@@ -466,7 +475,10 @@ const Shape kShapes[] = {
 };
 const int kShapeCount = (int)(sizeof kShapes / sizeof kShapes[0]);
 
-const int kH[] = {1, 2, 3, 4, 7, 8, 15, 16, 17, 31};
+/* 64 and 128 are above the golden table's widest case, which make bench
+ * still sweeps: the rank-1 update is the mLSTM's dominant kernel and its
+ * bounds are the ones a width would break. */
+const int kH[] = {1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 64, 128};
 const int kHCount = (int)(sizeof kH / sizeof kH[0]);
 
 /* A fault inside `call` never returns here - the handler reports and exits -

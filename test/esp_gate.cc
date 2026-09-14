@@ -68,7 +68,10 @@ namespace {
  */
 
 const int kMaxRows = 20;
-const int kMaxCols = 64;
+/* 128 and not 64: make bench sweeps H up to 128 (test/xlstm_bench.cc)
+ * and the golden table stops at 64, so these shapes are the only thing
+ * that runs a contract function above that width. */
+const int kMaxCols = 128;
 
 /* 16-byte aligned, so +1, +2 and +3 floats are exactly the other three
  * alignments, and 4 floats longer than the largest shape so those views
@@ -138,6 +141,7 @@ bool TestFastPath(void) {
         {20, 4, false}, {20, 6, false},  /* a group only at some alignments */
         {20, 7, true},  {20, 8, true},  {20, 9, true},
         {20, 16, true}, {20, 17, true}, {20, 64, true},
+        {20, 128, true},                 /* above the golden table's widest */
         {8, 17, false}, /* odd cols blocks 4 rows apart: 16 rows minimum */
         {8, 16, true},  {4, 15, false}, {4, 16, true},
     };
@@ -247,6 +251,7 @@ bool TestFastPathS8(void) {
         {20, 1, 0, true},   {20, 2, 0, true},   {20, 8, 0, true},
         {20, 15, 0, true},  {20, 16, 0, true},  {20, 17, 0, true},
         {20, 31, 0, true},  {20, 32, 0, true},  {20, 64, 0, true},
+        {20, 128, 0, true},          /* above the golden table's widest */
         {1, 17, 0, true},   {3, 17, 0, true},   /* fewer rows than a block */
         {20, 17, -128, true},        /* the split zero point */
         {20, 17, 127, true},  {20, 17, -127, true},
@@ -298,7 +303,7 @@ bool TestFastPathS8(void) {
  * the four floats reversed rather than faulting.
  */
 
-const int kMaxH = 64;
+const int kMaxH = 128;
 
 alignas(16) float g_C[kMaxH * kMaxH + 4];
 float g_Cref[kMaxH * kMaxH];
@@ -376,6 +381,7 @@ bool TestRank1(void) {
       {5, 13, 1, 0},  {13, 5, 0, 1},  {3, 16, 1, 0},  {16, 3, 0, 1},
       {8, 12, 1, 0},  {12, 8, 1, 0},  {1, 7, 1, 0},   {7, 1, 0, 1},
       {17, 8, 1, 0},  {8, 17, 1, 0},  {2, 64, 1, 0},  {64, 2, 0, 1},
+      {128, 128, 1, 0}, {127, 127, 1, 0},   /* above the golden table */
   };
   /* One pair with both gates ordinary, one with a tiny i_gate, so the two
    * products differ in exponent by enough that the order they are combined
@@ -491,6 +497,7 @@ bool TestVecmat(void) {
       {20, 7, 0, 1},  {20, 17, 0, 1}, {20, 31, 0, 1}, /* not a mult of 4 */
       {20, 8, 1, 0},  {20, 12, 1, 0}, {20, 16, 1, 0},
       {20, 32, 1, 0}, {20, 64, 1, 0},
+      {20, 128, 1, 0},               /* above the golden table's widest */
       {1, 8, 1, 0},   {3, 8, 1, 0},   {1, 17, 0, 1},  /* fewer rows than 4 */
   };
   const int kCaseCount = (int)(sizeof kCases / sizeof kCases[0]);

@@ -218,6 +218,13 @@ def main(argv):
         print("FAIL: %.6g round-trips too, so check 3 cannot fail")
         return 1
     print("  emit: %d floats round-trip exactly, %%.6g does not" % len(w0))
+    # Stated in the module docstring and nowhere a user of the CLI would
+    # meet it, which is where someone reaching for an extractor meets it.
+    print("\n  scope: sLSTM only - the mLSTM fused weight is packed "
+          "differently\n"
+          "  (include/mlstm.h). This CLI reads test/reference_data.json's\n"
+          "  head-slicing case; for your own checkpoint, import this file's\n"
+          "  slicing and emit helpers from Python.")
 
     if "--emit" in argv:
         print()

@@ -181,8 +181,8 @@ TEST_BINS := $(BUILD)/slstm_test $(BUILD)/mlstm_test \
 # include/xlstm_util.h, and this compares them against the libm they either
 # forward to or replace. Runs in both XLSTM_GATES builds and asserts something
 # different in each - see the file.
-$(BUILD)/gate_test: test/gate_test.cc include/xlstm_util.h test/test_util.h $(GATE_STAMP) | $(BUILD)
-	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< -lm
+$(BUILD)/gate_test: test/gate_test.cc include/xlstm_util.h test/test_util.h $(BUILD)/xlstm_quant.o $(GATE_STAMP) | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/xlstm_quant.o -lm
 
 # The same source with the FPv5 spelling of xlstm_round_clamp_i32 forced on.
 # It is selected by __ARM_FEATURE_NUMERIC_MAXMIN, which no toolchain here
@@ -191,8 +191,8 @@ $(BUILD)/gate_test: test/gate_test.cc include/xlstm_util.h test/test_util.h $(GA
 # portable spelling twice. Forcing the macro does not claim the instructions
 # are emitted on any particular target; it checks that the branch the header
 # offers agrees with the oracle wherever a compiler does select it.
-$(BUILD)/gate_test_minmax: test/gate_test.cc include/xlstm_util.h test/test_util.h $(GATE_STAMP) | $(BUILD)
-	@$(CXX) $(CXXFLAGS) -DXLSTM_FPU_HAS_MINMAX_ROUND=1 -Iinclude -Itest -o $@ $< -lm
+$(BUILD)/gate_test_minmax: test/gate_test.cc include/xlstm_util.h test/test_util.h $(BUILD)/xlstm_quant.o $(GATE_STAMP) | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -DXLSTM_FPU_HAS_MINMAX_ROUND=1 -Iinclude -Itest -o $@ $< $(BUILD)/xlstm_quant.o -lm
 
 # The sse2 and neon backends' fast-path checks - the fifth binary of `make
 # test` and of test-neon below. One source for both: the two are the same
@@ -434,7 +434,7 @@ test-cortexm:
 #     which is a cols divisible by four. 19 shapes at 64 alignment triples,
 #     bit-exact, with out[] seeded non-zero so that dropping the accumulator
 #     seed - the one change that moved a golden here before - cannot pass.
-#   - The four golden-vector suites, 39 assertions, against this backend on
+#   - The four golden-vector suites, 65 assertions, against this backend on
 #     this core. They are the same binaries the other gates run, built from
 #     the same sources with no test-side change - one image each, because
 #     each pulls in its own copy of the golden vectors and four of those do
@@ -534,7 +534,7 @@ test-esp:
 #   - That the INT8 zero point never leaves the vector body, swept out to
 #     +/-65535 - past the bounds at which the cortexm and esp backends fall
 #     back to scalar.
-#   - The four golden-vector suites, 39 assertions, against this backend on
+#   - The four golden-vector suites, 65 assertions, against this backend on
 #     this core. Same binaries the other gates run, from the same sources with
 #     no test-side change - one image each, because each pulls in its own copy
 #     of the golden vectors.

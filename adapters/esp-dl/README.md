@@ -12,9 +12,9 @@ Provides `dl::module::SLSTM` and `dl::module::MLSTM` classes that inherit from E
 auto* slstm = new dl::module::SLSTM("slstm_0", /*hidden=*/64, /*input=*/32);
 auto* mlstm = new dl::module::MLSTM("mlstm_0", /*v_size=*/64, /*input=*/32);
 
-// In your model graph:
-slstm->forward(context);  // reads inputs[0..3], writes outputs[0]
-mlstm->forward(context);  // reads inputs[0..2], writes outputs[0]
+// In your model graph, one std::vector<dl::TensorBase*> per call:
+slstm->forward(tensors);  // reads tensors[0..3], writes tensors[4]
+mlstm->forward(tensors);  // reads tensors[0..2], writes tensors[3]
 ```
 
 ## INT8

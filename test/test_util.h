@@ -89,21 +89,21 @@ static const float kFloorEps = 1e-6f;
  *
  * The output path's equivalent is the literal 1.5 in the two INT8
  * runners' floor-consistency loops. That factor does NOT transfer, and
- * this was measured rather than assumed: across all 5198 state elements
+ * this was measured rather than assumed: across all 5456 state elements
  * the worst real-kernel-error / replica-floor ratio is 2.1187 (sLSTM
  * Test1's m[1], floor 1.32e-03 vs error 2.80e-03), where the output
  * path's worst is 1.0187. A 1.5 factor would false-fire on the correct,
  * unmodified kernel.
  *
- * The tail is short: only 3 of 5198 elements exceed 1.01, all in Test1
- * (m[1] 2.119, m[0] 1.038, c[0] 1.024). 2509 sit in 1.000-1.010 and 2683
- * at or below 1.0 - the state is requantized to INT16, so replica and
- * kernel usually land on the same integer and the ratio is 1.0 plus float
- * noise. 3.0 clears the measured worst by 1.42x, which is the same margin
- * the output path's 1.5 keeps over its own worst of 1.0187 (1.47x). Do
- * not tighten it toward 2.2 to "make the test stricter": the margin is
- * what stops a legitimate backend difference from being reported as
- * replica drift. */
+ * The tail is short: only 4 of 5456 elements exceed 1.01, three in Test1
+ * (m[1] 2.119, m[0] 1.038, c[0] 1.024) and one in RectM5x13 (C[4] 1.013).
+ * 2665 sit in 1.000-1.010 and 2784 at or below 1.0 - the state is
+ * requantized to INT16, so replica and kernel usually land on the same
+ * integer and the ratio is 1.0 plus float noise. 3.0 clears the measured
+ * worst by 1.42x, which is the same margin the output path's 1.5 keeps
+ * over its own worst of 1.0187 (1.47x). Do not tighten it toward 2.2 to
+ * "make the test stricter": the margin is what stops a legitimate backend
+ * difference from being reported as replica drift. */
 static const float kStateFloorFactor = 3.0f;
 
 /* Exit-state drift detector - the twin of the output path's
@@ -119,7 +119,7 @@ static const float kStateFloorFactor = 3.0f;
  * divergence: it passes if it stays inside the per-element bound, or it
  * surfaces as a bound violation with nothing pointing at the replica.
  *
- * This covers EVERY element, including the 142 whose bound is
+ * This covers EVERY element, including the 153 whose bound is
  * XLSTM_STATE_TOL_UNASSERTABLE. Drift detection does not need a
  * non-vacuous bound to exist, so those elements are unguarded for
  * correctness but still guarded against divergence.

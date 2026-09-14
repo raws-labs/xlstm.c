@@ -23,6 +23,7 @@
  * =========================================================================*/
 
 #include "xlstm_util.h"
+#include "xlstm_simd.h"
 #include "test_util.h"
 
 #include <cfloat>
@@ -401,11 +402,31 @@ static bool TestRoundClampMatchesOracle() {
     return bad == 0;
 }
 
+/* xlstm_gate_build() is the only way a linked binary can say which
+ * transcendental implementation it carries. Check it against the macro that
+ * selected it, so the two cannot drift apart. */
+static bool TestGateBuildNamesItself() {
+    const char* got = xlstm_gate_build();
+#if XLSTM_APPROX_GATES
+    const char* want = "approx";
+#else
+    const char* want = "exact";
+#endif
+    if (std::strcmp(got, want) != 0) {
+        std::printf("  FAIL: xlstm_gate_build() says \"%s\", the build is "
+                    "\"%s\"\n", got, want);
+        return false;
+    }
+    std::printf("  xlstm_gate_build() reports \"%s\"\n", got);
+    return true;
+}
+
 int main() {
     std::printf("[==========] Running gate-math checks (XLSTM_APPROX_GATES=%d)\n",
                 XLSTM_APPROX_GATES);
     RUN_TEST(TestZeroExponentShortcutIsExact);
     RUN_TEST(TestRoundClampMatchesOracle);
+    RUN_TEST(TestGateBuildNamesItself);
 #if XLSTM_APPROX_GATES
     RUN_TEST(TestApproxGatesAgainstTruth);
 #else

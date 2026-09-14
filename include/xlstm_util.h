@@ -263,17 +263,15 @@ static inline int32_t xlstm_round_clamp_i32(float v, float lo, float hi) {
 /* ---------------------------------------------------------------------------
  * THE GATE TRANSCENDENTALS, IN TWO BUILDS.
  *
- * The INT8 cells evaluate exp, log-sigmoid, sigmoid and tanh once per hidden
- * unit per timestep. On a Cortex-M4F that is where their time goes, not in
- * the matmul: measured under emulation on a Cortex-M4 (gcc 13.2.1 -O2,
+ * The INT8 sLSTM cell evaluates exp, log-sigmoid, sigmoid and tanh once per
+ * hidden unit per timestep. On a Cortex-M4F that is where its time goes, not
+ * in the matmul: measured under emulation on a Cortex-M4 (gcc 13.2.1 -O2,
  * newlib 4.4.0, H = 64), one slstm_step_s8 call retires 107132 instructions,
  * of which 66402 are the two INT8 matvecs and 40717 are everything else -
  * and 28506 of that 40717, 70%, is inside newlib's expf, logf and tanhf.
  * Per hidden unit: 445 instructions of libm against 191 of kernel.
  *
- * XLSTM_APPROX_GATES picks which of two implementations the INT8 cells get.
- * It changes nothing else: the f32 cells call libm directly and are not
- * routed through these wrappers at all.
+ * XLSTM_APPROX_GATES picks which of two implementations all four kernels get.
  *
  *   0 (DEFAULT)  libm. Bit-identical to what this library has always
  *                computed, so upgrading cannot move a deployed model's

@@ -23,10 +23,12 @@
  * =========================================================================*/
 
 #include "xlstm_util.h"
+#include "xlstm_simd.h"
 #include "test_util.h"
 
 #include <cfloat>
 #include <cmath>
+#include <limits>
 #include <cstdint>
 #include <cstring>
 
@@ -328,10 +330,103 @@ static bool TestExactGatesAreLibm() {
 
 #endif /* XLSTM_APPROX_GATES */
 
+/* xlstm_round_clamp_i32 has two spellings, picked by
+ * XLSTM_FPU_HAS_MINMAX_ROUND (include/xlstm_util.h:107-113). The header
+ * records an exhaustive comparison of the two over all 2^32 float bit
+ * patterns, but that run happened once, offline, and nothing re-runs it: the
+ * FPv5 spelling compiles only where __ARM_FEATURE_NUMERIC_MAXMIN is declared,
+ * which among the gates is test-helium alone.
+ *
+ * This checks whichever spelling this build compiled against an independent
+ * double-precision oracle, so every target verifies the path it actually
+ * uses rather than the two being compared to each other on one target. The
+ * inputs are the boundary classes the header's own table enumerates, plus a
+ * deterministic sample; it is a sample, not the 2^32 sweep, and the header
+ * comment remains the record of that. */
+static int32_t round_clamp_oracle(float v, float lo, float hi) {
+    /* fminf(hi, NaN) is hi and fmaxf(lo, NaN) is lo, so NaN lands on hi. */
+    if (!(v == v)) return (int32_t)hi;
+    if (!(v <= hi)) return (int32_t)hi;
+    if (!(v >= lo)) return (int32_t)lo;
+    /* round half away from zero, in double so the add cannot round again */
+    double d = (double)v;
+    double r = d < 0.0 ? -std::floor(-d + 0.5) : std::floor(d + 0.5);
+    if (r > (double)hi) r = (double)hi;
+    if (r < (double)lo) r = (double)lo;
+    return (int32_t)r;
+}
+
+static bool TestRoundClampMatchesOracle() {
+    const float pairs[2][2] = { { -128.0f, 127.0f }, { -32768.0f, 32767.0f } };
+    long checked = 0, bad = 0;
+
+    for (int p = 0; p < 2; ++p) {
+        const float lo = pairs[p][0], hi = pairs[p][1];
+        float edge[] = {
+            0.0f, -0.0f, 0.5f, -0.5f, 1.5f, -1.5f, 2.5f, -2.5f,
+            lo, hi, lo - 1.0f, hi + 1.0f, lo + 0.5f, hi - 0.5f,
+            lo - 0.5f, hi + 0.5f, lo * 2.0f, hi * 2.0f,
+            1e-45f, -1e-45f, 1e-38f, -1e-38f, 3.4e38f, -3.4e38f,
+            std::numeric_limits<float>::infinity(),
+            -std::numeric_limits<float>::infinity(),
+            std::numeric_limits<float>::quiet_NaN(),
+        };
+        for (unsigned k = 0; k < sizeof edge / sizeof edge[0]; ++k) {
+            float v = edge[k];
+            int32_t got = xlstm_round_clamp_i32(v, lo, hi);
+            int32_t want = round_clamp_oracle(v, lo, hi);
+            ++checked;
+            if (got != want) {
+                std::printf("  FAIL edge v=%.9g lo=%.1f hi=%.1f: got %d, oracle %d\n",
+                            (double)v, (double)lo, (double)hi, got, want);
+                ++bad;
+            }
+        }
+        /* Deterministic sweep just outside, across and just inside the range,
+         * at a step fine enough to hit every half-integer tie. */
+        for (double v = (double)lo * 1.05; v <= (double)hi * 1.05; v += 0.25) {
+            float f = (float)v;
+            int32_t got = xlstm_round_clamp_i32(f, lo, hi);
+            int32_t want = round_clamp_oracle(f, lo, hi);
+            ++checked;
+            if (got != want && bad < 8) {
+                std::printf("  FAIL sweep v=%.9g lo=%.1f hi=%.1f: got %d, oracle %d\n",
+                            (double)f, (double)lo, (double)hi, got, want);
+                ++bad;
+            }
+        }
+    }
+    std::printf("  %ld inputs x 2 clamp ranges, compiled spelling "
+                "(XLSTM_FPU_HAS_MINMAX_ROUND=%d) matches the oracle\n",
+                checked, XLSTM_FPU_HAS_MINMAX_ROUND);
+    return bad == 0;
+}
+
+/* xlstm_gate_build() is the only way a linked binary can say which
+ * transcendental implementation it carries. Check it against the macro that
+ * selected it, so the two cannot drift apart. */
+static bool TestGateBuildNamesItself() {
+    const char* got = xlstm_gate_build();
+#if XLSTM_APPROX_GATES
+    const char* want = "approx";
+#else
+    const char* want = "exact";
+#endif
+    if (std::strcmp(got, want) != 0) {
+        std::printf("  FAIL: xlstm_gate_build() says \"%s\", the build is "
+                    "\"%s\"\n", got, want);
+        return false;
+    }
+    std::printf("  xlstm_gate_build() reports \"%s\"\n", got);
+    return true;
+}
+
 int main() {
     std::printf("[==========] Running gate-math checks (XLSTM_APPROX_GATES=%d)\n",
                 XLSTM_APPROX_GATES);
     RUN_TEST(TestZeroExponentShortcutIsExact);
+    RUN_TEST(TestRoundClampMatchesOracle);
+    RUN_TEST(TestGateBuildNamesItself);
 #if XLSTM_APPROX_GATES
     RUN_TEST(TestApproxGatesAgainstTruth);
 #else

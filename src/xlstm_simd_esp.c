@@ -607,11 +607,11 @@ void xlstm_matvec_s8(const int8_t* M, const int8_t* v,
     }
 }
 
-/* ====================== THE mLSTM STATE, BOTH PRECISIONS ==================
+/* ====================== THE mLSTM f32 STATE ===============================
  *
- * The two bodies below are what an mLSTM timestep spends its DH x DH work on,
- * in f32 and in INT8 alike - the INT8 cell quantizes its input projection and
- * runs the state in f32 through exactly these. Neither has any arithmetic the
+ * The two bodies below are what an mLSTM f32 timestep spends its DH x DH work
+ * on. The INT8 cell does not reach them: mlstm_s8.c calls xlstm_matvec_s8 and
+ * writes its own C update and q^T C readout. Neither has any arithmetic the
  * S3 can widen, for the same reason the f32 matvec does not: there is no f32
  * vector ALU. What there is, is a 128-bit move, and both of these are memory
  * bound by construction - rank1_update reads and writes the entire matrix

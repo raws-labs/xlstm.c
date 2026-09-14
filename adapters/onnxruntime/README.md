@@ -36,8 +36,10 @@ Registered under domain `com.raws.xlstm`:
 - Outputs: `output[B,T,H]`, `y[B,H]`, `c[B,H]`, `n[B,H]`, `m[B,H]`
 
 **`MLSTM`**
-- Inputs: `X[B,T,I]`, `W[4H+2,I]`, `b[4H+2]`, `y_init[B,H]`, `C_init[B,H*H]`, `n_init[B,H]`, `m_init[B,1]`
-- Outputs: `output[B,T,H]`, `y[B,H]`, `C[B,H*H]`, `n[B,H]`, `m[B,1]`
+- Inputs: `X[B,T,I]`, `W[2DQ+2DV+2,I]`, `b[2DQ+2DV+2]`, `y_init[B,DV]`, `C_init[B,DQ*DV]`, `n_init[B,DQ]`, `m_init[B,1]`
+- Outputs: `output[B,T,DV]`, `y[B,DV]`, `C[B,DQ*DV]`, `n[B,DQ]`, `m[B,1]`
+- `DV` is read off `y_init`, `DQ` off `n_init`. A square cell has
+  `DQ == DV == H`.
 
 ## INT8 ops
 

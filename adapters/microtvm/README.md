@@ -42,7 +42,9 @@ f(x, W, R, b, y, c, n, m, output)  # all tvm.nd.array
 
 **`xlstm.mlstm_eval`** - 8 DLTensor args:
 
-`X[B,T,I]`, `W[4H+2,I]`, `b[4H+2]`, `y[B,H]`, `C[B,H*H]`, `n[B,H]`, `m[B,1]`, `output[B,T,H]`
+`X[B,T,I]`, `W[2DQ+2DV+2,I]`, `b[2DQ+2DV+2]`, `y[B,DV]`, `C[B,DQ*DV]`, `n[B,DQ]`, `m[B,1]`, `output[B,T,DV]`
+
+`DV` is read off `y`, `DQ` off `n`. A square cell has `DQ == DV == H`.
 
 States are updated in-place.
 

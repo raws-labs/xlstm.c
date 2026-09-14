@@ -16,6 +16,8 @@
  * ===========================================================================*/
 
 #include "xlstm_quant.h"
+#include "xlstm_simd.h"
+#include "xlstm_util.h"
 
 #include <math.h>
 
@@ -123,4 +125,13 @@ void xlstm_quantize_f32_to_s32(const float* src, int32_t* dst, int len,
         if (v > 2147483647.0f) v = 2147483647.0f;
         dst[i] = (int32_t)v;
     }
+}
+
+const char* xlstm_gate_build(void)
+{
+#if XLSTM_APPROX_GATES
+    return "approx";
+#else
+    return "exact";
+#endif
 }

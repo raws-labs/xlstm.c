@@ -49,6 +49,28 @@ from extract_heads import emit_array  # noqa: E402
 STATE_HEADROOM = 4.0
 
 
+def _check_headroom_matches_generated_data():
+    """The same constant lives in four places: here, generate_reference.py's
+    GENERATOR_HEADROOM, and the two INT8 test files, which are pinned to the
+    generated header by static_assert. This copy was held only by whatever
+    the self-check below happened to cover, so pin it explicitly against the
+    value the generator emitted."""
+    header = os.path.join(TEST, "reference_data.h")
+    if not os.path.exists(header):
+        return
+    with open(header) as f:
+        for line in f:
+            if "XLSTM_GENERATOR_HEADROOM" in line and "define" in line:
+                emitted = float(line.split()[-1].rstrip("f"))
+                if emitted != STATE_HEADROOM:
+                    raise SystemExit(
+                        "STATE_HEADROOM is %g here and XLSTM_GENERATOR_HEADROOM "
+                        "is %g in test/reference_data.h; every tol_s8 bound in "
+                        "that file was derived assuming they agree"
+                        % (STATE_HEADROOM, emitted))
+                return
+
+
 def quant_symmetric(data):
     """Weights: xlstm_quant_symmetric."""
     m = max(abs(v) for v in data)
@@ -201,10 +223,18 @@ def _negative_controls(tc):
             print("FAIL: %s is NOT caught, so the check above is blind" % label)
             return 1
         print("  caught: %s" % label)
+    # Stated in the module docstring and nowhere a user of the CLI would meet
+    # it, which is where someone reaching for a quantizer meets it.
+    print("\n  scope: min/max calibration only - no percentile, entropy or "
+          "MSE-optimal\n"
+          "  mode, one scale per tensor rather than per channel, and the "
+          "state headroom\n"
+          "  is the constant above rather than a flag.")
     return 0
 
 
 def self_check():
+    _check_headroom_matches_generated_data()
     with open(os.path.join(TEST, "reference_data.json")) as f:
         data = json.load(f)
     fails = n_cases = n_ints = 0

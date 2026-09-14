@@ -180,9 +180,9 @@ SWEEP_SIZES = [1, 8, 16, 17, 64]
 # The replica is not scaffolding for the bounds, it is the primary gate. Its
 # measured floors ship in reference_data.h and the runners assert the real
 # kernel against floor*1.5 (output) and floor*3.0 (state). Measured over this
-# table, that check is tighter than the per-channel bound on 224 of 232 output
-# channels and 4752 of 5198 state elements, and it is the only assertion
-# covering the 142 elements that have no usable bound at all. It is also what
+# table, that check is tighter than the per-channel bound on 258 of 269 output
+# channels and 4982 of 5456 state elements, and it is the only assertion
+# covering the 153 elements that have no usable bound at all. It is also what
 # turns this file drifting out of sync with the kernel into a loud failure.
 # The same replica supplies reference_data.json's expected_*_q integers, which
 # the four adapter suites assert bit-exactly.
@@ -569,7 +569,7 @@ def compute_state_tol_per_elem(tc, cell):
     the window is real but tiny and _derive_bound's midpoint fallback lands a
     hair above floor: without it SweepM64's C[2071] shipped at 0.016 against a
     real-kernel error of 0.0157991, a 1.013x margin, which is the kind of
-    bound a legitimate backend trips. It costs 32 of 5085 asserted elements
+    bound a legitimate backend trips. It costs 32 of 5335 asserted elements
     and stops mLSTM's state assertions being the first thing a LUT-style gate
     perturbation fires on."""
     _, _, _, st0, _ = _trace(tc, cell, 1.0)

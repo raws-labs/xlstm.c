@@ -181,8 +181,18 @@ TEST_BINS := $(BUILD)/slstm_test $(BUILD)/mlstm_test \
 # include/xlstm_util.h, and this compares them against the libm they either
 # forward to or replace. Runs in both XLSTM_GATES builds and asserts something
 # different in each - see the file.
-$(BUILD)/gate_test: test/gate_test.cc include/xlstm_util.h test/test_util.h $(GATE_STAMP) | $(BUILD)
-	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< -lm
+$(BUILD)/gate_test: test/gate_test.cc include/xlstm_util.h test/test_util.h $(BUILD)/xlstm_quant.o $(GATE_STAMP) | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -Iinclude -Itest -o $@ $< $(BUILD)/xlstm_quant.o -lm
+
+# The same source with the FPv5 spelling of xlstm_round_clamp_i32 forced on.
+# It is selected by __ARM_FEATURE_NUMERIC_MAXMIN, which no toolchain here
+# declares - not even arm-none-eabi-gcc for cortex-m55 - so without this build
+# that branch is compiled by nothing and its round-clamp test checks the
+# portable spelling twice. Forcing the macro does not claim the instructions
+# are emitted on any particular target; it checks that the branch the header
+# offers agrees with the oracle wherever a compiler does select it.
+$(BUILD)/gate_test_minmax: test/gate_test.cc include/xlstm_util.h test/test_util.h $(BUILD)/xlstm_quant.o $(GATE_STAMP) | $(BUILD)
+	@$(CXX) $(CXXFLAGS) -DXLSTM_FPU_HAS_MINMAX_ROUND=1 -Iinclude -Itest -o $@ $< $(BUILD)/xlstm_quant.o -lm
 
 # The sse2 and neon backends' fast-path checks - the fifth binary of `make
 # test` and of test-neon below. One source for both: the two are the same
@@ -240,15 +250,17 @@ SIMD_GATE := $(SIMD_GATE_$(XLSTM_SIMD_IMPL))
 # xlstm_simd.o is a prerequisite although nothing here links it: the tests link
 # the counted object, so without this the counters-OFF build - the one that
 # ships - would go uncompiled on every run of the test suite.
-test: $(TEST_BINS) $(BUILD)/gate_test $(SIMD_GATE) $(BUILD)/xlstm_simd.o
+test: $(TEST_BINS) $(BUILD)/gate_test $(BUILD)/gate_test_minmax $(SIMD_GATE) $(BUILD)/xlstm_simd.o
 	@# First: it checks the arithmetic the four suites are built on, so a
 	@# failure here explains theirs rather than being buried under them.
 	@$(BUILD)/gate_test
+	@$(BUILD)/gate_test_minmax
 	@$(BUILD)/slstm_test
 	@$(BUILD)/mlstm_test
 	@$(BUILD)/slstm_s8_test
 	@$(BUILD)/mlstm_s8_test
-	@$(if $(SIMD_GATE),$(SIMD_GATE),true)
+	@$(if $(SIMD_GATE),$(SIMD_GATE),\
+		echo "[==========] $(XLSTM_SIMD_IMPL): no accelerated bodies, so no fast-path gate")
 
 # --- SIMD convenience targets ---
 
@@ -287,10 +299,15 @@ test-sse2:
 # to work wherever binfmt_misc is registered and fails everywhere else.
 test-neon:
 	@$(MAKE) clean
-	@$(MAKE) $(TEST_BINS) $(BUILD)/neon_gate XLSTM_SIMD=neon \
+	@$(MAKE) $(TEST_BINS) $(BUILD)/gate_test $(BUILD)/neon_gate XLSTM_SIMD=neon \
 		CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
 		CFLAGS="-std=c99 -O2 -Wall -Wextra -static" \
 		CXXFLAGS="-std=c++17 -O2 -Wall -Wextra -static"
+	@# The gate math the four suites are built on, as `test` runs it first:
+	@# the zero-exponent shortcut both INT8 cells depend on is arithmetic,
+	@# so it is per-toolchain rather than per-backend and belongs on every
+	@# target that compiles with a different one.
+	@qemu-aarch64 $(BUILD)/gate_test
 	@qemu-aarch64 $(BUILD)/slstm_test
 	@qemu-aarch64 $(BUILD)/mlstm_test
 	@qemu-aarch64 $(BUILD)/slstm_s8_test
@@ -331,7 +348,17 @@ test-neon:
 #   - Timing. Emulated instruction execution says nothing about cycles.
 #
 # Build only, then invoke the emulator explicitly - same reason as test-neon.
+# `clean` below throws away the host build, so check the toolchain before it
+# rather than after: probing whether this gate can run should not cost a
+# rebuild of something unrelated that was already there.
+define require-tool
+	@command -v $(1) >/dev/null 2>&1 || { \
+		echo "$@: $(1) not found. $(2)" >&2; exit 1; }
+endef
+
 test-cortexm:
+	$(call require-tool,arm-linux-gnueabihf-gcc,apt-get install gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf)
+	$(call require-tool,qemu-arm,apt-get install qemu-user)
 	@$(MAKE) clean
 	@$(MAKE) $(TEST_BINS) $(BUILD)/gate_test $(BUILD)/cortexm_gate XLSTM_SIMD=cortexm \
 		CC=arm-linux-gnueabihf-gcc CXX=arm-linux-gnueabihf-g++ \
@@ -407,7 +434,7 @@ test-cortexm:
 #     which is a cols divisible by four. 19 shapes at 64 alignment triples,
 #     bit-exact, with out[] seeded non-zero so that dropping the accumulator
 #     seed - the one change that moved a golden here before - cannot pass.
-#   - The four golden-vector suites, 39 assertions, against this backend on
+#   - The four golden-vector suites, 65 assertions, against this backend on
 #     this core. They are the same binaries the other gates run, built from
 #     the same sources with no test-side change - one image each, because
 #     each pulls in its own copy of the golden vectors and four of those do
@@ -442,11 +469,15 @@ ESP_RUN  := timeout 300 qemu-system-xtensa -M esp32s3 -semihosting \
             -display none -serial none -monitor none -kernel
 
 test-esp:
+	$(call require-tool,xtensa-esp32s3-elf-gcc,see .github/toolchain.Dockerfile for the pinned toolchain)
+	$(call require-tool,qemu-system-xtensa,see .github/toolchain.Dockerfile for the pinned emulator)
 	@$(MAKE) clean
-	@$(MAKE) $(TEST_BINS) $(BUILD)/esp_gate XLSTM_SIMD=esp \
+	@$(MAKE) $(TEST_BINS) $(BUILD)/gate_test $(BUILD)/esp_gate XLSTM_SIMD=esp \
 		CC=xtensa-esp32s3-elf-gcc CXX=xtensa-esp32s3-elf-g++ \
 		CFLAGS="-std=c99 -O2 -Wall -Wextra $(ESP_DEFS)" \
 		CXXFLAGS="-std=c++17 -O2 -Wall -Wextra $(ESP_DEFS) $(ESP_LINK)"
+	@# See test-neon for why the gate math runs on every cross target.
+	@$(ESP_RUN) $(BUILD)/gate_test
 	@$(ESP_RUN) $(BUILD)/esp_gate
 	@$(ESP_RUN) $(BUILD)/slstm_test
 	@$(ESP_RUN) $(BUILD)/mlstm_test
@@ -503,14 +534,15 @@ test-esp:
 #   - That the INT8 zero point never leaves the vector body, swept out to
 #     +/-65535 - past the bounds at which the cortexm and esp backends fall
 #     back to scalar.
-#   - The four golden-vector suites, 39 assertions, against this backend on
+#   - The four golden-vector suites, 65 assertions, against this backend on
 #     this core. Same binaries the other gates run, from the same sources with
 #     no test-side change - one image each, because each pulls in its own copy
 #     of the golden vectors.
-#   - Incidentally but genuinely: the FPv5 vminnm / vrinta path in
-#     include/xlstm_util.h. This is the only gate here that compiles it -
-#     test-cortexm's armv7-a build resolves XLSTM_FPU_HAS_MINMAX_ROUND to 0
-#     and takes the portable path instead.
+#   - The portable spelling of xlstm_round_clamp_i32, against the oracle in
+#     gate_test. NOT the FPv5 vminnm / vrinta path: this toolchain declares no
+#     __ARM_FEATURE_NUMERIC_MAXMIN for cortex-m55, so XLSTM_FPU_HAS_MINMAX_ROUND
+#     resolves to 0 here as it does under test-cortexm. That branch is compiled
+#     by `make test`'s gate_test_minmax build and by nothing else.
 #
 # What it does NOT cover: cycles, and therefore any performance claim at all.
 # QEMU executes MVE but models no timing, and the shape of this backend makes
@@ -543,11 +575,14 @@ test-helium:
 	@$(MAKE) $(BUILD)/helium_boot.o XLSTM_SIMD=helium \
 		CC=arm-none-eabi-gcc \
 		CFLAGS="-std=c99 -O2 -Wall -Wextra $(HELIUM_ARCH) $(HELIUM_DEFS)"
-	@$(MAKE) $(TEST_BINS) $(BUILD)/helium_gate XLSTM_SIMD=helium \
+	@$(MAKE) $(TEST_BINS) $(BUILD)/gate_test $(BUILD)/helium_gate XLSTM_SIMD=helium \
 		CC=arm-none-eabi-gcc CXX=arm-none-eabi-g++ \
 		CFLAGS="-std=c99 -O2 -Wall -Wextra $(HELIUM_ARCH) $(HELIUM_DEFS)" \
 		CXXFLAGS="-std=c++17 -O2 -Wall -Wextra $(HELIUM_ARCH) $(HELIUM_DEFS) \
 		          $(HELIUM_LINK)"
+	@# See test-neon. On this target it is the only place the FPv5
+	@# vminnm/vrinta spelling of xlstm_round_clamp_i32 is compiled at all.
+	@$(HELIUM_RUN) $(BUILD)/gate_test
 	@$(HELIUM_RUN) $(BUILD)/helium_gate
 	@$(HELIUM_RUN) $(BUILD)/slstm_test
 	@$(HELIUM_RUN) $(BUILD)/mlstm_test
@@ -596,7 +631,10 @@ $(BUILD)/xlstm_bench: test/xlstm_bench.cc $(BUILD)/slstm.o $(BUILD)/mlstm.o \
 # number is only printed once that name matches the backend just built. Via a
 # file rather than a pipe, so the run's own exit status survives - `| tee` would
 # report success for a benchmark that died halfway with its header already out.
-bench: $(GATE_STAMP) | $(BUILD)
+# `test` first: "no performance number from a kernel that has not passed
+# make test" is the rule this repository states, and this is the target a human
+# runs when they want a number.
+bench: test $(GATE_STAMP) | $(BUILD)
 	@rm -f $(BUILD)/*.o $(BUILD)/xlstm_bench
 	@$(MAKE) --no-print-directory $(BUILD)/xlstm_bench XLSTM_SIMD=$(XLSTM_SIMD_IMPL)
 	@$(BUILD)/xlstm_bench > $(BUILD)/bench.txt; rc=$$?; \
@@ -871,6 +909,9 @@ check-tools:
 	@python3 tools/extract_heads.py
 	@python3 tools/calibrate_int8.py
 	@python3 tools/footprint.py
+	@# CI's refs job runs this alongside the three above, so a green
+	@# check-tools here has to mean the same thing it means there.
+	@python3 test/head_slicing_example.py
 
 # --- Cleanup ---
 

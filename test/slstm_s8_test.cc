@@ -397,6 +397,36 @@ static bool RunSlstmS8Case(const XlstmRefCase* tc) {
      *
      * kFloorEps + kRelTol: see kFloorEps in test_util.h. Without them a
      * channel whose floor is exactly 0.0 demands bit-exact float output. */
+    /* Vacuity, as test_util.h's per-element state check does for the state
+     * path. A channel whose largest golden magnitude sits at or below both
+     * bounds is not asserted by either: a kernel emitting zero on it is
+     * green, and nothing says which channel. Report rather than fail, since
+     * a genuinely near-zero channel is a property of the case and not a
+     * defect; the count is what makes it visible. */
+    if (tc->tol_s8_floor_per_channel) {
+        int vacuous = 0;
+        for (int j = 0; j < tc->H; ++j) {
+            float a = per_channel_tol[j] + kRelTol * channel_ref[j];
+            float b = tc->tol_s8_floor_per_channel[j] * 1.5f + kFloorEps
+                      + kRelTol * channel_ref[j];
+            /* Both checks run, so the BINDING bound is the tighter of the
+             * two: a channel is unasserted only when its magnitude sits
+             * under that one. */
+            float binding = a < b ? a : b;
+            if (channel_ref[j] <= binding) {
+                std::printf("  note: %s ch[%d] is unasserted - largest golden "
+                            "magnitude %.8e is within the binding bound %.8e, so "
+                            "zeroing this channel would pass\n",
+                            tc->name, j, channel_ref[j], binding);
+                ++vacuous;
+            }
+        }
+        if (vacuous) {
+            std::printf("  note: %s has %d of %d output channels unasserted\n",
+                        tc->name, vacuous, tc->H);
+        }
+    }
+
     if (tc->tol_s8_floor_per_channel) {
         for (int j = 0; j < tc->H; ++j) {
             float floor = tc->tol_s8_floor_per_channel[j];

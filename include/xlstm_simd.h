@@ -14,8 +14,9 @@
  * =========================================================================
  * SIMD dispatch layer for xLSTM compute primitives.
  *
- * Backend selected at compile time via XLSTM_SIMD={auto|ref|sse2|neon|esp}.
- * Each backend implements these functions in its own .c file.
+ * Backend selected at compile time via
+ * XLSTM_SIMD={auto|ref|sse2|neon|esp|cortexm|helium}. Each backend implements
+ * these functions in its own .c file.
  * ===========================================================================*/
 
 #ifndef XLSTM_SIMD_H_
@@ -53,13 +54,19 @@ void xlstm_matvec_s8(const int8_t* M, const int8_t* v,
 void xlstm_rank1_update_f32(float* C, float f_gate, float i_gate,
                             const float* k, const float* v, int rows, int cols);
 
-/* Left-multiply (vec * mat) for mLSTM output: out[j] = sum_i q[i] * M[i*cols+j]
- * M is row-major [rows x cols]. out must be zeroed by caller. */
+/* Left-multiply (vec * mat) for mLSTM output: out[j] += sum_i q[i]*M[i*cols+j]
+ * M is row-major [rows x cols]. Caller must pre-fill out. */
 void xlstm_vecmat_f32(const float* q, const float* M,
                       float* out, int rows, int cols);
 
 /* Returns the name of the active SIMD backend. */
 const char* xlstm_simd_backend(void);
+
+/* Returns "exact" or "approx": which of the two transcendental
+ * implementations this build compiled, the XLSTM_GATES setting that produced
+ * it. A binary could already name its SIMD backend and not its numerics,
+ * although the two builds differ on every pair in test/perf_baseline.txt. */
+const char* xlstm_gate_build(void);
 
 #ifdef __cplusplus
 }

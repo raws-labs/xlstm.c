@@ -70,10 +70,15 @@ Memory per head, state only:
 | f32 | 16H B | 4H^2 + 4H + 4 B |
 | INT8 | 9H B | 2H^2 + 2H + 4 B |
 
+The two rows count different things, because the cells carry different state.
+sLSTM's is y, c, n and m; mLSTM's is C, n and m, with y written on the way out
+and never read back, so it is not carried.
+
 sLSTM is linear in `H` and stays cheap at any width worth deploying. mLSTM is
 quadratic, because its state is a matrix rather than a vector, and past roughly
-H = 32 that term dominates everything else in the budget. At H = 64 it is
-16,644 B per head, and it stays that size no matter how long the sequence runs.
+H = 32 that term dominates everything else in the budget. At H = 64 square it is
+16,644 B per head, at qk 64 and v 128 it is 33,028 B, and either way it stays
+that size no matter how long the sequence runs.
 
 mLSTM's two widths need not be equal. `mlstm_step_f32` takes `qk_size` and
 `v_size` separately, C is `[qk_size x v_size]` and n is `[qk_size]`, so the
@@ -94,7 +99,8 @@ rather than the matrix arithmetic, is where the time goes. `XLSTM_GATES=approx`
 swaps those four for polynomial approximations in portable C99, which takes
 roughly a third off the INT8 sLSTM step. It is opt-in because it is a real
 numerical change, and it is worth measuring on your own target rather than
-assuming: the M7 gains as well, the M33 comes out slightly slower.
+assuming: the M7 and the ESP32-S3's LX7 gain as well, the M33 comes out
+slightly slower.
 `test/gate_test.cc` asserts the ulp bounds; [bench/results/](bench/results/)
 has the per-core figures.
 
@@ -159,7 +165,7 @@ Those boards are where the performance figures come from too. INT8 sLSTM runs
 several times faster than f32 on the wider heads, and built with
 `XLSTM_GATES=approx` it matches or beats CMSIS-NN's INT8 LSTM on the M7 and M4F
 at equal multiply-accumulate count. Raw runs are in
-[bench/results/](bench/results/), one file per board, and
+[bench/results/](bench/results/), one file per board and gate build, and
 [CONTRIBUTING.md](CONTRIBUTING.md) describes the method and its limits.
 
 Reference implementation: [NX-AI/xlstm](https://github.com/NX-AI/xlstm).

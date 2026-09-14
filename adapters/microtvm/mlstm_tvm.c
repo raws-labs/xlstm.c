@@ -19,6 +19,8 @@
 #include "mlstm.h"
 #include "mlstm_s8.h"
 
+#include "xlstm_simd.h"
+
 #include <string.h>
 
 /* Helper: get float* from DLTensor with byte_offset */
@@ -53,7 +55,6 @@ int32_t xlstm_tvm_mlstm_eval(
     TVMValue* out_ret_value, int* out_ret_tcode,
     void* resource_handle)
 {
-    (void)num_args;
     (void)out_ret_value;
     (void)out_ret_tcode;
     (void)resource_handle;
@@ -64,8 +65,14 @@ int32_t xlstm_tvm_mlstm_eval(
     /* Quantized graphs hand this same packed function int8 tensors plus
      * the quantization args - see mlstm_tvm.h for the full arg list. */
     if (x->dtype.code == kDLInt) {
+        /* The quantized path reads scalar arguments past the tensor list, so
+         * a short call would read off the end of args. TVM hands us the count;
+         * use it rather than discarding it. */
+        if (num_args < 15) return -1;
         return mlstm_eval_s8_packed(args, type_codes);
     }
+
+    if (num_args < 8) return -1;
 
     DLTensor* W      = (DLTensor*)args[1].v_handle;
     DLTensor* b      = (DLTensor*)args[2].v_handle;
@@ -84,7 +91,11 @@ int32_t xlstm_tvm_mlstm_eval(
     int qk_size     = (int)n->shape[1];
 
     /* Scratch buffer on stack */
-    float scratch[2 * qk_size + 2 * v_size + 2];
+    /* Bounded by XLSTM_MAX_HIDDEN rather than a VLA, as the kernels are: the
+     * stack cost is then a property of the build, not of the model. The
+     * kernels do not check this bound either, so refuse here. */
+    if (qk_size > XLSTM_MAX_HIDDEN || v_size > XLSTM_MAX_HIDDEN) return -1;
+    float scratch[4 * XLSTM_MAX_HIDDEN + 2];
 
     MlstmParams params = {0};
 
@@ -123,7 +134,11 @@ static int32_t mlstm_eval_s8_packed(TVMValue* args, int* type_codes) {
     int qk_size     = (int)n->shape[1];
 
     /* Gate accumulators are int32 on this path, not float */
-    int32_t scratch[2 * qk_size + 2 * v_size + 2];
+    /* Bounded by XLSTM_MAX_HIDDEN rather than a VLA, as the kernels are: the
+     * stack cost is then a property of the build, not of the model. The
+     * kernels do not check this bound either, so refuse here. */
+    if (qk_size > XLSTM_MAX_HIDDEN || v_size > XLSTM_MAX_HIDDEN) return -1;
+    int32_t scratch[4 * XLSTM_MAX_HIDDEN + 2];
 
     MlstmS8Params params = {0};
     params.cell_clip = 0.0f;

@@ -242,6 +242,17 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
         return false;
     }
 
+    /* The same argument for the widths the static buffers are sized by.
+     * XLSTM_TEST_MAX_H is 256 by default and forced to 64 for the board
+     * images; the C buffer alone is its square, so a case wider than the knob
+     * overruns every buffer above rather than failing. */
+    if (tc->DQ > XLSTM_TEST_MAX_H || tc->DV > XLSTM_TEST_MAX_H) {
+        std::printf("  FAIL %s: DQ=%d DV=%d, but XLSTM_TEST_MAX_H=%d sizes "
+                    "this runner's buffers\n", tc->name, tc->DQ, tc->DV,
+                    XLSTM_TEST_MAX_H);
+        return false;
+    }
+
     static float y_f[XLSTM_TEST_MAX_H], m_f[1], n_f[XLSTM_TEST_MAX_H], output_f[3 * XLSTM_TEST_MAX_H];
     static float C_f[XLSTM_TEST_MAX_H * XLSTM_TEST_MAX_H];
     /* The return value is the case-wide max error, which only

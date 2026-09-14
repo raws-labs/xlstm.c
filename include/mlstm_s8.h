@@ -72,7 +72,17 @@ typedef struct {
  * float - it stays float even here, see the header comment above.
  * Caller must provide a scratch buffer of at least
  * (2*qk_size+2*v_size+2) int32_t. It carries nothing between calls, so one
- * buffer serves any number of cells. */
+ * buffer serves any number of cells. The kernel reads that buffer as float as
+ * well as int32_t, so it must be aligned for float; declaring it as int32_t[]
+ * or float[] both satisfy that on every supported target, a char[] does not.
+ *
+ * qk_size and v_size must not exceed XLSTM_MAX_HIDDEN (xlstm_simd.h, 256 by
+ * default), which sizes stack temporaries inside the kernel. A larger width
+ * overruns them; nothing checks it.
+ *
+ * params is required and must not be NULL: it carries the quantization
+ * scales, which have no default. This differs from mlstm_step_f32, whose
+ * params are tuning and may be NULL. */
 void mlstm_step_s8(
     const int8_t* x,          /* [I] */
     const int8_t* W_q,        /* [(2*qk_size+2*v_size+2), I] */

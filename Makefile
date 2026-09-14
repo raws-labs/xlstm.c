@@ -28,6 +28,9 @@ ifeq ($(XLSTM_SIMD),auto)
     SIMD_CFLAGS :=
   endif
 else
+  ifeq (,$(filter $(XLSTM_SIMD),ref sse2 neon esp cortexm helium))
+    $(error XLSTM_SIMD must be one of auto ref sse2 neon esp cortexm helium, not `$(XLSTM_SIMD)`)
+  endif
   XLSTM_SIMD_IMPL := $(XLSTM_SIMD)
   ifeq ($(XLSTM_SIMD),sse2)
     SIMD_CFLAGS := -msse2
@@ -72,11 +75,21 @@ override CXXFLAGS += $(GATE_DEFS)
 # and the reason it is not applied there too is that a backend switch also
 # changes which source file compiles, which is a bigger blast radius than a
 # define.
-GATE_STAMP := $(BUILD)/gates.$(XLSTM_GATES)
+# The same argument applies to the flags themselves: CFLAGS is not a
+# prerequisite of any object rule, so `make CFLAGS=... all` after a default
+# build relinks objects compiled with the old flags and reports a number for a
+# build that never happened. Folding a checksum of the effective flags into the
+# stamp name closes that the same way the variant does.
+FLAG_SIG := $(shell printf '%s|%s|%s' '$(CFLAGS)' '$(CXXFLAGS)' '$(SIMD_CFLAGS)' | cksum | cut -d' ' -f1)
+GATE_STAMP := $(BUILD)/gates.$(XLSTM_GATES).$(FLAG_SIG)
 
 $(GATE_STAMP): | $(BUILD)
 	@rm -f $(BUILD)/gates.*
 	@touch $@
+
+# $(GATE_STAMP) is the first explicit rule in this file, which would otherwise
+# make it the default goal and leave bare `make` building nothing but a stamp.
+.DEFAULT_GOAL := all
 
 .PHONY: all test test-approx simd-info test-ref test-sse2 test-neon \
         test-cortexm test-esp test-helium reference clean \
@@ -587,13 +600,14 @@ bench: $(GATE_STAMP) | $(BUILD)
 	@rm -f $(BUILD)/*.o $(BUILD)/xlstm_bench
 	@$(MAKE) --no-print-directory $(BUILD)/xlstm_bench XLSTM_SIMD=$(XLSTM_SIMD_IMPL)
 	@$(BUILD)/xlstm_bench > $(BUILD)/bench.txt; rc=$$?; \
-	cat $(BUILD)/bench.txt; \
-	[ $$rc -eq 0 ] || { echo "bench: the benchmark exited $$rc" >&2; exit $$rc; }; \
+	[ $$rc -eq 0 ] || { cat $(BUILD)/bench.txt; \
+		echo "bench: the benchmark exited $$rc" >&2; exit $$rc; }; \
 	grep -q 'backend: $(XLSTM_SIMD_IMPL)$$' $(BUILD)/bench.txt || { \
 		echo "bench: built $(XLSTM_SIMD_IMPL), but the binary reports:" >&2; \
 		head -1 $(BUILD)/bench.txt >&2; \
 		echo "Refusing to report a number for a backend that did not run." >&2; \
-		exit 1; }
+		exit 1; }; \
+	cat $(BUILD)/bench.txt
 
 bench-ref:
 	@$(MAKE) bench XLSTM_SIMD=ref
@@ -862,3 +876,5 @@ check-tools:
 
 clean:
 	@rm -rf $(BUILD)
+	@rm -rf .mutants-backup
+	@rm -f test/adapters/tflm/*.h

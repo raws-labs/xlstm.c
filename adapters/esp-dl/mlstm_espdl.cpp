@@ -17,6 +17,7 @@
 
 #include "mlstm_espdl.hpp"
 
+#include <cassert>
 #include <cstring>
 
 namespace dl {
@@ -88,6 +89,10 @@ std::vector<std::vector<int>> MLSTM::get_output_shape(
 
 void MLSTM::forward(std::vector<dl::TensorBase*>& tensors, runtime_mode_t mode) {
     (void)mode;
+    // Both paths below index tensors[0..3] directly. A graph wired with fewer
+    // reads past the end of the vector, so refuse instead.
+    assert(tensors.size() >= 4);
+    if (tensors.size() < 4) return;
     init_states();
     if (quantized()) {
         forward_s8(tensors);

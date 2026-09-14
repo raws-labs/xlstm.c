@@ -32,6 +32,15 @@ static uint32_t lcg_next() {
     return g_lcg;
 }
 
+/* Each bench function reseeds, so the INT8 benches start from the SAME draws
+ * as their f32 counterpart at the same H. Without this the four run in
+ * sequence off one stream (main below), the INT8 pair draws from a later
+ * position, and the INT8-versus-f32 ratio this harness reports compares two
+ * different problems - the defect the comment above bench_slstm_s8 says was
+ * fixed. No effect on `make perf`, which runs one kernel per process and so
+ * already enters each bench at the seed. */
+static void lcg_reset() { g_lcg = 42; }
+
 static float rand_f32(float lo, float hi) {
     return lo + (hi - lo) * (float)(lcg_next() & 0xFFFF) / 65535.0f;
 }
@@ -85,6 +94,7 @@ double measure(Fn fn, int iters) {
 // ============================================================================
 
 static void bench_slstm_f32(int H, int steps) {
+    lcg_reset();
     const int I = H;
     float* W = (float*)malloc(4 * H * I * sizeof(float));
     float* R = (float*)malloc(4 * H * H * sizeof(float));
@@ -124,6 +134,7 @@ static void bench_slstm_f32(int H, int steps) {
 }
 
 static void bench_mlstm_f32(int H, int steps) {
+    lcg_reset();
     const int I = H;
     const int Wrows = 4 * H + 2;
     float* W = (float*)malloc(Wrows * I * sizeof(float));
@@ -245,6 +256,7 @@ static void require_unsaturated(const char* what, int H,
 }
 
 static void bench_slstm_s8(int H, int steps) {
+    lcg_reset();
     const int I = H;
     int8_t*  W_q = (int8_t*)malloc(4 * H * I);
     int8_t*  R_q = (int8_t*)malloc(4 * H * H);
@@ -327,6 +339,7 @@ static void bench_slstm_s8(int H, int steps) {
 }
 
 static void bench_mlstm_s8(int H, int steps) {
+    lcg_reset();
     const int I = H;
     const int Wrows = 4 * H + 2;
     int8_t*  W_q = (int8_t*)malloc(Wrows * I);

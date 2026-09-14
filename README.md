@@ -84,19 +84,19 @@ question actually takes.
 
 Precision is the other lever, and it does not pull evenly on the two cells.
 Quantizing sLSTM buys speed, several times over on the wider heads. Quantizing
-mLSTM halves its state but leaves latency roughly where it was, because only the
-input projection quantizes: the matrix update stays in float. So the useful rule
-is to quantize mLSTM when memory is the constraint and sLSTM when time is.
+mLSTM halves its state but usually costs time, because only the input
+projection quantizes: the matrix update stays in float. So the useful rule is
+to quantize mLSTM when memory is the constraint and sLSTM when time is.
 
-There is a third lever if you want it. Both cells evaluate exp, log-sigmoid,
+There is a third lever if you want it. sLSTM evaluates exp, log-sigmoid,
 sigmoid and tanh once per hidden unit per timestep, and on a Cortex-M4F that,
 rather than the matrix arithmetic, is where the time goes. `XLSTM_GATES=approx`
 swaps those four for polynomial approximations in portable C99, which takes
 roughly a third off the INT8 sLSTM step. It is opt-in because it is a real
 numerical change, and it is worth measuring on your own target rather than
 assuming: the M7 gains as well, the M33 comes out slightly slower.
-[CONTRIBUTING.md](CONTRIBUTING.md) has the accuracy bounds and the per-core
-figures.
+`test/gate_test.cc` asserts the ulp bounds; [bench/results/](bench/results/)
+has the per-core figures.
 
 ## Backends
 
@@ -150,8 +150,8 @@ core: [ONNX Runtime](adapters/onnxruntime/), [TFLM](adapters/tflm/),
 
 ## Validation
 
-Every backend is checked on each commit against vectors derived from the PyTorch
-reference, at H = 1, 2, 8, 16, 17 and 64, in both precisions, under emulation
+Every backend is checked in CI against vectors derived from the PyTorch
+reference, at H = 1, 2, 4, 8, 16, 17 and 64, in both precisions, under emulation
 where the instruction set is not the host's. `cortexm` is additionally verified
 on Cortex-M7, M4F and M33 silicon.
 

@@ -16,8 +16,10 @@ make test-docker-espdl # ESP-DL integration test (runs on an emulated ESP32-S3)
 ```
 
 `make test` is fast (seconds). Docker integration tests are slower and require
-Docker. CI runs `make test` under both gcc and clang on every PR; the Docker
-integration tests are run locally, not in CI.
+Docker. On every push to `main` and every pull request CI runs `check-refs` and
+`check-tools`; `make test`, `test-ref` and `test-approx` under gcc and clang;
+the perf gate; and `test-neon`, `test-cortexm`, `test-esp` and `test-helium`
+under emulation. The Docker integration tests are run locally, not in CI.
 
 ## Workflow
 
@@ -64,8 +66,8 @@ make test-helium       # cross-compile Cortex-M55, run under QEMU (system)
 make test-approx       # the approximate gate build, on both host backends
 ```
 
-Every one of them takes `XLSTM_GATES=exact|approx`, which picks the INT8 cells'
-transcendentals (see the block above `xlstm_gate_expf` in
+Every one of them takes `XLSTM_GATES=exact|approx`, which picks all four
+kernels' transcendentals (see the block above `xlstm_gate_expf` in
 `include/xlstm_util.h`). `exact` is the default and is what all six are gated
 on. `approx` is gated by `make test-approx` on `ref` and the host backend, and
 by CI on `cortexm`, which is the target it exists for; the arithmetic is plain
@@ -189,8 +191,8 @@ regression blocks work that did nothing wrong, whereas a false improvement
 costs one `make perf-baseline`, which is the right thing to run whenever the
 counts genuinely moved. 5% clears the largest environment effect ever measured
 on these loops - the 2.8% the libm implementation choice was worth before the
-gate pinned it - and sits far below any real win, `sse2` beating `ref` by 34%
-to 59% across this table.
+gate pinned it - and sits far below any real win, `sse2` beating `ref` by 28%
+to 71% across this table.
 
 Two limits, worth knowing before trusting a green run:
 
@@ -218,8 +220,8 @@ boards. Lines are `XLSTM_PROVENANCE` (what was built and at what clock),
 `XLSTM_TIMING` (one per kernel and size), `XLSTM_TIMING_ENV` (sampling), and
 `XLSTM_XIPDIAG` (weights in flash versus SRAM, on the two boards with room for
 it). Nothing needs the harness to read: each timing line carries its own
-`macs_per_call`, so a comparison can be checked for equal work, and `exec_from`,
-so flash-bound rows cannot be mistaken for compute.
+`macs_per_call`, so a comparison can be checked for equal work, and the RP2350
+rows carry `exec_from`, so flash-bound rows cannot be mistaken for compute.
 
 Timings are the minimum over 17 samples of 8 calls. Repeat runs of one build
 move by about 1%, so results are quoted to two significant figures. The RP2350
@@ -229,7 +231,7 @@ bandwidth rather than the kernel.
 
 The CMSIS-NN rows compare `slstm_step_s8` against `arm_lstm_unidirectional_s8`
 at identical `macs_per_call`, but they are not the same model: sLSTM carries two
-extra states and a log-space stabilizer, and reads 6% to 33% more bytes per
+extra states and a log-space stabilizer, and reads 6% to 71% more bytes per
 call. Read it as the cost of stabilized exponential gating against a mature
 vendor LSTM, not as one implementation of the same thing beating another.
 
@@ -239,9 +241,8 @@ The harness that produced them is not part of this repository.
 ## Changing a tolerance, a bound, or the generator
 
 ```bash
-make mutants           # ~90s for the host pair, ~3 min for every backend
-                       # whose toolchain is installed. Edits the working tree
-                       # and restores it.
+make mutants           # about a minute for the host pair, about two for all
+                       # six backends. Edits the working tree and restores it.
 ```
 
 Those changes fail by making a gate quietly stop failing, which a green
@@ -256,7 +257,7 @@ too.
 
 The last of those defect classes is the one worth naming: forcing a vector
 body unreachable leaves every answer intact, because the scalar remainder
-computes the whole row. Fourteen entries inject exactly that, one per
+computes the whole row. Eighteen entries inject exactly that, one per
 accelerated body across the five accelerated backends, and each is recorded
 against the fast-path gate that catches it. One is not: losing the vector body
 of `sse2`/`neon` `matvec_f32` also changes the summation order, and the f32
@@ -281,9 +282,10 @@ exit-state checks, not by the per-channel output bound they were written for,
 because a corrupted channel feeds back through `c` and `n` before the output
 path sees it.
 
-It covers `ref` and `sse2`; a mutation the running backend does not compile
-reports `n/a`, which is distinct from an escape. `neon`, `cortexm` and `esp`
-have loop tails and zero-point handling of their own that nothing here mutates.
+It covers all six backends: 48 entries, including the loop tails, zero-point
+folding, lane order and alignment instances only `neon`, `cortexm`, `esp` and
+`helium` compile. A mutation the running backend does not compile reports
+`n/a`, and a missing toolchain reports `NOT COVERED`; neither is an escape.
 Not in CI - it edits files in the working tree, which belongs in a run someone
 chose to start. It restores them on exit, on failure and on interrupt, and a
 run killed outright leaves `.mutants-backup/` for the next run to restore from.

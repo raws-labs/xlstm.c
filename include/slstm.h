@@ -66,7 +66,13 @@ typedef struct {
 /* Single timestep of sLSTM.
  *
  * All state pointers (y, c, n, m) are updated in-place.
- * Caller must provide a scratch buffer of at least 4*hidden_size floats. */
+ * Caller must provide a scratch buffer of at least 4*hidden_size floats.
+ *
+ * hidden_size must not exceed XLSTM_MAX_HIDDEN (xlstm_simd.h, 256 by
+ * default), which sizes stack temporaries inside the kernel. A larger width
+ * overruns them; nothing checks it.
+ *
+ * params may be NULL, which is equivalent to an all-zero SlstmParams. */
 void slstm_step_f32(
     const float* x,       /* [input_size] */
     const float* W,       /* [4*hidden_size, input_size] */

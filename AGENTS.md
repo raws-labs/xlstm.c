@@ -8,7 +8,7 @@ Apache-2.0.
 - A kernel library: cells only. No xLSTM block (no pre-LN, conv1d, projections,
   GroupNorm, residual), no multi-layer stack, no export toolchain, no model runtime.
 - `hidden_size` is the per-head width (DH in the reference); heads are the caller's
-  outer loop. The mLSTM state is DH x DH per head.
+  outer loop. mLSTM takes `qk_size` and `v_size` separately: C is `qk_size x v_size` per head.
 - sLSTM carries four states: y (output), c (cell), n (normalizer), m (log-space max
   stabilizer). m stays float32 even in the INT8 kernels; quantizing it buys nothing
   and costs stability. Gate math is documented in `include/slstm.h` and `include/mlstm.h`.
@@ -26,8 +26,8 @@ Apache-2.0.
   `test/perf_baseline.txt`, gated in CI (`make perf-baseline` re-pins). `make mutants`: mutation battery.
 - `make test-docker-{ort,tvm,tflm,espdl}`: adapter integration tests in Docker.
 - `make reference`: regenerate golden data (needs `.venv` with torch and xlstm).
-- `make check-refs`: every path and document a tracked file cites must exist in the repository; runs in CI.
-- Python tooling uses the in-repo `.venv`; the Makefile hardcodes `.venv/bin/python3`.
+- `make check-refs`: no absolute home paths in tracked files, every `.md` they cite is tracked; runs in CI.
+- The reference targets hardcode `.venv/bin/python3`; `mutants` and `check-tools` use plain `python3`.
 
 ## Layout
 - `include/`: public API; `xlstm.h` is the umbrella header, `*_s8.h` the INT8 kernels,
@@ -38,7 +38,7 @@ Apache-2.0.
 - `test/`: PyTorch-referenced unit tests, gate tests per backend, bench harness,
   `generate_reference.py`, `derive_multihead_layout.py`, `mutants.py`
 - `bench/results/`: published measurements, one file per board and gate build
-- `tools/`: INT8 calibration and per-board measurement records
+- `tools/`: head slicing, INT8 calibration and footprint sizing, one script each
 
 ## Conventions
 - Prefixes: `slstm_*`, `mlstm_*`, `xlstm_*` (shared infrastructure).
@@ -48,11 +48,11 @@ Apache-2.0.
 - Comments state the fact itself; anything they cite must exist in the repository.
 
 ## Gotchas
-- The `esp` backend's Docker suite builds and passes, but ESP-DL needs esp32s3 and
-  ESP-IDF's QEMU emulates esp32 only, so those tests compile without executing.
+- `make test-docker-espdl` runs the ESP-DL adapter on an emulated ESP32-S3, under the
+  QEMU its Dockerfile pins rather than the one the IDF image ships.
   On-hardware esp timing uses CCOUNT cross-checked against `esp_timer`; emulated runs
   decline to report.
-- Hardware-in-the-loop gates run on demand via make targets, never in CI.
+- Hardware-in-the-loop gates run on real parts from a separate harness, never in CI.
 - Do not assume the whole cell can be INT8; what must stay wide is measured and reported.
 
 ## References

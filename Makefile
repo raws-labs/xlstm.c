@@ -331,7 +331,17 @@ test-neon:
 #   - Timing. Emulated instruction execution says nothing about cycles.
 #
 # Build only, then invoke the emulator explicitly - same reason as test-neon.
+# `clean` below throws away the host build, so check the toolchain before it
+# rather than after: probing whether this gate can run should not cost a
+# rebuild of something unrelated that was already there.
+define require-tool
+	@command -v $(1) >/dev/null 2>&1 || { \
+		echo "$@: $(1) not found. $(2)" >&2; exit 1; }
+endef
+
 test-cortexm:
+	$(call require-tool,arm-linux-gnueabihf-gcc,apt-get install gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf)
+	$(call require-tool,qemu-arm,apt-get install qemu-user)
 	@$(MAKE) clean
 	@$(MAKE) $(TEST_BINS) $(BUILD)/gate_test $(BUILD)/cortexm_gate XLSTM_SIMD=cortexm \
 		CC=arm-linux-gnueabihf-gcc CXX=arm-linux-gnueabihf-g++ \
@@ -442,6 +452,8 @@ ESP_RUN  := timeout 300 qemu-system-xtensa -M esp32s3 -semihosting \
             -display none -serial none -monitor none -kernel
 
 test-esp:
+	$(call require-tool,xtensa-esp32s3-elf-gcc,see .github/toolchain.Dockerfile for the pinned toolchain)
+	$(call require-tool,qemu-system-xtensa,see .github/toolchain.Dockerfile for the pinned emulator)
 	@$(MAKE) clean
 	@$(MAKE) $(TEST_BINS) $(BUILD)/esp_gate XLSTM_SIMD=esp \
 		CC=xtensa-esp32s3-elf-gcc CXX=xtensa-esp32s3-elf-g++ \

@@ -181,11 +181,17 @@ SWEEP_SIZES = [1, 8, 16, 17, 64]
 # measured floors ship in reference_data.h and the runners assert the real
 # kernel against floor*1.5 (output) and floor*3.0 (state). Measured over this
 # table, that check is tighter than the per-channel bound on 258 of 269 output
-# channels and 4982 of 5456 state elements, and it is the only assertion
-# covering the 153 elements that have no usable bound at all. It is also what
-# turns this file drifting out of sync with the kernel into a loud failure.
-# The same replica supplies reference_data.json's expected_*_q integers, which
-# the four adapter suites assert bit-exactly.
+# channels and 4982 of 5456 state elements. It is also what turns this file
+# drifting out of sync with the kernel into a loud failure.
+#
+# The same replica supplies every expected_*_q integer. reference_data.json
+# carries all of them and the four adapter suites assert them bit-exactly;
+# reference_data.h carries the output codes and the INT16 exit state, which the
+# two INT8 unit suites assert the same way. Those integer comparisons are what
+# covers the 153 elements with no usable bound, and they cover them better than
+# a floor does: an integer comparison does not ask how large an element is.
+# Measured, with the mutation in mutants.py's G1 entry: zeroing one of those
+# elements with ExpectStateCodes removed leaves the whole suite green.
 #
 # perturbed_err is the same trajectory under a persistent 1.001x factor on the
 # pre-requantization y at every timestep: a backend whose activations are not
@@ -1181,8 +1187,16 @@ def _emit_case(f, tc, state_key, has_R):
     # sub-LSB divergence between this file and the kernel into a failure
     # instead of something the dequantized bounds absorb.
     cell = "s" if state_key == "c" else "m"
-    oq = ", ".join(str(int(v)) for v in np.asarray(_trace(tc, cell)[4]["output"]).flatten())
+    q = _trace(tc, cell)[4]
+    oq = ", ".join(str(int(v)) for v in np.asarray(q["output"]).flatten())
     f.write(f"inline const int8_t k{n}_expected_output_q[] = {{{oq}}};\n")
+    # The INT16 exit state, on the same argument. It is what reaches the 153
+    # elements whose dequantized bound is XLSTM_STATE_TOL_UNASSERTABLE: those
+    # have no bound that is both non-vacuous and free of false failures, and
+    # an integer comparison needs neither.
+    for key, name in (("c" if cell == "s" else "C", "state_q"), ("n", "n_q")):
+        vals = ", ".join(str(int(v)) for v in np.asarray(q[key]).flatten())
+        f.write(f"inline const int16_t k{n}_expected_{name}[] = {{{vals}}};\n")
     if "tol_s8_per_channel" in tc:
         vals = ", ".join(f"{v:.8f}f" for v in tc["tol_s8_per_channel"])
         f.write(f"inline const float k{n}_tol_s8_per_channel[] = {{{vals}}};\n")
@@ -1226,6 +1240,13 @@ CASE_STRUCT = """typedef struct {
                                       * or calibration change that moves a code by
                                       * one LSB fails here rather than hiding under
                                       * the dequantized per-channel bounds. */
+    /* The INT16 exit state as integers, same argument as expected_output_q and
+     * the same replica. state_q is [H] for sLSTM c and [DQ*DV] for mLSTM C, n_q
+     * is [H] or [DQ]. These are what cover the elements whose per-element bound
+     * is XLSTM_STATE_TOL_UNASSERTABLE. m has no entry here: it stays float32 in
+     * the kernel, so there is no integer to compare. */
+    const int16_t* expected_state_q;
+    const int16_t* expected_n_q;
     float tol_f32;
     float tol_s8;                 /* max(tol_s8_per_channel); printed alongside the
                                     * measured error in TestS8QuantizationBound /
@@ -1319,7 +1340,8 @@ def _emit_table(f, cases, table_name, state_key, has_R):
             f'{_cfloat(tc.get("gate_soft_cap", 0.0))}, '
             f'k{src}_W, {R}, k{src}_b, k{n}_input, k{n}_expected_y, {state}, '
             f'k{n}_expected_n, k{n}_expected_m, {out}, '
-            f'k{n}_expected_output_q, '
+            f'k{n}_expected_output_q, k{n}_expected_state_q, '
+            f'k{n}_expected_n_q, '
             f'{_cfloat(tc.get("tol_f32", 1e-5))}, '
             f'{_cfloat(tc.get("tol_s8", 0.10))}, '
             f'{per_channel}, {floor}, {st_tol}, {n_tol}, {m_tol}, '

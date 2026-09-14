@@ -268,12 +268,12 @@ def chan(t):    # Per-channel INT8 output bound, open-coded in the s8 runners.
 # Per-channel floor consistency, the binding bound on the INT8 output path.
 CHFLOOR = r"FAIL floor-consistency ch\["
 
-# ExpectOutputCodes: the INT8 codes themselves, against the replica's. It sees
-# any INT8 defect, so it is the recorded catcher only where nothing narrower
-# fires. NOT_CODES is its complement, for a mutation that must move codes and
-# nothing else.
+# ExpectOutputCodes and ExpectStateCodes: the INT8 output codes and the INT16
+# exit state, as integers, against the replica's. They see any INT8 defect, so
+# they are the recorded catcher only where nothing narrower fires. NOT_CODES is
+# their complement, for a mutation that must move codes and trip no bound.
 CODES = r"FAIL output_q\[\d+\]: expected -?\d+, got -?\d+$"
-NOT_CODES = r"^(?!FAIL output_q\[)"
+NOT_CODES = r"^(?!FAIL (output|[cCn])_q\[)"
 
 # The gate binaries' own assertions, one per kernel and not one per gate: each
 # gate compares values as well as counting bodies, so a signature that accepted
@@ -399,6 +399,16 @@ MUTANTS = [
      [(S8, SY, SY + "\n        if (H == 17 && i == 5) y_new = 0.0f;")]),
     ("F2", "sLSTM H=17 channel 6 zeroed", "fail", elem("m"), HOST,
      [(S8, SY, SY + "\n        if (H == 17 && i == 6) y_new = 0.0f;")]),
+
+    # G1 is the entry that proves ExpectStateCodes is wired to an assertion.
+    # Element 23 of SweepM64's C is one of the 118 there whose per-element
+    # bound is XLSTM_STATE_TOL_UNASSERTABLE, so no bound can see it. Measured:
+    # with ExpectStateCodes removed and this same mutation applied, the whole
+    # suite goes green.
+    ("G1", "mLSTM SweepM64 unbounded C element zeroed", "fail",
+     r"FAIL C_q\[\d+\]: expected -?\d+, got -?\d+$", HOST,
+     [(M8, MCQ, MCQ + "\n            if (DQ == 64 && r * DV + c == 23)"
+                     " C_q = 0.0f;")]),
 
     # --- neon: four vectorized kernels, so four scalar tails ---------------
     ("N1", "neon f32 matvec skips its scalar tail", "fail", near("y"),

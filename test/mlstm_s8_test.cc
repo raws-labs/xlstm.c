@@ -148,7 +148,8 @@ static void PrepareMlstmS8(const XlstmRefCase* tc, MlstmS8Setup* s) {
  * this repo - the f32 suite does not execute it at all. */
 static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
                               float* m_out, float* C_out, float* n_out,
-                              float* output_out, int8_t* output_q_out) {
+                              float* output_out, int8_t* output_q_out,
+                              int16_t* C_q_out, int16_t* n_q_out) {
     /* DQ sizes n, DV sizes y and the output, and C is their product. */
     const int DQ = tc->DQ, DV = tc->DV, T = tc->T, I = tc->I;
 
@@ -201,6 +202,12 @@ static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
     }
     if (output_q_out) {
         for (int i = 0; i < T * DV; ++i) output_q_out[i] = output[i];
+    }
+    if (C_q_out) {
+        for (int i = 0; i < DQ * DV; ++i) C_q_out[i] = C[i];
+    }
+    if (n_q_out) {
+        for (int i = 0; i < DQ; ++i) n_q_out[i] = n_state[i];
     }
 
     float max_err = 0.0f;
@@ -262,7 +269,9 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
      * TestMlstmS8QuantizationBound's summary uses; the per-channel and
      * per-tensor assertions below are what decide this case. */
     static int8_t output_q[3 * XLSTM_TEST_MAX_H];
-    (void)EvalMlstmS8Case(tc, y_f, m_f, C_f, n_f, output_f, output_q);
+    static int16_t C_q[XLSTM_TEST_MAX_H * XLSTM_TEST_MAX_H];
+    static int16_t n_q[XLSTM_TEST_MAX_H];
+    (void)EvalMlstmS8Case(tc, y_f, m_f, C_f, n_f, output_f, output_q, C_q, n_q);
     bool ok = true;
     ok &= ExpectFinite("y", y_f, tc->DV);
     ok &= ExpectFinite("m", m_f, 1);
@@ -291,11 +300,15 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
         /* Reported, not hidden: these are elements whose golden is exactly
          * zero or whose honest measured error already spans their whole
          * dynamic range, so no bound can be both non-vacuous and free of
-         * false failures. See compute_state_tol_per_elem. They are still
-         * covered by the drift detector below, which needs no bound. */
+         * false failures. See compute_state_tol_per_elem. What covers them
+         * is not a bound at all: ExpectStateCodes compares the INT16 state
+         * as integers, which does not ask how large an element is, and the
+         * drift detector below needs no bound either. m is the exception -
+         * it stays float32, so it has no integer to compare and the drift
+         * detector is the whole of its cover. */
         std::printf("  note: %d of %d exit-state elements have no usable bound "
-                    "(unassertable, see compute_state_tol_per_elem; still "
-                    "drift-checked)\n",
+                    "(unassertable, see compute_state_tol_per_elem; C/n are "
+                    "still compared as integers, m is drift-checked)\n",
                     unasserted, tc->DQ * tc->DV + tc->DQ + 1);
     }
 
@@ -440,6 +453,10 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
      * from the checks that earned it. */
     if (tc->expected_output_q)
         ok &= ExpectOutputCodes(tc->expected_output_q, output_q, tc->T * tc->DV);
+    if (tc->expected_state_q)
+        ok &= ExpectStateCodes("C", tc->expected_state_q, C_q, tc->DQ * tc->DV);
+    if (tc->expected_n_q)
+        ok &= ExpectStateCodes("n", tc->expected_n_q, n_q, tc->DQ);
     return ok;
 }
 
@@ -461,7 +478,8 @@ static bool TestMlstmS8QuantizationBound() {
                         tc->name, tc->B);
             return false;
         }
-        float err = EvalMlstmS8Case(tc, y_f, NULL, NULL, NULL, NULL, NULL);
+        float err = EvalMlstmS8Case(tc, y_f, NULL, NULL, NULL, NULL, NULL,
+                                    NULL, NULL);
         char shape[16];
         std::snprintf(shape, sizeof shape, "%dx%d", tc->DQ, tc->DV);
         std::printf("  %-10s %-7s max abs error vs f32: %.6f (worst-channel bound: %.4f)\n",

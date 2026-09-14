@@ -49,13 +49,22 @@ This regenerates both `test/reference_data.h` (C tests) and
 `test/reference_data.json` (Python/Docker tests) from the NX-AI/xlstm
 reference implementation.
 
-Part of what it regenerates is the INT8 output codes, which the INT8 suites
-compare as integers rather than through a bound. Those codes are the one place
-the generator has to be bit-identical to the kernel rather than merely close,
-so its quantization is float32 throughout, like `src/xlstm_quant.c` and unlike
-the float64 the rest of the replica uses. Nothing there may move to float64 for
-convenience: a scale rounded differently sends a value on a .5 boundary to a
-different integer, and no tolerance can absorb a branch.
+Part of what it regenerates is the INT8 output codes and the INT16 exit state,
+which the INT8 suites compare as integers rather than through a bound. Those
+integers are where the generator has to be bit-identical to the kernel rather
+than merely close, so its quantization is float32 throughout, like
+`src/xlstm_quant.c` and unlike the float64 the rest of the replica uses. Nothing
+there may move to float64 for convenience: a scale rounded differently sends a
+value on a .5 boundary to a different integer, and no tolerance can absorb a
+branch.
+
+The state comparison is also what covers the exit-state elements a bound cannot
+reach. An element whose golden is exactly zero, or whose honest measured error
+already spans its own dynamic range, has no bound that is both non-vacuous and
+free of false failures; 153 of 5456 are in that position, 118 of them in
+`SweepM64`'s C matrix. An integer comparison does not ask how large an element
+is, so it applies to them unchanged. `m` is the one state that keeps no integer,
+because it stays float32 in the kernel.
 
 `make check-tools` matters here because the worked examples in `tools/`
 reproduce that file's calibration and shapes from its float tensors alone. If
@@ -295,7 +304,7 @@ exit-state checks, not by the per-channel output bound they were written for,
 because a corrupted channel feeds back through `c` and `n` before the output
 path sees it.
 
-It covers all six backends: 48 entries, including the loop tails, zero-point
+It covers all six backends: 49 entries, including the loop tails, zero-point
 folding, lane order and alignment instances only `neon`, `cortexm`, `esp` and
 `helium` compile. A mutation the running backend does not compile reports
 `n/a`, and a missing toolchain reports `NOT COVERED`; neither is an escape.

@@ -75,6 +75,25 @@ static const float kRelTol = 2e-6f;
     return true;
 }
 
+/* The INT16 exit state, same argument as ExpectOutputCodes above and the same
+ * replica. This is the check that reaches the elements whose per-element bound
+ * is XLSTM_STATE_TOL_UNASSERTABLE - a golden of exactly zero, or a measured
+ * error already spanning the element's whole dynamic range, leaves no bound
+ * that is both non-vacuous and free of false failures. An integer comparison
+ * needs neither: it does not ask how large the element is. */
+[[maybe_unused]] static bool ExpectStateCodes(const char* name,
+                                              const int16_t* expected,
+                                              const int16_t* got, int len) {
+    for (int i = 0; i < len; ++i) {
+        if (expected[i] != got[i]) {
+            std::printf("  FAIL %s_q[%d]: expected %d, got %d\n",
+                        name, i, (int)expected[i], (int)got[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
 [[maybe_unused]] static bool ExpectFinite(const char* name,
                                          const float* vals, int len) {
     for (int i = 0; i < len; ++i) {

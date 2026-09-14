@@ -21,7 +21,8 @@ Apache-2.0.
   composition contract. `make test-ref`, `make test-neon` (cross-compile, QEMU),
   `make test-cortexm`, `make test-esp`, `make test-helium`.
 - `XLSTM_GATES=approx` selects approximate gate math for both precisions; opt-in
-  because it is core-dependent (faster on M4F and M7, slightly slower on M33).
+  because it is core-dependent (faster on M4F, M7 and Xtensa LX7, slightly
+  slower on M33).
 - `make bench`: wall-clock, ungated. `make perf`: callgrind instruction counts against
   `test/perf_baseline.txt`, gated in CI (`make perf-baseline` re-pins). `make mutants`: mutation battery.
 - `make test-docker-{ort,tvm,tflm,espdl}`: adapter integration tests in Docker.

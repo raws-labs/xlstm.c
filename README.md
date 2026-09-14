@@ -99,7 +99,8 @@ rather than the matrix arithmetic, is where the time goes. `XLSTM_GATES=approx`
 swaps those four for polynomial approximations in portable C99, which takes
 roughly a third off the INT8 sLSTM step. It is opt-in because it is a real
 numerical change, and it is worth measuring on your own target rather than
-assuming: the M7 gains as well, the M33 comes out slightly slower.
+assuming: the M7 and the ESP32-S3's LX7 gain as well, the M33 comes out
+slightly slower.
 `test/gate_test.cc` asserts the ulp bounds; [bench/results/](bench/results/)
 has the per-core figures.
 

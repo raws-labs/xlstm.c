@@ -167,7 +167,8 @@ static void PrepareS8(const XlstmRefCase* tc, SlstmS8Setup* s) {
 static float EvalSlstmS8Case(const XlstmRefCase* tc, float* y_out,
                               float* m_out, float* c_out, float* n_out,
                               float* output_out, int8_t* output_q_out,
-                              int16_t* c_q_out, int16_t* n_q_out) {
+                              int16_t* c_q_out, int16_t* n_q_out,
+                              float* y_scale_out) {
     const int H = tc->H, T = tc->T, I = tc->I;
 
     static SlstmS8Setup s;
@@ -221,6 +222,8 @@ static float EvalSlstmS8Case(const XlstmRefCase* tc, float* y_out,
     if (n_q_out) {
         for (int i = 0; i < H; ++i) n_q_out[i] = n_state[i];
     }
+
+    if (y_scale_out) *y_scale_out = s.params.y_quant.scale;
 
     float max_err = 0.0f;
     for (int j = 0; j < H; ++j) {
@@ -281,7 +284,9 @@ static bool RunSlstmS8Case(const XlstmRefCase* tc) {
      * per-tensor assertions below are what decide this case. */
     static int8_t output_q[3 * XLSTM_TEST_MAX_H];
     static int16_t c_q[XLSTM_TEST_MAX_H], n_q[XLSTM_TEST_MAX_H];
-    (void)EvalSlstmS8Case(tc, y_f, m_f, c_f, n_f, output_f, output_q, c_q, n_q);
+    static float y_scale;
+    (void)EvalSlstmS8Case(tc, y_f, m_f, c_f, n_f, output_f, output_q, c_q, n_q,
+                         &y_scale);
     bool ok = true;
     ok &= ExpectFinite("y", y_f, tc->H);
     ok &= ExpectFinite("m", m_f, tc->H);
@@ -414,11 +419,20 @@ static bool RunSlstmS8Case(const XlstmRefCase* tc) {
      * kFloorEps + kRelTol: see kFloorEps in test_util.h. Without them a
      * channel whose floor is exactly 0.0 demands bit-exact float output. */
     /* Vacuity, as test_util.h's per-element state check does for the state
-     * path. A channel whose largest golden magnitude sits at or below both
-     * bounds is not asserted by either: a kernel emitting zero on it is
-     * green, and nothing says which channel. Report rather than fail, since
-     * a genuinely near-zero channel is a property of the case and not a
-     * defect; the count is what makes it visible. */
+     * path, and on TWO conditions rather than one. A channel whose largest
+     * golden magnitude sits at or below the binding bound is unasserted by
+     * the bounds - but ExpectOutputCodes compares the INT8 codes, and a
+     * channel carrying half a code or more of signal cannot be zeroed
+     * without moving one. A channel is genuinely unasserted only under
+     * both, and then for a reason no assertion can repair: this case's INT8
+     * grid does not separate that channel from the zero point.
+     *
+     * Measured, by zeroing each of the five channels the single condition
+     * used to name. Test1 ch[0] at 14.5 codes, RectM4x12 ch[8] at 5.1 and
+     * CapM8 ch[0] at 3.5 all fail on output_q; SweepS64 ch[15] at 0.37 and
+     * SweepM64 ch[63] at 0.20 leave the whole suite green. Report rather
+     * than fail, since a channel below the grid is a property of the case
+     * and not a defect; the count is what makes it visible. */
     if (tc->tol_s8_floor_per_channel) {
         int vacuous = 0;
         for (int j = 0; j < tc->H; ++j) {
@@ -429,11 +443,15 @@ static bool RunSlstmS8Case(const XlstmRefCase* tc) {
              * two: a channel is unasserted only when its magnitude sits
              * under that one. */
             float binding = a < b ? a : b;
-            if (channel_ref[j] <= binding) {
+            /* In INT8 codes, which is what decides whether zeroing the
+             * channel is visible to ExpectOutputCodes. */
+            float codes = channel_ref[j] / y_scale;
+            if (channel_ref[j] <= binding && codes < 0.5f) {
                 std::printf("  note: %s ch[%d] is unasserted - largest golden "
-                            "magnitude %.8e is within the binding bound %.8e, so "
-                            "zeroing this channel would pass\n",
-                            tc->name, j, channel_ref[j], binding);
+                            "magnitude %.8e is within the binding bound %.8e "
+                            "AND is %.2f of one INT8 code, so zeroing this "
+                            "channel moves no integer either\n",
+                            tc->name, j, channel_ref[j], binding, codes);
                 ++vacuous;
             }
         }
@@ -492,7 +510,7 @@ static bool TestS8QuantizationBound() {
             return false;
         }
         float err = EvalSlstmS8Case(tc, y_f, NULL, NULL, NULL, NULL, NULL,
-                                    NULL, NULL);
+                                    NULL, NULL, NULL);
         std::printf("  %-10s H=%-3d max abs error vs f32: %.6f (worst-channel bound: %.4f)\n",
                      tc->name, tc->H, err, tc->tol_s8);
         if (err > max_err) max_err = err;

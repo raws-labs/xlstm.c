@@ -58,13 +58,21 @@ there may move to float64 for convenience: a scale rounded differently sends a
 value on a .5 boundary to a different integer, and no tolerance can absorb a
 branch.
 
-The state comparison is also what covers the exit-state elements a bound cannot
-reach. An element whose golden is exactly zero, or whose honest measured error
-already spans its own dynamic range, has no bound that is both non-vacuous and
-free of false failures; 153 of 5456 are in that position, 118 of them in
-`SweepM64`'s C matrix. An integer comparison does not ask how large an element
-is, so it applies to them unchanged. `m` is the one state that keeps no integer,
+The integer comparisons are also what covers what a bound cannot reach. An
+element whose golden is exactly zero, or whose honest measured error already
+spans its own dynamic range, has no bound that is both non-vacuous and free of
+false failures; 153 of 5456 exit-state elements are in that position, 118 of
+them in `SweepM64`'s C matrix, and 5 of 269 output channels sit inside their own
+binding bound. An integer comparison does not ask how large an element is, so it
+applies to all of them unchanged. `m` is the one state that keeps no integer,
 because it stays float32 in the kernel.
+
+Two of those five output channels stay unasserted and always will: `SweepS64`
+ch[15] carries 0.37 of one INT8 code and `SweepM64` ch[63] carries 0.20, so
+zeroing either moves no integer. That is the INT8 grid of those cases, not a
+gap in the gate, and it is what the runners' `unasserted` note now reports.
+Closing it would mean a per-channel `y` scale, which is a change to the
+quantization contract rather than to a test.
 
 `make check-tools` matters here because the worked examples in `tools/`
 reproduce that file's calibration and shapes from its float tensors alone. If
@@ -304,7 +312,7 @@ exit-state checks, not by the per-channel output bound they were written for,
 because a corrupted channel feeds back through `c` and `n` before the output
 path sees it.
 
-It covers all six backends: 49 entries, including the loop tails, zero-point
+It covers all six backends: 50 entries, including the loop tails, zero-point
 folding, lane order and alignment instances only `neon`, `cortexm`, `esp` and
 `helium` compile. A mutation the running backend does not compile reports
 `n/a`, and a missing toolchain reports `NOT COVERED`; neither is an escape.

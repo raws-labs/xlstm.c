@@ -410,6 +410,18 @@ MUTANTS = [
      [(M8, MCQ, MCQ + "\n            if (DQ == 64 && r * DV + c == 23)"
                      " C_q = 0.0f;")]),
 
+    # G2 is G1's output-side twin, and pins what the vacuity note in the s8
+    # runners now claims. Test1 ch[0] is one of the channels whose largest
+    # golden magnitude sits inside its own binding bound, so neither output
+    # check asserts it - but it carries 14.5 INT8 codes, so zeroing it moves
+    # an integer. Test1 is T=1, so there is no feedback through R either: the
+    # code comparison is the only thing that can see this one. The anchor
+    # catches Test2 and Test3 as well, both H=2; Test1 runs first and is what
+    # reports.
+    ("G2", "sLSTM H=2 channel 0 zeroed, bounds do not assert it", "fail",
+     CODES, HOST,
+     [(S8, SY, SY + "\n        if (H == 2 && i == 0) y_new = 0.0f;")]),
+
     # --- neon: four vectorized kernels, so four scalar tails ---------------
     ("N1", "neon f32 matvec skips its scalar tail", "fail", near("y"),
      ("neon",),

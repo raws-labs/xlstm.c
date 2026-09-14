@@ -39,6 +39,17 @@ static bool RunMlstmCase(const XlstmRefCase* tc) {
         return false;
     }
 
+    /* The same argument for the widths the static buffers are sized by.
+     * XLSTM_TEST_MAX_H is 256 by default and forced to 64 for the board
+     * images; the C buffer alone is its square, so a case wider than the knob
+     * overruns every buffer above rather than failing. */
+    if (tc->DQ > XLSTM_TEST_MAX_H || tc->DV > XLSTM_TEST_MAX_H) {
+        std::printf("  FAIL %s: DQ=%d DV=%d, but XLSTM_TEST_MAX_H=%d sizes "
+                    "this runner's buffers\n", tc->name, tc->DQ, tc->DV,
+                    XLSTM_TEST_MAX_H);
+        return false;
+    }
+
     for (int i = 0; i < DV; ++i) { g_y[i] = 0; g_m[i] = 0; }
     for (int i = 0; i < DQ; ++i) g_n[i] = 0;
     for (int i = 0; i < DQ * DV; ++i) g_C[i] = 0;
@@ -94,6 +105,14 @@ static float g_scratch2[4 * XLSTM_TEST_MAX_H + 2];
 static bool RunOutputGateSeam(const XlstmRefCase* tc) {
     const int DQ = tc->DQ, DV = tc->DV, T = tc->T;
     if (tc->B != 1) return true;
+    /* Shares g_C, g_output and the scratch arrays with the runner above, so
+     * it needs the same width bound. */
+    if (DQ > XLSTM_TEST_MAX_H || DV > XLSTM_TEST_MAX_H) {
+        std::printf("  FAIL %s: DQ=%d DV=%d, but XLSTM_TEST_MAX_H=%d sizes "
+                    "this runner's buffers\n", tc->name, DQ, DV,
+                    XLSTM_TEST_MAX_H);
+        return false;
+    }
 
     MlstmParams gated = {0.0f, tc->gate_soft_cap, 0};
     MlstmParams ungated = {0.0f, tc->gate_soft_cap, 1};

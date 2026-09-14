@@ -33,6 +33,16 @@ static bool RunSlstmCase(const XlstmRefCase* tc) {
         return false;
     }
 
+    /* The same argument for the other dimension the static buffers are sized
+     * by. XLSTM_TEST_MAX_H is 256 by default and forced to 64 for the board
+     * images, so a case wider than the knob overruns every buffer above
+     * rather than failing. */
+    if (H > XLSTM_TEST_MAX_H) {
+        std::printf("  FAIL %s: H=%d exceeds XLSTM_TEST_MAX_H=%d, which sizes "
+                    "this runner's buffers\n", tc->name, H, XLSTM_TEST_MAX_H);
+        return false;
+    }
+
     for (int i = 0; i < H; ++i) { g_y[i] = 0; g_c[i] = 0; g_n[i] = 0; g_m[i] = 0; }
     for (int i = 0; i < T * H; ++i) g_output[i] = 0;
     for (int i = 0; i < 4 * H; ++i) g_scratch[i] = 0;

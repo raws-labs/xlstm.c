@@ -66,7 +66,18 @@ typedef struct {
 /* Single timestep of sLSTM (INT8 quantized).
  *
  * All state pointers (y, c, n, m) are updated in-place.
- * Caller must provide a scratch buffer of at least 4*hidden_size int32_t. */
+ * Caller must provide a scratch buffer of at least 4*hidden_size int32_t.
+ * The kernel reads that buffer as float as well as int32_t, so it must be
+ * aligned for float; declaring it as int32_t[] or float[] both satisfy that
+ * on every supported target, a char[] does not.
+ *
+ * hidden_size must not exceed XLSTM_MAX_HIDDEN (xlstm_simd.h, 256 by
+ * default), which sizes stack temporaries inside the kernel. A larger width
+ * overruns them; nothing checks it.
+ *
+ * params is required and must not be NULL: it carries the quantization
+ * scales, which have no default. This differs from slstm_step_f32, whose
+ * params are tuning and may be NULL. */
 void slstm_step_s8(
     const int8_t* x,          /* [input_size] */
     const int8_t* W_q,        /* [4*H, I] */

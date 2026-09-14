@@ -30,6 +30,8 @@ nothing in this repo produces a K or a V. It is a definition, and the checks
 only hold it to itself and to the crossover and ceiling derived from it.
 """
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -130,7 +132,7 @@ def report(h, i, heads, dv=None):
                      "{:,}".format(w * heads)))
     print("\n  scratch (once, not per head): sLSTM %s B, mLSTM %s B"
           % ("{:,}".format(scratch_bytes("slstm", h)),
-             "{:,}".format(scratch_bytes("mlstm", h))))
+             "{:,}".format(scratch_bytes("mlstm", h, dv))))
     print("  all figures in bytes")
 
 
@@ -225,9 +227,40 @@ def self_check():
             fails += 1
             print("FAIL: mLSTM f32 state %s is %d, README.md says %d"
                   % (label, got, want))
+    # Scratch is a header requirement rather than a stored tensor, so the
+    # tensor loop above cannot reach it. Pin it against include/mlstm.h:89-90
+    # at a rectangular shape, which is the case that was reported with the
+    # square size because the dv argument was not passed through.
+    for qk, dv, want in ((64, 64, (2 * 64 + 2 * 64 + 2) * 4),
+                         (64, 128, (2 * 64 + 2 * 128 + 2) * 4),
+                         (12, 4, (2 * 12 + 2 * 4 + 2) * 4)):
+        got = scratch_bytes("mlstm", qk, dv)
+        if got != want:
+            fails += 1
+            print("FAIL: mLSTM scratch at qk=%d dv=%d is %d, include/mlstm.h "
+                  "requires %d" % (qk, dv, got, want))
+    if scratch_bytes("mlstm", 64, 128) == scratch_bytes("mlstm", 64, 64):
+        fails += 1
+        print("FAIL: mLSTM scratch does not depend on the value width")
+
+    # The defect this pins was in the REPORTING path, not in scratch_bytes:
+    # report() called it without dv, so a rectangular request printed the
+    # square size. Checking the formula alone would not have caught that, so
+    # drive report() and read the line it prints.
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        report(64, 64, 1, 128)
+    line = [l for l in buf.getvalue().splitlines() if "scratch (once" in l]
+    if len(line) != 1 or "mLSTM 1,544 B" not in line[0]:
+        fails += 1
+        print("FAIL: report() prints %r for a qk=64 dv=128 cell; "
+              "include/mlstm.h requires mLSTM 1,544 B"
+              % (line[0].strip() if line else None))
     if fails:
         return 1
     print("  and with the three mLSTM state figures in README.md")
+    print("  and with the mLSTM scratch formula in include/mlstm.h, square "
+          "and rectangular")
 
     # Negative controls: the two ways a footprint tool is usually wrong. If
     # either passed, the check above would not be measuring anything.
@@ -294,20 +327,39 @@ def self_check():
     return 0
 
 
+USAGE = ("usage: python3 tools/footprint.py <hidden_size> <input_size> "
+         "[heads] [budget_kb ...] [--dv V]\n"
+         "  hidden_size is the per-head width; --dv sizes a rectangular mLSTM "
+         "whose value width differs from it.\n"
+         "  with no arguments, runs the self-check only.")
+
+
 def main(argv):
     rc = self_check()
     if rc or not argv:
         if not argv:
-            print("\nreport a configuration with: python3 tools/footprint.py"
-                  " <hidden_size> <input_size> [heads] [budget_kb ...]")
+            print("\n" + USAGE)
         return rc
+    if any(a in ("-h", "--help") for a in argv):
+        print(USAGE)
+        return 0
     dv = None
     if "--dv" in argv:
         k = argv.index("--dv")
+        if k + 1 >= len(argv):
+            print("--dv needs a width\n" + USAGE)
+            return 2
         dv = int(argv[k + 1])
         argv = argv[:k] + argv[k + 2:]
-    h, i = int(argv[0]), int(argv[1])
-    heads = int(argv[2]) if len(argv) > 2 else 1
+    if len(argv) < 2:
+        print("need <hidden_size> and <input_size>\n" + USAGE)
+        return 2
+    try:
+        h, i = int(argv[0]), int(argv[1])
+        heads = int(argv[2]) if len(argv) > 2 else 1
+    except ValueError as e:
+        print("%s\n%s" % (e, USAGE))
+        return 2
     print()
     report(h, i, heads, dv)
     print()

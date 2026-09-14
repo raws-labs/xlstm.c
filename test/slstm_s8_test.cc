@@ -255,6 +255,17 @@ static bool RunSlstmS8Case(const XlstmRefCase* tc) {
         return false;
     }
 
+    /* The same argument for the other dimension the static buffers are sized
+     * by. XLSTM_TEST_MAX_H is 256 by default and forced to 64 for the board
+     * images, so a case wider than the knob overruns every buffer above
+     * rather than failing. */
+    if (tc->H > XLSTM_TEST_MAX_H) {
+        std::printf("  FAIL %s: H=%d exceeds XLSTM_TEST_MAX_H=%d, which sizes "
+                    "this runner's buffers\n", tc->name, tc->H,
+                    XLSTM_TEST_MAX_H);
+        return false;
+    }
+
     static float y_f[XLSTM_TEST_MAX_H], m_f[XLSTM_TEST_MAX_H], c_f[XLSTM_TEST_MAX_H], n_f[XLSTM_TEST_MAX_H], output_f[3 * XLSTM_TEST_MAX_H];
     /* The return value is the case-wide max error, which only
      * TestS8QuantizationBound's summary uses; the per-channel and

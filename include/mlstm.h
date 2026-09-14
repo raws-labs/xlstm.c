@@ -84,11 +84,17 @@ typedef struct {
 
 /* Single timestep of mLSTM.
  *
- * State pointers (y, C, n, m) are updated in-place: y[v_size],
- * C[qk_size * v_size] flattened row-major, n[qk_size], m a single float.
+ * C, n and m are updated in-place: C[qk_size * v_size] flattened row-major,
+ * n[qk_size], m a single float. y[v_size] is written, never read.
  * Caller must provide a scratch buffer of at least
  * (2*qk_size + 2*v_size + 2) floats. It carries nothing between calls - it is
- * overwritten from b on entry - so one buffer serves any number of cells. */
+ * overwritten from b on entry - so one buffer serves any number of cells.
+ *
+ * qk_size and v_size must not exceed XLSTM_MAX_HIDDEN (xlstm_simd.h, 256 by
+ * default), which sizes stack temporaries inside the kernel. A larger width
+ * overruns them; nothing checks it.
+ *
+ * params may be NULL, which is equivalent to an all-zero MlstmParams. */
 void mlstm_step_f32(
     const float* x,       /* [input_size] */
     const float* W,       /* [(2*qk_size+2*v_size+2), input_size] */

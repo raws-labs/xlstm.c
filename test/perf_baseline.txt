@@ -1,5 +1,4 @@
-# xlstm.c performance baseline - callgrind. Two numbers per row:
-# Ir, retired instructions, and D1, simulated first-level data misses.
+# xlstm.c performance baseline - retired instruction counts (callgrind Ir).
 #
 # Regenerate deliberately with:  make perf-baseline
 # Checked by:                    make perf   (tolerance +2.0% / -5.0%)
@@ -15,18 +14,10 @@
 #
 # These numbers describe the HOST backends only. They say nothing about cortexm
 # or esp, whose performance is a property of those cores and is measured on
-# hardware.
-#
-# D1 is the locality half, over a cache pinned in the Makefile rather than
-# detected: --I1=32768,8,64 --D1=32768,8,64 --LL=8388608,16,64.
-# It is a fixed yardstick for comparing two versions of this code, NOT a model
-# of any target - the Cortex-M parts have no data cache or a much smaller one.
-# It is also more fragile than Ir. The kernel copies argv and envp onto the
-# initial stack, so the environment shifts every buffer against a cache line:
-# one unchanged binary measured 7654, 7853 and 6457 under three environments
-# differing only in padding. That is why perf-measure runs under env -i.
-# Rows whose D1 baseline is under 50 are reported and not gated: that
-# working set fits the cache, so what is left is compulsory misses.
+# hardware. They are also a proxy for time and not time itself: a change that
+# holds the instruction count and worsens cache locality does not appear here.
+# Simulating a data cache was tried and does not reproduce across machines -
+# see the note above the gate in the Makefile.
 #
 # Counts are specific to the compiler that produced them - gcc and clang differ
 # by up to 50% on these loops - so make perf refuses to compare across a change
@@ -36,52 +27,52 @@
 # valgrind:  valgrind-3.22.0
 # libm:      GLIBC_TUNABLES=glibc.cpu.hwcaps=-FMA,-AVX2,-AVX
 #
-# backend gates  kernel     H steps    instructions  D1 misses
-ref exact slstm_f32 16 200 4225080 19
-ref exact slstm_f32 64 200 46337850 429999
-ref exact slstm_f32 128 200 171413687 1677194
-ref exact mlstm_f32 16 200 2749400 11
-ref exact mlstm_f32 64 200 35902600 271405
-ref exact mlstm_f32 128 200 138884200 1273218
-ref exact slstm_s8 16 200 5036990 12
-ref exact slstm_s8 64 200 59392421 103309
-ref exact slstm_s8 128 200 223730773 453613
-ref exact mlstm_s8 16 200 4415600 7
-ref exact mlstm_s8 64 200 60410400 16229
-ref exact mlstm_s8 128 200 235424800 1360205
-ref approx slstm_f32 16 200 3935649 3
-ref approx slstm_f32 64 200 45193203 426399
-ref approx slstm_f32 128 200 169126036 1673794
-ref approx mlstm_f32 16 200 2743400 4
-ref approx mlstm_f32 64 200 35887800 270005
-ref approx mlstm_f32 128 200 138856600 1270617
-ref approx slstm_s8 16 200 4589927 11
-ref approx slstm_s8 64 200 57613198 91349
-ref approx slstm_s8 128 200 220170937 449814
-ref approx mlstm_s8 16 200 4367400 7
-ref approx mlstm_s8 64 200 60248000 10444
-ref approx mlstm_s8 128 200 235108800 1164403
-sse2 exact slstm_f32 16 200 2665080 19
-sse2 exact slstm_f32 64 200 19203450 429999
-sse2 exact slstm_f32 128 200 61437687 1677194
-sse2 exact mlstm_f32 16 200 1312000 11
-sse2 exact mlstm_f32 64 200 11862000 271405
-sse2 exact mlstm_f32 128 200 42056400 1273218
-sse2 exact slstm_s8 16 200 2580990 12
-sse2 exact slstm_s8 64 200 18229378 103309
-sse2 exact slstm_s8 128 200 57843991 453613
-sse2 exact mlstm_s8 16 200 3149200 7
-sse2 exact mlstm_s8 64 200 39668000 16229
-sse2 exact mlstm_s8 128 200 152157600 1360205
-sse2 approx slstm_f32 16 200 2375649 3
-sse2 approx slstm_f32 64 200 18058803 426399
-sse2 approx slstm_f32 128 200 59150036 1673794
-sse2 approx mlstm_f32 16 200 1306000 4
-sse2 approx mlstm_f32 64 200 11847200 270005
-sse2 approx mlstm_f32 128 200 42028800 1270617
-sse2 approx slstm_s8 16 200 2133927 11
-sse2 approx slstm_s8 64 200 16450066 91349
-sse2 approx slstm_s8 128 200 54283934 449814
-sse2 approx mlstm_s8 16 200 3101000 7
-sse2 approx mlstm_s8 64 200 39505600 10444
-sse2 approx mlstm_s8 128 200 151841600 1164403
+# backend gates  kernel     H steps    instructions
+ref exact slstm_f32 16 200 4225080
+ref exact slstm_f32 64 200 46337850
+ref exact slstm_f32 128 200 171413687
+ref exact mlstm_f32 16 200 2749400
+ref exact mlstm_f32 64 200 35902600
+ref exact mlstm_f32 128 200 138884200
+ref exact slstm_s8 16 200 5036990
+ref exact slstm_s8 64 200 59392421
+ref exact slstm_s8 128 200 223730773
+ref exact mlstm_s8 16 200 4415600
+ref exact mlstm_s8 64 200 60410400
+ref exact mlstm_s8 128 200 235424800
+ref approx slstm_f32 16 200 3935649
+ref approx slstm_f32 64 200 45193203
+ref approx slstm_f32 128 200 169126036
+ref approx mlstm_f32 16 200 2743400
+ref approx mlstm_f32 64 200 35887800
+ref approx mlstm_f32 128 200 138856600
+ref approx slstm_s8 16 200 4589927
+ref approx slstm_s8 64 200 57613198
+ref approx slstm_s8 128 200 220170937
+ref approx mlstm_s8 16 200 4367400
+ref approx mlstm_s8 64 200 60248000
+ref approx mlstm_s8 128 200 235108800
+sse2 exact slstm_f32 16 200 2665080
+sse2 exact slstm_f32 64 200 19203450
+sse2 exact slstm_f32 128 200 61437687
+sse2 exact mlstm_f32 16 200 1312000
+sse2 exact mlstm_f32 64 200 11862000
+sse2 exact mlstm_f32 128 200 42056400
+sse2 exact slstm_s8 16 200 2580990
+sse2 exact slstm_s8 64 200 18229378
+sse2 exact slstm_s8 128 200 57843991
+sse2 exact mlstm_s8 16 200 3149200
+sse2 exact mlstm_s8 64 200 39668000
+sse2 exact mlstm_s8 128 200 152157600
+sse2 approx slstm_f32 16 200 2375649
+sse2 approx slstm_f32 64 200 18058803
+sse2 approx slstm_f32 128 200 59150036
+sse2 approx mlstm_f32 16 200 1306000
+sse2 approx mlstm_f32 64 200 11847200
+sse2 approx mlstm_f32 128 200 42028800
+sse2 approx slstm_s8 16 200 2133927
+sse2 approx slstm_s8 64 200 16450066
+sse2 approx slstm_s8 128 200 54283934
+sse2 approx mlstm_s8 16 200 3101000
+sse2 approx mlstm_s8 64 200 39505600
+sse2 approx mlstm_s8 128 200 151841600

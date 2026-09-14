@@ -662,18 +662,23 @@ bench-sse2:
 # no timing calls. The same binary on the same input yields the same count on
 # every run, so a 2% move is signal.
 #
-# It counts simulated first-level data misses alongside, over a cache pinned
-# below rather than detected, so a change that holds the instruction count and
-# worsens locality is caught rather than passed. That was not hypothetical: a
-# change with identical instruction counts has cost 10% on a Cortex-M part, and
-# a smaller binary has measured slower.
-#
 # Limits, which are real and which a green run here does NOT cover:
-#   - Instructions are a proxy for time, not time, and the cache is a yardstick
-#     rather than a model of any target. The Cortex-M parts have no data cache
-#     or a much smaller one, and their numbers come from hardware.
+#   - Instructions are a proxy for time, not time. A change that leaves the
+#     count alone and worsens cache or memory behaviour passes this gate. That
+#     is not hypothetical: a change with identical instruction counts has cost
+#     10% on a Cortex-M part, and a smaller binary has measured slower.
 #   - Host backends only (ref, sse2). cortexm and esp performance is a property
 #     of those cores and is measured on hardware, not here.
+#
+# callgrind can simulate a data cache, and that was tried here to close the
+# first limit. It does not survive this gate's portability requirement. The
+# miss counts move with the size of the environment block, because the kernel
+# copies argv and envp onto the initial stack and every buffer shifts against a
+# cache line: one unchanged binary measured 7654, 7853 and 6457 under three
+# environments differing only in padding. Running under `env -i` fixes that and
+# is not enough - the same baseline recorded here came back +4.23% and +4.96%
+# on a CI runner at H=128, against a tolerance of 2%. Ir was +0.00% on every
+# row of the same run. Do not re-add it without a way to pin what is left.
 #
 # The kernels call expf/tanhf/logf, and glibc binds those to an FMA or a plain
 # SSE implementation depending on the CPU it finds. Measured, that choice alone
@@ -682,14 +687,6 @@ bench-sse2:
 # x86-64 has makes the count independent of which machine picked up the job.
 # The counts stay inclusive of libm, so trading a libm call for hand-rolled
 # arithmetic still scores as the win or loss it actually is.
-# Run under `env -i` with exactly this and nothing else. The tunable is the
-# original reason; the empty environment is the second one, and it is not
-# optional. The kernel copies argv and envp onto the initial stack, so the size
-# of the environment shifts every buffer's alignment against a cache line, and
-# the simulated miss counts move with it: measured at 7654, 7853 and 6457 for
-# one unchanged binary under three environments that differed only in padding.
-# Ir does not move. With the environment fixed the counts are identical across
-# all three.
 PERF_ENV := GLIBC_TUNABLES=glibc.cpu.hwcaps=-FMA,-AVX2,-AVX
 
 # Two bounds, and the gate fails on either. Instruction counts are exact for a
@@ -719,17 +716,10 @@ PERF_BACKENDS ?= ref sse2
 PERF_GATES    ?= exact approx
 PERF_KERNELS  ?= slstm_f32 mlstm_f32 slstm_s8 mlstm_s8
 # 16 and 64 were the whole gate; make bench sweeps to 128, so a regression that
-# only shows at the widest width it reports was not gated anywhere. It is not
-# free: this target went from 25 s to 260 s, and the width and the cache
-# simulation below each account for about half of that.
+# only shows at the widest width it reports was gated nowhere. It is not free:
+# 128 takes this target from 25 s to 138 s, most of it the mLSTM kernels, whose
+# work is quadratic in the width.
 PERF_WIDTHS   ?= 16 64 128
-# Cache geometry, pinned rather than detected. callgrind takes the host CPU's
-# geometry when not told otherwise, which would make the miss counts a property
-# of whichever runner picked up the job. These three are a fixed yardstick for
-# comparing two versions of this code, and NOT a model of any target: the
-# Cortex-M parts have either no data cache or one a quarter this size, and
-# their numbers come from hardware.
-PERF_CACHE    ?= --I1=32768,8,64 --D1=32768,8,64 --LL=8388608,16,64
 PERF_STEPS    ?= 200
 PERF_TOL      ?= 2.0
 PERF_TOL_FAST ?= 5.0
@@ -749,18 +739,14 @@ define perf-measure
 		for k in $(PERF_KERNELS); do \
 			sym=$${k%%_*}_step_$${k#*_}; \
 			for h in $(PERF_WIDTHS); do \
-				ev=$$(env -i $(PERF_ENV) $$vg --tool=callgrind \
-					--callgrind-out-file=/dev/null --cache-sim=yes \
-					$(PERF_CACHE) \
+				ir=$$($(PERF_ENV) $$vg --tool=callgrind \
+					--callgrind-out-file=/dev/null \
 					--collect-atstart=no --toggle-collect=$$sym \
 					$(BUILD)/xlstm_bench $$k $$h $(PERF_STEPS) 2>&1 \
 					| sed -n 's/.*Collected *: *//p'); \
-				test -n "$$ev" || { \
+				test -n "$$ir" || { \
 					echo "perf: no count for $$b $$g $$k $$h" >&2; exit 1; }; \
-				: "Ir Dr Dw I1mr D1mr D1mw ILmr DLmr DLmw, trailing"; \
-				: "zeros omitted - hence the defaults on fields 5 and 6"; \
-				set -- $$ev; \
-				echo "$$b $$g $$k $$h $(PERF_STEPS) $$1 $$(($${5:-0} + $${6:-0}))"; \
+				echo "$$b $$g $$k $$h $(PERF_STEPS) $$ir"; \
 			done; \
 		done; \
 	  done; \
@@ -784,68 +770,33 @@ perf:
 		exit 1; \
 	fi
 	@$(perf-measure) > $(BUILD)/perf.txt
-# Below 100/PERF_TOL misses a one-miss move already exceeds the tolerance, and
-# a working set that small fits D1 outright - what is left is compulsory misses,
-# which shift with code layout and say nothing about locality. Those rows are
-# reported and never failed on. Above it the count is locality: transposing the
-# mLSTM C traversal moves it 33% and 39% at H=128 and 0.00% at H=64, where
-# 64x64 floats still fit the cache.
 	@awk -v tol=$(PERF_TOL) -v fast=$(PERF_TOL_FAST) ' \
-	function cmp(cur, b,   d) { \
-	  if (b == 0) return cur == 0 ? 0 : 999999; \
-	  return 100.0 * (cur - b) / b; \
-	} \
 	BEGIN { \
-	  exact = 100.0 / tol; \
-	  printf "%-7s %-6s %-10s %4s %14s %14s %8s %10s %10s %8s\n", \
-	    "backend","gates","kernel","H","Ir baseline","Ir current","Ir","D1 base","D1 cur","D1"; \
-	  printf "%s\n", "-----------------------------------------------------------------------------------------------------"; \
+	  printf "%-7s %-6s %-10s %4s %6s %14s %14s %9s\n", \
+	    "backend","gates","kernel","H","steps","baseline","current","delta"; \
+	  printf "%s\n", "----------------------------------------------------------------------------------"; \
 	} \
-	NR == FNR { \
-	  if (NF == 7 && $$1 !~ /^#/) { \
-	    k = $$1" "$$2" "$$3" "$$4" "$$5; bi[k] = $$6; bd[k] = $$7; \
-	  } next \
-	} \
+	NR == FNR { if (NF == 6 && $$1 !~ /^#/) base[$$1" "$$2" "$$3" "$$4" "$$5] = $$6; next } \
 	{ \
 	  key = $$1" "$$2" "$$3" "$$4" "$$5; \
-	  if (!(key in bi)) { \
-	    printf "%-7s %-6s %-10s %4s %14s %14d %8s %10s %10d    NO BASELINE\n", \
-	      $$1,$$2,$$3,$$4,"-",$$6,"-","-",$$7; \
+	  if (!(key in base)) { \
+	    printf "%-7s %-6s %-10s %4s %6s %14s %14d    NO BASELINE\n", \
+	      $$1,$$2,$$3,$$4,$$5,"-",$$6; \
 	    fail = 1; next; \
 	  } \
-	  seen[key] = 1; \
-	  d = cmp($$6, bi[key]); \
+	  seen[key] = 1; d = 100.0 * ($$6 - base[key]) / base[key]; \
 	  tag = (d > tol) ? "  REGRESSED" \
 	      : ((d < -fast) ? "  IMPROVED - RE-RECORD" \
 	      : ((d < -tol) ? "  faster" : "")); \
 	  if (d > tol || d < -fast) fail = 1; \
-	  dd = cmp($$7, bd[key]); \
-	  if (bd[key] < exact) { \
-	    cold++; \
-	    dtag = ($$7 == bd[key]) ? "" : "  D1 cold, not gated"; \
-	    dtxt = sprintf("%8s", ($$7 == bd[key]) ? "=" : "moved"); \
-	  } else { \
-	    gated++; \
-	    dtag = (dd > tol) ? "  D1 REGRESSED" \
-	         : ((dd < -fast) ? "  D1 IMPROVED - RE-RECORD" : ""); \
-	    if (dd > tol || dd < -fast) fail = 1; \
-	    dtxt = sprintf("%+7.2f%%", dd); \
-	  } \
-	  printf "%-7s %-6s %-10s %4s %14d %14d %+7.2f%% %10d %10d %s%s%s\n", \
-	    $$1,$$2,$$3,$$4,bi[key],$$6,d,bd[key],$$7,dtxt,tag,dtag; \
+	  printf "%-7s %-6s %-10s %4s %6s %14d %14d %+8.2f%%%s\n", \
+	    $$1,$$2,$$3,$$4,$$5,base[key],$$6,d,tag; \
 	} \
 	END { \
-	  for (k in bi) if (!(k in seen)) { printf "not measured: %s\n", k; fail = 1 } \
-	  printf "\nIr: retired instructions, tolerance +%s%% / -%s%%.\n", tol, fast; \
-	  printf "D1: simulated first-level data misses over %s.\n", "$(PERF_CACHE)"; \
-	  printf "    Gated at the same tolerance where the baseline is %d or more.\n", exact; \
-	  printf "    %d of %d rows are below that and reported only: their working set\n", cold, cold + gated; \
-	  printf "    fits D1, so the misses are compulsory and move with code layout.\n"; \
-	  printf "    Measured, transposing the mLSTM C traversal: +33%% and +39%% at\n"; \
-	  printf "    H=128, 0.00%% at H=64, where 64x64 floats still fit the cache.\n"; \
-	  printf "The cache is a fixed yardstick for comparing two versions of this code,\n"; \
-	  printf "not a model of any target. Host backends only; cortexm and esp are\n"; \
-	  printf "measured on hardware.\n"; \
+	  for (k in base) if (!(k in seen)) { printf "not measured: %s\n", k; fail = 1 } \
+	  printf "\ninstructions (callgrind Ir), tolerance +%s%% / -%s%%\n", tol, fast; \
+	  printf "proxy for time, blind to cache behaviour; host backends only,\n"; \
+	  printf "not cortexm or esp - those are measured on hardware.\n"; \
 	  if (fail) { \
 	    printf "\nperf: FAILED - moved beyond tolerance, or baseline out of sync.\n"; \
 	    printf "A large improvement fails too, deliberately: an unrecorded win leaves\n"; \
@@ -862,8 +813,7 @@ perf-baseline:
 	@mkdir -p $(BUILD)
 	@$(perf-measure) > $(BUILD)/perf.txt
 	@{ \
-	  echo "# xlstm.c performance baseline - callgrind. Two numbers per row:"; \
-	  echo "# Ir, retired instructions, and D1, simulated first-level data misses."; \
+	  echo "# xlstm.c performance baseline - retired instruction counts (callgrind Ir)."; \
 	  echo "#"; \
 	  echo "# Regenerate deliberately with:  make perf-baseline"; \
 	  echo "# Checked by:                    make perf   (tolerance +$(PERF_TOL)% / -$(PERF_TOL_FAST)%)"; \
@@ -879,18 +829,10 @@ perf-baseline:
 	  echo "#"; \
 	  echo "# These numbers describe the HOST backends only. They say nothing about cortexm"; \
 	  echo "# or esp, whose performance is a property of those cores and is measured on"; \
-	  echo "# hardware."; \
-	  echo "#"; \
-	  echo "# D1 is the locality half, over a cache pinned in the Makefile rather than"; \
-	  echo "# detected: $(PERF_CACHE)."; \
-	  echo "# It is a fixed yardstick for comparing two versions of this code, NOT a model"; \
-	  echo "# of any target - the Cortex-M parts have no data cache or a much smaller one."; \
-	  echo "# It is also more fragile than Ir. The kernel copies argv and envp onto the"; \
-	  echo "# initial stack, so the environment shifts every buffer against a cache line:"; \
-	  echo "# one unchanged binary measured 7654, 7853 and 6457 under three environments"; \
-	  echo "# differing only in padding. That is why perf-measure runs under env -i."; \
-	  echo "# Rows whose D1 baseline is under $$(( 100 / $(PERF_TOL:.0=) )) are reported and not gated: that"; \
-	  echo "# working set fits the cache, so what is left is compulsory misses."; \
+	  echo "# hardware. They are also a proxy for time and not time itself: a change that"; \
+	  echo "# holds the instruction count and worsens cache locality does not appear here."; \
+	  echo "# Simulating a data cache was tried and does not reproduce across machines -"; \
+	  echo "# see the note above the gate in the Makefile."; \
 	  echo "#"; \
 	  echo "# Counts are specific to the compiler that produced them - gcc and clang differ"; \
 	  echo "# by up to 50% on these loops - so make perf refuses to compare across a change"; \
@@ -900,7 +842,7 @@ perf-baseline:
 	  echo "# valgrind:  $$($(VALGRIND) --version 2>/dev/null)"; \
 	  echo "# libm:      $(PERF_ENV)"; \
 	  echo "#"; \
-	  echo "# backend gates  kernel     H steps    instructions  D1 misses"; \
+	  echo "# backend gates  kernel     H steps    instructions"; \
 	  cat $(BUILD)/perf.txt; \
 	} > $(PERF_BASELINE)
 	@echo "wrote $(PERF_BASELINE):"

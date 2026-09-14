@@ -202,9 +202,9 @@ make perf-baseline     # re-record it, deliberately
 ```
 
 `make bench` prints wall-clock, which no shared runner reproduces closely
-enough to fail a build on. `make perf` counts retired instructions and
-simulated first-level data misses under callgrind instead, collection toggled
-on one kernel entry point at a time, at H=16, 64 and 128. It
+enough to fail a build on. `make perf` counts retired instructions under
+callgrind instead, collection toggled on one kernel entry point at a time, at
+H=16, 64 and 128. It
 covers both `XLSTM_GATES` builds, including the f32 kernels in both - the
 switch reaches all four kernels, so an f32 pair that came back equal would say
 it had stopped reaching them. The
@@ -223,26 +223,21 @@ on these loops - the 2.8% the libm implementation choice was worth before the
 gate pinned it - and sits far below any real win, `sse2` beating `ref` by 28%
 to 71% across this table.
 
-The D1 column is the locality half, over a cache pinned in the Makefile rather
-than detected. It is a yardstick for comparing two versions of this code, not a
-model of any target. It is also more fragile than the instruction count: the
-kernel copies argv and envp onto the initial stack, so the size of the
-environment shifts every buffer against a cache line, and one unchanged binary
-measured 7654, 7853 and 6457 misses under three environments differing only in
-padding. The measurement runs under `env -i` for that reason. Rows whose
-baseline is under 50 misses are reported and not gated, because a working set
-that small fits the cache outright and what is left is compulsory misses.
-
 Two limits, worth knowing before trusting a green run:
 
-- **It is a proxy for time, not time**, and the cache is a yardstick rather
-  than a model. Not hypothetical: a change with identical instruction counts
-  cost 10% on one Cortex-M part, and a smaller binary measured slower on three.
-  Transposing the mLSTM C traversal moves D1 by 33% and 39% at H=128 and 0.00%
-  at H=64, where 64x64 floats still fit the cache - so even the locality half
-  only sees what overflows it.
+- **It is a proxy for time, not time.** A change that leaves the instruction
+  count alone and worsens cache behaviour passes. Not hypothetical: a change
+  with identical instruction counts cost 10% on one Cortex-M part, and a
+  smaller binary measured slower on three.
 - **Host backends only** (`ref`, `sse2`). `cortexm` and `esp` performance is a
   property of those cores and is measured on hardware.
+
+callgrind can simulate a data cache, and that was tried to close the first
+limit. It does not reproduce across machines: the miss counts move with the
+size of the environment block, and fixing that with `env -i` still left +4.23%
+and +4.96% between this machine and a CI runner at H=128, against a 2%
+tolerance, on a run where the instruction counts were +0.00% on every row. The
+note above the gate in the Makefile has the numbers.
 
 Counts are specific to the compiler that produced them, so the gate refuses to
 compare across a toolchain it did not record.

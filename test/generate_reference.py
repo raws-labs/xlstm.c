@@ -1131,6 +1131,40 @@ def build_cases():
     slstm_cases.append(head0)
     slstm_cases.append(head1)
 
+    # --- a large stabilizer that MOVES ------------------------------------
+    #
+    # Test3 and MTest3 are the only cases with |m| above 10, and both are T=1:
+    # they prove one large i_raw does not overflow and nothing about what m
+    # does next. Every case where m evolves has |m| below 8. StabS is the one
+    # that does both - i_raw 20, 30, -20 against f_raw -5, so log_sigmoid pulls
+    # m down about 5 per step while max() pulls it up to each new i_raw, and m
+    # runs 20 -> 30 -> 24.99. The falling step is the one where the forget
+    # branch owns m_new, f_gate is 1, and i_gate underflows to exp(-45). Its
+    # INT8 state is quantized in that regime too, at 0.031 of error against a
+    # 0.2 bound.
+    #
+    # Be clear about what this is not. Five mutations of the stabilizer - drop
+    # the max, forget log_sigmoid(f_raw), pin m to i_raw, forbid m from
+    # falling, and replace exp(-m) with a constant - are each caught by eight
+    # to thirteen of the cases already here, StabS among them but never alone.
+    # The gap it fills is a regime, not a defect the table was missing.
+    W_stab = torch.tensor([
+        [20.0, 0.0], [20.0, 0.0],     # i_raw = 20 * x0
+        [0.0, -5.0], [0.0, -5.0],     # f_raw = -5 * x1
+        [0.0, 0.7],  [0.0, -0.7],     # z_raw
+        [0.4, 0.0],  [-0.4, 0.0],     # o_raw
+    ])
+    x_stab = torch.tensor([[[1.0, 1.0], [1.5, 1.0], [-1.0, 1.0]]])
+    output, y, c, n, m = run_slstm(W_stab, torch.zeros(8, 2), torch.zeros(8),
+                                   x_stab)
+    slstm_cases.append(dict(
+        name="StabS", comment="m rises then falls over three timesteps",
+        note="i_raw 20 -> 30 -> -20 against f_raw -5: m 20 -> 30 -> 24.99",
+        B=1, T=3, I=2, H=2,
+        W=W_stab, R=torch.zeros(8, 2), b=torch.zeros(8), input=x_stab,
+        y=y, c=c, n=n, m=m, output=output))
+
+
     # Every INT8 bound and floor is derived here rather than hand-picked per
     # case: two code reviews established that a case-wide constant cannot keep
     # every channel's ratio below 1.0 when a case spans three orders of

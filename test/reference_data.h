@@ -321,6 +321,30 @@ inline const float kHead2b_tol_s8_n_floor_per_elem[] = {0.00033576f, 0.00353368f
 inline const float kHead2b_tol_s8_m_per_elem[] = {0.11000000f, 0.70000000f, 0.26000000f, 0.15000000f};
 inline const float kHead2b_tol_s8_m_floor_per_elem[] = {0.00250920f, 0.00291959f, 0.00414679f, 0.00288635f};
 
+// StabS: m rises then falls over three timesteps
+// B=1, T=3, I=2, H=2
+// i_raw 20 -> 30 -> -20 against f_raw -5: m 20 -> 30 -> 24.99
+inline const float kStabS_W[] = {20.00000000f, 0.00000000f, 20.00000000f, 0.00000000f, 0.00000000f, -5.00000000f, 0.00000000f, -5.00000000f, 0.00000000f, 0.69999999f, 0.00000000f, -0.69999999f, 0.40000001f, 0.00000000f, -0.40000001f, 0.00000000f};
+inline const float kStabS_R[] = {0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f};
+inline const float kStabS_b[] = {0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f, 0.00000000f};
+inline const float kStabS_input[] = {1.00000000f, 1.00000000f, 1.50000000f, 1.00000000f, -1.00000000f, 1.00000000f};
+inline const float kStabS_expected_y[] = {0.24254024f, -0.36182752f};
+inline const float kStabS_expected_c[] = {0.60436797f, -0.60436797f};
+inline const float kStabS_expected_n[] = {1.00000036f, 1.00000036f};
+inline const float kStabS_expected_m[] = {24.99328423f, 24.99328423f};
+inline const float kStabS_expected_output[] = {0.36182752f, -0.24254026f, 0.39021382f, -0.21415392f, 0.24254024f, -0.36182752f};
+inline const int8_t kStabS_expected_output_q[] = {112, -78, 122, -67, 68, -122};
+inline const int16_t kStabS_expected_state_q[] = {7563, -7563};
+inline const int16_t kStabS_expected_n_q[] = {8192, 8192};
+inline const float kStabS_tol_s8_per_channel[] = {0.20000000f, 0.18000000f};
+inline const float kStabS_tol_s8_floor_per_channel[] = {0.02724998f, 0.03130465f};
+inline const float kStabS_tol_s8_c_per_elem[] = {0.30000000f, 0.30000000f};
+inline const float kStabS_tol_s8_c_floor_per_elem[] = {0.04638771f, 0.04638771f};
+inline const float kStabS_tol_s8_n_per_elem[] = {0.50000000f, 0.50000000f};
+inline const float kStabS_tol_s8_n_floor_per_elem[] = {0.00003052f, 0.00003052f};
+inline const float kStabS_tol_s8_m_per_elem[] = {12.00000000f, 12.00000000f};
+inline const float kStabS_tol_s8_m_floor_per_elem[] = {0.03911089f, 0.03911089f};
+
 inline const XlstmRefCase kSlstmCases[] = {
     {"Test1", 1, 1, 2, 2, 2, 2, 0.0f, kTest1_W, kTest1_R, kTest1_b, kTest1_input, kTest1_expected_y, kTest1_expected_c, kTest1_expected_n, kTest1_expected_m, NULL, kTest1_expected_output_q, kTest1_expected_state_q, kTest1_expected_n_q, 1e-05f, 0.11f, kTest1_tol_s8_per_channel, kTest1_tol_s8_floor_per_channel, kTest1_tol_s8_c_per_elem, kTest1_tol_s8_n_per_elem, kTest1_tol_s8_m_per_elem, kTest1_tol_s8_c_floor_per_elem, kTest1_tol_s8_n_floor_per_elem, kTest1_tol_s8_m_floor_per_elem},
     {"Test2", 1, 3, 2, 2, 2, 2, 0.0f, kTest1_W, kTest1_R, kTest1_b, kTest2_input, kTest2_expected_y, kTest2_expected_c, kTest2_expected_n, kTest2_expected_m, kTest2_expected_output, kTest2_expected_output_q, kTest2_expected_state_q, kTest2_expected_n_q, 1e-05f, 0.11f, kTest2_tol_s8_per_channel, kTest2_tol_s8_floor_per_channel, kTest2_tol_s8_c_per_elem, kTest2_tol_s8_n_per_elem, kTest2_tol_s8_m_per_elem, kTest2_tol_s8_c_floor_per_elem, kTest2_tol_s8_n_floor_per_elem, kTest2_tol_s8_m_floor_per_elem},
@@ -332,6 +356,7 @@ inline const XlstmRefCase kSlstmCases[] = {
     {"SweepS64", 1, 3, 64, 64, 64, 64, 0.0f, kSweepS64_W, kSweepS64_R, kSweepS64_b, kSweepS64_input, kSweepS64_expected_y, kSweepS64_expected_c, kSweepS64_expected_n, kSweepS64_expected_m, kSweepS64_expected_output, kSweepS64_expected_output_q, kSweepS64_expected_state_q, kSweepS64_expected_n_q, 1e-05f, 0.5f, kSweepS64_tol_s8_per_channel, kSweepS64_tol_s8_floor_per_channel, kSweepS64_tol_s8_c_per_elem, kSweepS64_tol_s8_n_per_elem, kSweepS64_tol_s8_m_per_elem, kSweepS64_tol_s8_c_floor_per_elem, kSweepS64_tol_s8_n_floor_per_elem, kSweepS64_tol_s8_m_floor_per_elem},
     {"Head2", 1, 2, 3, 4, 4, 4, 0.0f, kHead2_W, kHead2_R, kHead2_b, kHead2_input, kHead2_expected_y, kHead2_expected_c, kHead2_expected_n, kHead2_expected_m, kHead2_expected_output, kHead2_expected_output_q, kHead2_expected_state_q, kHead2_expected_n_q, 1e-05f, 0.29f, kHead2_tol_s8_per_channel, kHead2_tol_s8_floor_per_channel, kHead2_tol_s8_c_per_elem, kHead2_tol_s8_n_per_elem, kHead2_tol_s8_m_per_elem, kHead2_tol_s8_c_floor_per_elem, kHead2_tol_s8_n_floor_per_elem, kHead2_tol_s8_m_floor_per_elem},
     {"Head2b", 1, 2, 3, 4, 4, 4, 0.0f, kHead2b_W, kHead2b_R, kHead2b_b, kHead2b_input, kHead2b_expected_y, kHead2b_expected_c, kHead2b_expected_n, kHead2b_expected_m, kHead2b_expected_output, kHead2b_expected_output_q, kHead2b_expected_state_q, kHead2b_expected_n_q, 1e-05f, 0.14f, kHead2b_tol_s8_per_channel, kHead2b_tol_s8_floor_per_channel, kHead2b_tol_s8_c_per_elem, kHead2b_tol_s8_n_per_elem, kHead2b_tol_s8_m_per_elem, kHead2b_tol_s8_c_floor_per_elem, kHead2b_tol_s8_n_floor_per_elem, kHead2b_tol_s8_m_floor_per_elem},
+    {"StabS", 1, 3, 2, 2, 2, 2, 0.0f, kStabS_W, kStabS_R, kStabS_b, kStabS_input, kStabS_expected_y, kStabS_expected_c, kStabS_expected_n, kStabS_expected_m, kStabS_expected_output, kStabS_expected_output_q, kStabS_expected_state_q, kStabS_expected_n_q, 1e-05f, 0.2f, kStabS_tol_s8_per_channel, kStabS_tol_s8_floor_per_channel, kStabS_tol_s8_c_per_elem, kStabS_tol_s8_n_per_elem, kStabS_tol_s8_m_per_elem, kStabS_tol_s8_c_floor_per_elem, kStabS_tol_s8_n_floor_per_elem, kStabS_tol_s8_m_floor_per_elem},
 };
 inline const int kSlstmCasesCount = (int)(sizeof(kSlstmCases) / sizeof(kSlstmCases[0]));
 

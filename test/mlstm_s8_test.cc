@@ -87,7 +87,7 @@ static_assert(kStateHeadroom == XLSTM_GENERATOR_HEADROOM,
  * xlstm_quant_asymmetric.
  *
  * Every case in reference_data.h now stores the full C matrix
- * (mlstm_sized_case's store_state is unconditional as of this task), so
+ * (mlstm_sized_case's store_state is unconditional), so
  * C_quant is always calibrated from real data. The guard below is
  * defensive only, matching sLSTM's PrepareS8, and is not currently
  * exercised: reuse n's calibrated scale with no multiplier if a future
@@ -191,8 +191,8 @@ static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
      * final timestep that y alone captures. This matters: SweepM8's
      * final-y error is 0.124726, but an intermediate timestep reaches
      * 1.127354 (transient C/n excursion beyond the final-snapshot
-     * calibration range, saturating INT16 mid-sequence - see
-     *). Reporting only the final-y number would
+     * calibration range, saturating INT16 mid-sequence).
+     * Reporting only the final-y number would
      * understate what tolerance the case actually needs. */
     static float output_local[3 * XLSTM_TEST_MAX_H];
     xlstm_dequantize_s8_to_f32(output, output_local, T * DV, &s.params.y_quant);
@@ -461,19 +461,17 @@ static bool TestMlstmS8QuantizationBound() {
                  "   output, not an independent calibration set. These are a\n"
                  "   best case, not a deployment figure.)\n");
 
-    /* Bound set to ~1.5x the measured maximum (0.726042), which is
-     * SweepM17. SweepM8's calibration-headroom fix (kStateHeadroom in
-     * PrepareMlstmS8) brought its error down from 1.127354 to 0.038831 -
-     * the per-case measurements, the headroom
-     * derivation, and the full tol_s8/dynamic-range ratio table. This
-     * aggregate bound covers the whole table with one number, purely for
-     * a quick human-readable summary; it is not what keeps this test suite
-     * sensitive to a real regression on a specific channel. That
-     * sensitivity comes from RunMlstmS8Case, where the effective
-     * per-channel bound is
-     * min(tol_s8_per_channel, 1.5 x tol_s8_floor_per_channel + slack) -
-     * the floor term is the tighter of the two on most channels and is
-     * what actually binds. */
+    /* Bound set to ~1.5x the measured maximum (0.726042), which is SweepM17.
+     * SweepM8's calibration-headroom fix (kStateHeadroom in PrepareMlstmS8)
+     * brought its error down from 1.127354 to 0.038831; the derivation of
+     * that headroom is the comment on kStateHeadroom above. This aggregate
+     * bound covers the whole table with one number, purely for a quick
+     * human-readable summary; it is not what keeps this test suite sensitive
+     * to a real regression on a specific channel. That sensitivity comes
+     * from RunMlstmS8Case, where the effective per-channel bound is
+     * min(tol_s8_per_channel, 1.5 x tol_s8_floor_per_channel + slack) - the
+     * floor term is the tighter of the two on most channels and is what
+     * actually binds. */
     if (max_err > 1.10f) {
         std::printf("  FAIL: max error %.6f exceeds bound 1.10\n", max_err);
         return false;

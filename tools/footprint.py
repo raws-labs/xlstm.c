@@ -92,6 +92,26 @@ def kv_at(t, h, heads=1, s8=False):
     return 2 * t * h * heads * (1 if s8 else 4)
 
 
+def _rect_crossovers(qk=64, dv=128, heads=8, s8=False):
+    """The first t at which an attention KV cache exceeds a rectangular
+    mLSTM's state, under each of the three ways to map the cell's two widths
+    onto attention's one: both at qk, K at qk with V at dv, and both at dv.
+    report() prints these to say why it will not pick one."""
+    state = state_bytes("mlstm", qk, s8, dv) * heads
+    per_step = (2 * qk, qk + dv, 2 * dv)
+    out = []
+    for w in per_step:
+        step = w * heads * (1 if s8 else 4)
+        t = 1
+        while step * t <= state:
+            t += 1
+        out.append(t)
+    return tuple(out)
+
+
+RECT_CROSSOVERS = (65, 44, 33)
+
+
 def crossover(h, s8=False, cell=mlstm_at, kv=kv_at):
     """First t at which the KV cache exceeds everything the mLSTM cell will
     ever hold, or None if it never does. Head count cancels - both sides are
@@ -324,6 +344,18 @@ def self_check():
             print("FAIL: %s is NOT caught, so the crossover is blind" % label)
             return 1
         print("  caught: %s" % label)
+
+    # The three numbers report() prints when it declines a rectangular
+    # comparison. They are the whole argument for declining - if they ever
+    # converged, picking one would be defensible - so they are derived here
+    # rather than written into the message by hand.
+    if _rect_crossovers() != RECT_CROSSOVERS:
+        print("FAIL: the rectangular crossovers are %s, not the %s report() "
+              "prints" % (_rect_crossovers(), RECT_CROSSOVERS))
+        return 1
+    print("  the three rectangular readings still span %d to %d, which is why"
+          "\n  report() declines to pick one"
+          % (min(RECT_CROSSOVERS), max(RECT_CROSSOVERS)))
     return 0
 
 
@@ -364,11 +396,19 @@ def main(argv):
     report(h, i, heads, dv)
     print()
     if dv is not None and dv != h:
-        # compare() weighs the cell against an attention KV cache, which is
-        # sized by the model width rather than by these two, so a rectangular
-        # cell has no single width to put on the other side of it. The
-        # footprint above is the part that answers "does this fit".
-        print("(the KV-cache comparison is square-only; omit --dv for it)")
+        # compare() weighs the cell against an attention KV cache, whose K and
+        # V share one head width. A rectangular cell has two, and which of them
+        # attention is charged for is a definition this repository cannot
+        # settle - it produces no K and no V. It is not a rounding difference
+        # either: the three readings span a factor of two, so picking one
+        # quietly would put a headline number on an arbitrary choice. The
+        # footprint above is the part that answers "does this fit", and it is
+        # sized for the shape you passed.
+        print("(no comparison for a rectangular cell: attention's K and V "
+              "share one\n head width, and the three ways to map the cell's "
+              "two onto it give\n t = %d, %d and %d for qk=64 dv=128 over 8 "
+              "heads in f32. Omit --dv\n for the square comparison.)"
+              % RECT_CROSSOVERS)
     else:
         compare(h, heads, [int(a) for a in argv[3:]] or [128, 512, 520])
     return 0

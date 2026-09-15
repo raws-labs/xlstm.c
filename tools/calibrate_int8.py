@@ -37,7 +37,9 @@ that clips is not recoverable. 4.0 is what the correctness gate uses.
 """
 
 import json
+import math
 import os
+import struct
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -71,41 +73,63 @@ def _check_headroom_matches_generated_data():
                 return
 
 
+def f32(x):
+    """x rounded to float32, which is the only width src/xlstm_quant.c has.
+
+    Every scale below goes through this, and it is not cosmetic. A scale that
+    is exact in float64 and rounded in float32 sends a value sitting on a .5
+    boundary to a different integer, and one LSB there moves the whole
+    trajectory. 1.0f/255.0f is the case that shows it: float32 rounds it up, so
+    0.5f / scale is 127.49999237060547 and quantizes to 127, where float64 gives
+    exactly 127.5 and quantizes to 128."""
+    return struct.unpack("f", struct.pack("f", x))[0]
+
+
+def roundf(x):
+    """C roundf: half away from zero. Python's round() is half to even, and
+    the two disagree on exactly the values a quantizer lands on."""
+    return math.floor(x + 0.5) if x >= 0 else math.ceil(x - 0.5)
+
+
 def quant_symmetric(data):
     """Weights: xlstm_quant_symmetric."""
-    m = max(abs(v) for v in data)
-    return (m / 127.0 if m > 0 else 1.0), 0
+    m = f32(max(abs(f32(v)) for v in data))
+    return (f32(m / 127.0) if m > 0 else 1.0), 0
 
 
 def quant_asymmetric(data):
     """Activations: xlstm_quant_asymmetric. The range is stretched to include
     zero, so a zero-padded input quantizes to the zero point exactly."""
-    lo, hi = min(min(data), 0.0), max(max(data), 0.0)
-    if hi - lo < 1e-10:
-        return 1.0 / 255.0, 0
-    scale = (hi - lo) / 255.0
-    return scale, max(-128, min(127, round(-128.0 - lo / scale)))
+    lo = f32(min(min(f32(v) for v in data), 0.0))
+    hi = f32(max(max(f32(v) for v in data), 0.0))
+    rng = f32(hi - lo)
+    if rng < f32(1e-10):
+        return f32(1.0 / 255.0), 0
+    scale = f32(rng / 255.0)
+    zp = roundf(f32(-128.0 - f32(lo / scale)))
+    return scale, max(-128, min(127, int(zp)))
 
 
 def quant_symmetric_s16(data, headroom=STATE_HEADROOM):
     """States: xlstm_quant_symmetric_s16. Strictly symmetric - no zero point
     appears anywhere in slstm_s8.c or mlstm_s8.c."""
-    m = max(abs(v) for v in data)
-    return (m * headroom / 32767.0 if m > 0 else 1.0), 0
+    m = f32(max(abs(f32(v)) for v in data))
+    return (f32(f32(m * headroom) / 32767.0) if m > 0 else 1.0), 0
 
 
 def quantize_s8(data, scale, zero_point=0):
-    """Python's round() is half-to-even, which is what produced the integers
-    in reference_data.json. C's roundf() is half-away-from-zero, so a value
-    landing exactly on .5 can differ by one LSB from a kernel that quantizes
-    at runtime. Quantize once, here, and the question does not arise."""
-    return [max(-128, min(127, round(v / scale) + zero_point)) for v in data]
+    """xlstm_quantize_f32_to_s8: float32 divide, roundf, add the zero point,
+    clamp. Quantize once, here, and a kernel quantizing at runtime lands on the
+    same integers."""
+    return [max(-128, min(127, int(roundf(f32(f32(v) / f32(scale)))) + zero_point))
+            for v in data]
 
 
 def quantize_bias(b, w_scale, x_scale):
     """int32, at the accumulator's own scale, and deliberately not clipped:
     a bias that does not fit int32 is a broken calibration, not a saturation."""
-    return [round(v / (w_scale * x_scale)) for v in b]
+    scale = f32(f32(w_scale) * f32(x_scale))
+    return [int(roundf(f32(f32(v) / scale))) for v in b]
 
 
 def calibrate(cell, t, headroom=STATE_HEADROOM):
@@ -115,7 +139,7 @@ def calibrate(cell, t, headroom=STATE_HEADROOM):
     y_scale, y_zp = quant_asymmetric(t["y"])
     out = {"W_scale": w_scale, "x_scale": x_scale, "x_zero_point": x_zp,
            "y_scale": y_scale, "y_zero_point": y_zp,
-           "b_scale": w_scale * x_scale,
+           "b_scale": f32(w_scale * x_scale),
            "n_scale": quant_symmetric_s16(t["n"], headroom)[0]}
     if cell == "slstm":
         out["R_scale"] = quant_symmetric(t["R"])[0]
@@ -149,8 +173,11 @@ def emit_params(cell, cal):
 # That file stores round(v, 8), so a re-derived scale differs from the
 # recorded one by the rounding of the tensor's largest element. The tolerances
 # below are exactly that, pushed through each formula - EPS through max/127,
-# range/255, max*headroom/32767 - not a fitted number. Zero points and every
-# quantized integer must match exactly.
+# range/255, max*headroom/32767 - not a fitted number. They already cover the
+# float32 rounding f32() applies on top (138 of the 142 scales come back
+# bit-identical, and the worst of the other four sits at 0.75 of its bound), so
+# no float32 term is added to them. Zero points and every quantized integer
+# must match exactly.
 # ---------------------------------------------------------------------------
 
 EPS = 5e-9

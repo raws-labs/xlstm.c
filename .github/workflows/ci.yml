@@ -107,7 +107,7 @@ jobs:
   # Host backends only. This says nothing about cortexm or esp performance.
   perf:
     runs-on: ubuntu-latest
-    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:4ec1ec453865
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:95b5e2c360a6
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -123,7 +123,7 @@ jobs:
   # alignment, accumulator width) before they reach a real target.
   cross-neon:
     runs-on: ubuntu-latest
-    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:4ec1ec453865
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:95b5e2c360a6
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -149,7 +149,7 @@ jobs:
   # about cycles. See the make target.
   cross-cortexm:
     runs-on: ubuntu-latest
-    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:4ec1ec453865
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:95b5e2c360a6
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -186,7 +186,7 @@ jobs:
   # run does and does not assert.
   emulated-esp:
     runs-on: ubuntu-latest
-    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:4ec1ec453865
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:95b5e2c360a6
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -210,9 +210,34 @@ jobs:
   # assert.
   emulated-helium:
     runs-on: ubuntu-latest
-    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:4ec1ec453865
+    container: ghcr.io/${{ github.repository_owner }}/xlstm-c-toolchain:95b5e2c360a6
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Cross-compile and run under qemu-system-arm
         run: make test-helium
+
+  # The mutation battery, host backends only. Every other job here proves the
+  # suite passes; this one proves it can still fail. It injects each known
+  # defect in turn, rebuilds, and requires the assertion recorded for that
+  # defect to fire - which is the only check on whether the INT8 bounds still
+  # bound anything. A widened tolerance fails by making a gate quietly stop
+  # failing, and nothing else in this workflow can see that.
+  #
+  # ref and sse2, not all six. Those two carry every entry that exercises a
+  # tolerance, a bound or a state comparison, which is what needs a gate on
+  # every change. The cross entries (neon, cortexm, esp, helium) exercise the
+  # fast-path counters instead, and the four jobs above already run those
+  # gates unmutated on each of those backends. Host-only is about 1 minute
+  # where all six are about 8.
+  #
+  # It edits files in the working tree, which is why `make mutants` is not part
+  # of `make test`. A CI checkout is discarded either way, and the battery
+  # restores every file on exit, on failure and on interrupt.
+  mutants:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mutation battery
+        run: make mutants MUTANT_BACKENDS="ref sse2"

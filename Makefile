@@ -670,6 +670,16 @@ bench-sse2:
 #   - Host backends only (ref, sse2). cortexm and esp performance is a property
 #     of those cores and is measured on hardware, not here.
 #
+# callgrind can simulate a data cache, and that was tried here to close the
+# first limit. It does not survive this gate's portability requirement. The
+# miss counts move with the size of the environment block, because the kernel
+# copies argv and envp onto the initial stack and every buffer shifts against a
+# cache line: one unchanged binary measured 7654, 7853 and 6457 under three
+# environments differing only in padding. Running under `env -i` fixes that and
+# is not enough - the same baseline recorded here came back +4.23% and +4.96%
+# on a CI runner at H=128, against a tolerance of 2%. Ir was +0.00% on every
+# row of the same run. Do not re-add it without a way to pin what is left.
+#
 # The kernels call expf/tanhf/logf, and glibc binds those to an FMA or a plain
 # SSE implementation depending on the CPU it finds. Measured, that choice alone
 # moves a count by up to 2.8%, which is enough to fail a tight gate on nothing
@@ -705,7 +715,11 @@ PERF_BACKENDS ?= ref sse2
 # came back equal would mean the switch had stopped reaching those kernels.
 PERF_GATES    ?= exact approx
 PERF_KERNELS  ?= slstm_f32 mlstm_f32 slstm_s8 mlstm_s8
-PERF_WIDTHS   ?= 16 64
+# 16 and 64 were the whole gate; make bench sweeps to 128, so a regression that
+# only shows at the widest width it reports was gated nowhere. It is not free:
+# 128 takes this target from 25 s to 138 s, most of it the mLSTM kernels, whose
+# work is quadratic in the width.
+PERF_WIDTHS   ?= 16 64 128
 PERF_STEPS    ?= 200
 PERF_TOL      ?= 2.0
 PERF_TOL_FAST ?= 5.0
@@ -715,7 +729,7 @@ VALGRIND      ?= valgrind
 # once per backend; only xlstm_simd.o actually differs, but the objects are
 # cheap and a stale one would silently measure the wrong backend.
 define perf-measure
-	command -v $(VALGRIND) >/dev/null 2>&1 || { \
+	vg=$$(command -v $(VALGRIND)) || { \
 		echo "perf: $(VALGRIND) not found - apt-get install valgrind" >&2; exit 1; }; \
 	for b in $(PERF_BACKENDS); do \
 	  for g in $(PERF_GATES); do \
@@ -725,7 +739,7 @@ define perf-measure
 		for k in $(PERF_KERNELS); do \
 			sym=$${k%%_*}_step_$${k#*_}; \
 			for h in $(PERF_WIDTHS); do \
-				ir=$$($(PERF_ENV) $(VALGRIND) --tool=callgrind \
+				ir=$$($(PERF_ENV) $$vg --tool=callgrind \
 					--callgrind-out-file=/dev/null \
 					--collect-atstart=no --toggle-collect=$$sym \
 					$(BUILD)/xlstm_bench $$k $$h $(PERF_STEPS) 2>&1 \
@@ -817,6 +831,8 @@ perf-baseline:
 	  echo "# or esp, whose performance is a property of those cores and is measured on"; \
 	  echo "# hardware. They are also a proxy for time and not time itself: a change that"; \
 	  echo "# holds the instruction count and worsens cache locality does not appear here."; \
+	  echo "# Simulating a data cache was tried and does not reproduce across machines -"; \
+	  echo "# see the note above the gate in the Makefile."; \
 	  echo "#"; \
 	  echo "# Counts are specific to the compiler that produced them - gcc and clang differ"; \
 	  echo "# by up to 50% on these loops - so make perf refuses to compare across a change"; \
@@ -839,10 +855,12 @@ perf-baseline:
 # failing, and this is the only thing here that detects it - so run it after
 # any change to tolerances, bounds, or generate_reference.py.
 #
-# Not in CI, deliberately: it edits files in the working tree, which belongs
-# in a run someone chose to start. It restores them on exit, on failure and
-# on interrupt; a run killed outright leaves .mutants-backup/, and the next
-# run restores from that before doing anything else.
+# It edits files in the working tree, which is why it is not part of `make
+# test`. It restores them on exit, on failure and on interrupt; a run killed
+# outright leaves .mutants-backup/, and the next run restores from that before
+# doing anything else. A CI checkout is discarded either way, so CI runs the
+# host pair - see the mutants job in .github/workflows/ci.yml for why those two
+# and not all six.
 #
 # All six backends, not just the two that run on the build host. The four
 # cross-compiled ones are driven through their own test- target above, so each
@@ -915,7 +933,10 @@ check-tools:
 
 # --- Cleanup ---
 
+# .mutants-backup/ is deliberately NOT removed here. test/mutants.py owns it,
+# restores from it on exit, on failure and on interrupt, and calls `make clean`
+# itself between backends: removing it here deletes the working-tree copies of
+# src/*.c out from under a live run, which then cannot put them back.
 clean:
 	@rm -rf $(BUILD)
-	@rm -rf .mutants-backup
 	@rm -f test/adapters/tflm/*.h

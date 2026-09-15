@@ -148,7 +148,9 @@ static void PrepareMlstmS8(const XlstmRefCase* tc, MlstmS8Setup* s) {
  * this repo - the f32 suite does not execute it at all. */
 static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
                               float* m_out, float* C_out, float* n_out,
-                              float* output_out) {
+                              float* output_out, int8_t* output_q_out,
+                              int16_t* C_q_out, int16_t* n_q_out,
+                              float* y_scale_out) {
     /* DQ sizes n, DV sizes y and the output, and C is their product. */
     const int DQ = tc->DQ, DV = tc->DV, T = tc->T, I = tc->I;
 
@@ -199,6 +201,17 @@ static float EvalMlstmS8Case(const XlstmRefCase* tc, float* y_out,
     if (output_out) {
         for (int i = 0; i < T * DV; ++i) output_out[i] = output_local[i];
     }
+    if (output_q_out) {
+        for (int i = 0; i < T * DV; ++i) output_q_out[i] = output[i];
+    }
+    if (C_q_out) {
+        for (int i = 0; i < DQ * DV; ++i) C_q_out[i] = C[i];
+    }
+    if (n_q_out) {
+        for (int i = 0; i < DQ; ++i) n_q_out[i] = n_state[i];
+    }
+
+    if (y_scale_out) *y_scale_out = s.params.y_quant.scale;
 
     float max_err = 0.0f;
     for (int j = 0; j < DV; ++j) {
@@ -258,7 +271,12 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
     /* The return value is the case-wide max error, which only
      * TestMlstmS8QuantizationBound's summary uses; the per-channel and
      * per-tensor assertions below are what decide this case. */
-    (void)EvalMlstmS8Case(tc, y_f, m_f, C_f, n_f, output_f);
+    static int8_t output_q[3 * XLSTM_TEST_MAX_H];
+    static int16_t C_q[XLSTM_TEST_MAX_H * XLSTM_TEST_MAX_H];
+    static int16_t n_q[XLSTM_TEST_MAX_H];
+    static float y_scale;
+    (void)EvalMlstmS8Case(tc, y_f, m_f, C_f, n_f, output_f, output_q, C_q, n_q,
+                         &y_scale);
     bool ok = true;
     ok &= ExpectFinite("y", y_f, tc->DV);
     ok &= ExpectFinite("m", m_f, 1);
@@ -287,11 +305,15 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
         /* Reported, not hidden: these are elements whose golden is exactly
          * zero or whose honest measured error already spans their whole
          * dynamic range, so no bound can be both non-vacuous and free of
-         * false failures. See compute_state_tol_per_elem. They are still
-         * covered by the drift detector below, which needs no bound. */
+         * false failures. See compute_state_tol_per_elem. What covers them
+         * is not a bound at all: ExpectStateCodes compares the INT16 state
+         * as integers, which does not ask how large an element is, and the
+         * drift detector below needs no bound either. m is the exception -
+         * it stays float32, so it has no integer to compare and the drift
+         * detector is the whole of its cover. */
         std::printf("  note: %d of %d exit-state elements have no usable bound "
-                    "(unassertable, see compute_state_tol_per_elem; still "
-                    "drift-checked)\n",
+                    "(unassertable, see compute_state_tol_per_elem; C/n are "
+                    "still compared as integers, m is drift-checked)\n",
                     unasserted, tc->DQ * tc->DV + tc->DQ + 1);
     }
 
@@ -387,10 +409,19 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
      * kFloorEps + kRelTol: see kFloorEps in test_util.h. Without them a
      * channel whose floor is exactly 0.0 demands bit-exact float output. */
     /* Vacuity, as test_util.h's per-element state check does for the state
-     * path. Both output checks run, so the binding bound is the tighter of
-     * the two; a channel whose largest golden magnitude sits under it is not
-     * asserted by either, and zeroing it would pass. Report rather than
-     * fail: a genuinely near-zero channel is a property of the case, and the
+     * path, and on TWO conditions rather than one. Both output checks run,
+     * so the binding bound is the tighter of the two, and a channel under it
+     * is unasserted by the bounds - but ExpectOutputCodes compares the INT8
+     * codes, and a channel carrying half a code or more of signal cannot be
+     * zeroed without moving one. A channel is genuinely unasserted only
+     * under both, and then for a reason no assertion can repair: this case's
+     * INT8 grid does not separate it from the zero point.
+     *
+     * Measured, by zeroing each of the five channels the single condition
+     * used to name. Test1 ch[0] at 14.5 codes, RectM4x12 ch[8] at 5.1 and
+     * CapM8 ch[0] at 3.5 all fail on output_q; SweepS64 ch[15] at 0.37 and
+     * SweepM64 ch[63] at 0.20 leave the whole suite green. Report rather
+     * than fail: a channel below the grid is a property of the case, and the
      * count is what makes it visible. */
     if (tc->tol_s8_floor_per_channel) {
         int vacuous = 0;
@@ -399,11 +430,15 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
             float b = tc->tol_s8_floor_per_channel[j] * 1.5f + kFloorEps
                       + kRelTol * channel_ref[j];
             float binding = a < b ? a : b;
-            if (channel_ref[j] <= binding) {
+            /* In INT8 codes, which is what decides whether zeroing the
+             * channel is visible to ExpectOutputCodes. */
+            float codes = channel_ref[j] / y_scale;
+            if (channel_ref[j] <= binding && codes < 0.5f) {
                 std::printf("  note: %s ch[%d] is unasserted - largest golden "
-                            "magnitude %.8e is within the binding bound %.8e, so "
-                            "zeroing this channel would pass\n",
-                            tc->name, j, channel_ref[j], binding);
+                            "magnitude %.8e is within the binding bound %.8e "
+                            "AND is %.2f of one INT8 code, so zeroing this "
+                            "channel moves no integer either\n",
+                            tc->name, j, channel_ref[j], binding, codes);
                 ++vacuous;
             }
         }
@@ -428,6 +463,18 @@ static bool RunMlstmS8Case(const XlstmRefCase* tc) {
             }
         }
     }
+
+    /* Last, and after every bound above, on purpose. This one only
+     * reports that a code moved; the checks above say which tensor and
+     * by how much, and test/mutants.py records the first FAIL line as
+     * the catcher. Running it first would take that attribution away
+     * from the checks that earned it. */
+    if (tc->expected_output_q)
+        ok &= ExpectOutputCodes(tc->expected_output_q, output_q, tc->T * tc->DV);
+    if (tc->expected_state_q)
+        ok &= ExpectStateCodes("C", tc->expected_state_q, C_q, tc->DQ * tc->DV);
+    if (tc->expected_n_q)
+        ok &= ExpectStateCodes("n", tc->expected_n_q, n_q, tc->DQ);
     return ok;
 }
 
@@ -449,7 +496,8 @@ static bool TestMlstmS8QuantizationBound() {
                         tc->name, tc->B);
             return false;
         }
-        float err = EvalMlstmS8Case(tc, y_f, NULL, NULL, NULL, NULL);
+        float err = EvalMlstmS8Case(tc, y_f, NULL, NULL, NULL, NULL, NULL,
+                                    NULL, NULL, NULL);
         char shape[16];
         std::snprintf(shape, sizeof shape, "%dx%d", tc->DQ, tc->DV);
         std::printf("  %-10s %-7s max abs error vs f32: %.6f (worst-channel bound: %.4f)\n",

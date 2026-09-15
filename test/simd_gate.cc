@@ -71,8 +71,12 @@ XG_ALL(vecmat_f32);
 namespace {
 
 const int kMaxRows = 20;
-const int kMaxCols = 64;
-const int kMaxH = 64;
+/* 128 and not 64: make bench sweeps H up to 128 (test/xlstm_bench.cc), and the
+ * golden table stops at 64, so the shapes below are the only thing that checks
+ * a contract function above that width. The cells themselves are per-unit
+ * loops - these four are where width decides which code runs. */
+const int kMaxCols = 128;
+const int kMaxH = 128;
 
 /* 16-byte aligned, so +1, +2 and +3 floats are exactly the other three
  * alignments a 128-bit access can see, and 4 floats longer than the largest
@@ -218,6 +222,8 @@ bool TestMatvecF32(void) {
             {20, 16, 1, 0}, {20, 64, 1, 0},
             {1, 5, 1, 1},  {7, 15, 1, 1}, {17, 17, 1, 1},
             {20, 7, 1, 1}, {20, 31, 1, 1}, {20, 63, 1, 1},
+            /* Above the golden table's widest case. */
+            {20, 128, 1, 0}, {20, 127, 1, 1},
         };
     const int kCaseCount = (int)(sizeof kCases / sizeof kCases[0]);
     bool ok = true;
@@ -309,6 +315,8 @@ bool TestMatvecS8(void) {
             {20, 17, 254, 1, 1},   {20, 17, -254, 1, 1},
             {20, 17, 255, 1, 1},   {20, 17, -255, 1, 1},
             {20, 17, 32640, 1, 1}, {20, 17, -32640, 1, 1},
+            /* Above the golden table's widest case. */
+            {20, 128, 0, 1, 0}, {20, 127, 0, 1, 1},
         };
     const int kCaseCount = (int)(sizeof kCases / sizeof kCases[0]);
     bool ok = true;
@@ -404,6 +412,8 @@ bool TestRank1(void) {
         {5, 13, 1, 1},  {13, 5, 1, 1},  {3, 16, 1, 0}, {16, 3, 0, 1},
         {8, 12, 1, 0},  {12, 8, 1, 0},  {1, 7, 1, 1},  {7, 1, 0, 1},
         {17, 4, 1, 0},  {4, 17, 1, 1},  {2, 64, 1, 0}, {64, 2, 0, 1},
+        /* Above the golden table's widest case, square and with a tail. */
+        {128, 128, 1, 0}, {127, 127, 1, 1}, {128, 64, 1, 0}, {64, 128, 1, 0},
     };
     /* One pair with both gates ordinary, one with a tiny i_gate, so the two
      * products differ in exponent by enough that the order they are combined
@@ -496,6 +506,9 @@ bool TestVecmat(void) {
             {1, 8, 1, 0},  {3, 8, 1, 0},           /* fewer rows than lanes */
             {20, 5, 1, 1}, {20, 7, 1, 1}, {20, 17, 1, 1}, {20, 31, 1, 1},
             {1, 17, 1, 1}, {17, 17, 1, 1},
+            /* Above the golden table's widest case. rows stays inside
+             * kMaxRows: vecmat reads M from g_M, which is kMaxRows*kMaxCols. */
+            {20, 128, 1, 0}, {20, 127, 1, 1},
         };
     const int kCaseCount = (int)(sizeof kCases / sizeof kCases[0]);
     bool ok = true;

@@ -181,11 +181,17 @@ SWEEP_SIZES = [1, 8, 16, 17, 64]
 # measured floors ship in reference_data.h and the runners assert the real
 # kernel against floor*1.5 (output) and floor*3.0 (state). Measured over this
 # table, that check is tighter than the per-channel bound on 258 of 269 output
-# channels and 4982 of 5456 state elements, and it is the only assertion
-# covering the 153 elements that have no usable bound at all. It is also what
-# turns this file drifting out of sync with the kernel into a loud failure.
-# The same replica supplies reference_data.json's expected_*_q integers, which
-# the four adapter suites assert bit-exactly.
+# channels and 4982 of 5456 state elements. It is also what turns this file
+# drifting out of sync with the kernel into a loud failure.
+#
+# The same replica supplies every expected_*_q integer. reference_data.json
+# carries all of them and the four adapter suites assert them bit-exactly;
+# reference_data.h carries the output codes and the INT16 exit state, which the
+# two INT8 unit suites assert the same way. Those integer comparisons are what
+# covers the 153 elements with no usable bound, and they cover them better than
+# a floor does: an integer comparison does not ask how large an element is.
+# Measured, with the mutation in mutants.py's G1 entry: zeroing one of those
+# elements with ExpectStateCodes removed leaves the whole suite green.
 #
 # perturbed_err is the same trajectory under a persistent 1.001x factor on the
 # pre-requantization y at every timestep: a backend whose activations are not
@@ -206,21 +212,63 @@ SWEEP_SIZES = [1, 8, 16, 17, 64]
 # injects the defects these bounds exist to catch and fails if one now passes.
 # ============================================================================
 
+# The C quantization layer (src/xlstm_quant.c) is float32 end to end, and the
+# target it runs on has no wider type to fall back on. The four functions below
+# and _c_quantize are float32 too, for one reason: precision picks a branch
+# here, and no tolerance can absorb a branch.
+#
+# Test1 is the case that showed it. Its input is [1.0, 0.5], so the range is
+# exactly 1.0 and xlstm_quant_asymmetric returns 1.0f/255.0f. 1/255 is not
+# representable in binary and float32 rounds it UP, to 0.003921568859368563, so
+# roundf(0.5f / scale) is roundf(127.49999237060547) = 127 and x_q[1] is -1. In
+# float64 the same scale is 0.00392156862745098, 0.5 / scale is exactly 127.5,
+# and the rounded value is 128, so x_q[1] is 0. That one LSB moves acc_wx[0]
+# from 41010 to 41100, i_raw from 1.2554419040679932 to 1.2583676196328584, and
+# the output code from 72 to 73.
+#
+# The gate math below stays float64 on purpose: it is the reference the
+# tolerances are measured against, its float32 error is what they exist to
+# absorb, and there is no float32 expf to be bit-exact with anyway.
+_F32 = np.float32
+
+
+def _c_roundf(v):
+    """C roundf's rule: half away from zero, where numpy's round is half to even.
+
+    Evaluated in float64 so the comparison against .5 is the exact one.
+    floor(v + 0.5f) in float32 is not roundf: it rounds 0.49999997f up.
+    Applied to a float32 operand it is roundf itself; applied to the replica's
+    float64 state quotients it is the rule xlstm_round_clamp_i32 follows.
+    """
+    d = np.asarray(v, dtype=np.float64)
+    return np.where(d >= 0.0, np.floor(d + 0.5), np.ceil(d - 0.5))
+
+
+def _c_quantize(a, scale, zp, lo, hi):
+    """xlstm_quantize_f32_to_s{8,16,32}: float32 divide, roundf, add zp, clamp."""
+    q = np.asarray(a, dtype=_F32) / _F32(scale)
+    v = (_c_roundf(q).astype(_F32) + _F32(zp)).astype(_F32)
+    return np.clip(v.astype(np.float64), lo, hi).astype(np.int64)
+
+
 def _quant_sym8(a):
-    m = float(np.max(np.abs(a)))
-    return (m / 127.0 if m > 0 else 1.0), 0
+    """xlstm_quant_symmetric."""
+    m = _F32(np.max(np.abs(np.asarray(a, dtype=_F32))))
+    return (float(m / _F32(127.0)) if m > 0 else 1.0), 0
 
 
 def _quant_asym(a):
-    mn = min(float(a.min()), 0.0)
-    mx = max(float(a.max()), 0.0)
-    rng = mx - mn
-    if rng < 1e-10:
-        return 1.0 / 255.0, 0
-    scale = rng / 255.0
-    zp = round(-128.0 - mn / scale)
+    """xlstm_quant_asymmetric."""
+    a32 = np.asarray(a, dtype=_F32)
+    mn = _F32(min(_F32(a32.min()), _F32(0.0)))
+    mx = _F32(max(_F32(a32.max()), _F32(0.0)))
+    rng = _F32(mx - mn)
+    if rng < _F32(1e-10):
+        return float(_F32(1.0) / _F32(255.0)), 0
+    scale = _F32(rng / _F32(255.0))
+    zp = int(_c_roundf(_F32(_F32(-128.0) - _F32(mn / scale))))
     zp = max(-128, min(127, zp))
-    return scale, zp
+    return float(scale), zp
 
 
 # The headroom test/{slstm,mlstm}_s8_test.cc pass to xlstm_quant_symmetric_s16
@@ -231,14 +279,18 @@ GENERATOR_HEADROOM = 4.0
 
 
 def _quant_sym16_headroom(a, headroom=GENERATOR_HEADROOM):
-    m = float(np.max(np.abs(a)))
-    scale = (m * headroom / 32767.0) if m > 0 else 1.0
+    """xlstm_quant_symmetric_s16."""
+    m = _F32(np.max(np.abs(np.asarray(a, dtype=_F32))))
+    scale = float(_F32(m * _F32(headroom)) / _F32(32767.0)) if m > 0 else 1.0
     return scale, 0
 
 
 def _qs8(a, scale, zp):
-    v = np.round(a / scale) + zp
-    return np.clip(v, -128, 127).astype(np.int64)
+    return _c_quantize(a, scale, zp, -128, 127)
+
+
+def _qs32(a, scale):
+    return _c_quantize(a, scale, 0, -2147483648, 2147483647)
 
 
 def _t2n(t):
@@ -306,9 +358,12 @@ def _slstm_int8_trace(tc, perturb=1.0):
     `state` is the dequantized exit state {"state": c[H], "n": n[H],
     "m": m[H]} - the buffers the C kernel leaves for the caller, in the units
     the INT8 test reads them back in. `quantized` is the same trajectory and
-    exit state as raw integers: measured over every case here they match the
-    C kernel to 0 LSB on output/y/c/n, so the adapter suites assert them
-    directly instead of against a tolerance (see generate_json).
+    exit state as raw integers, which the adapter suites assert directly
+    instead of against a tolerance (see generate_json). `output` is the one
+    of the four that the unit suites also check, every case, every timestep,
+    bit-exactly: it is emitted as k<name>_expected_output_q and compared in
+    ExpectOutputCodes. y, c and n are checked only through their dequantized
+    bounds here, so the adapter suites are what covers them as integers.
 
     perturb applies a persistent multiplicative factor to y before
     requantization, standing in for a backend with non-bit-identical
@@ -327,15 +382,15 @@ def _slstm_int8_trace(tc, perturb=1.0):
     Wq = _qs8(W, w_scale, 0)
     Rq = _qs8(R, r_scale, 0)
     xq = _qs8(x, x_scale, x_zp)
-    b_scale = w_scale * x_scale
-    bq = np.round(b / b_scale).astype(np.int64)
+    wx_scale = float(_F32(w_scale) * _F32(x_scale))
+    b_scale = wx_scale   # the kernel quantizes the bias at the input*weight scale
+    bq = _qs32(b, b_scale)
 
     c_q = np.zeros(H, dtype=np.int64)
     n_q = np.zeros(H, dtype=np.int64)
     m_state = np.zeros(H)
     y_q = np.zeros(H, dtype=np.int64)
-    wx_scale = w_scale * x_scale
-    ry_scale = r_scale * y_scale
+    ry_scale = float(_F32(r_scale) * _F32(y_scale))
     out_computed = np.zeros((T, H))
     out_q = np.zeros((T, H), dtype=np.int64)
     for t in range(T):
@@ -359,10 +414,10 @@ def _slstm_int8_trace(tc, perturb=1.0):
         n_new = f_gate * n_prev + i_gate
         y_new = o_gate * (c_new / np.maximum(n_new, 1e-6))
         y_new = y_new * perturb
-        c_q = np.clip(np.round(c_new / c_scale), -32768, 32767).astype(np.int64)
-        n_q = np.clip(np.round(n_new / n_scale), -32768, 32767).astype(np.int64)
+        c_q = np.clip(_c_roundf(c_new / c_scale), -32768, 32767).astype(np.int64)
+        n_q = np.clip(_c_roundf(n_new / n_scale), -32768, 32767).astype(np.int64)
         m_state = m_new
-        y_q = np.clip(np.round(y_new / y_scale + y_zp), -128, 127).astype(np.int64)
+        y_q = np.clip(_c_roundf(y_new / y_scale + y_zp), -128, 127).astype(np.int64)
         out_computed[t] = y_scale * (y_q - y_zp)
         out_q[t] = y_q
     state = {"state": c_q.astype(np.float64) * c_scale,
@@ -393,7 +448,8 @@ def _mlstm_int8_trace(tc, perturb=1.0):
 
     Wq = _qs8(W, w_scale, 0)
     xq = _qs8(x, x_scale, x_zp)
-    bq = np.round(b / (w_scale * x_scale)).astype(np.int64)
+    wx_scale = float(_F32(w_scale) * _F32(x_scale))
+    bq = _qs32(b, wx_scale)
 
     C_f = np.zeros((DQ, DV))
     n_f = np.zeros(DQ)
@@ -406,7 +462,8 @@ def _mlstm_int8_trace(tc, perturb=1.0):
     for t in range(T):
         xt = xq[0, t, :]
         acc = Wq.astype(np.int64) @ (xt - x_zp)
-        preact = acc.astype(np.float64) * w_scale * x_scale + bq.astype(np.float64) * w_scale * x_scale
+        preact = (acc.astype(np.float64) * wx_scale
+                  + bq.astype(np.float64) * wx_scale)
         q = preact[0:DQ]; k = preact[DQ:2*DQ]; v = preact[2*DQ:2*DQ+DV]
         i_raw = preact[2*DQ+DV]; f_raw = preact[2*DQ+DV+1]
         o_raw = preact[2*DQ+DV+2:2*DQ+2*DV+2]
@@ -421,10 +478,10 @@ def _mlstm_int8_trace(tc, perturb=1.0):
         f_gate = np.exp(log_f_plus_m - m_new)
         i_gate = np.exp(i_raw - m_new)
         C_new = f_gate * C_f + i_gate * np.outer(k, v)
-        C_q = np.clip(np.round(C_new / C_scale), -32768, 32767)
+        C_q = np.clip(_c_roundf(C_new / C_scale), -32768, 32767)
         C_f = C_scale * C_q
         n_new = f_gate * n_f + i_gate * k
-        n_q = np.clip(np.round(n_new / n_scale), -32768, 32767)
+        n_q = np.clip(_c_roundf(n_new / n_scale), -32768, 32767)
         n_f = n_scale * n_q
         m_state[0] = m_new
         qn = q @ n_f
@@ -432,7 +489,7 @@ def _mlstm_int8_trace(tc, perturb=1.0):
         qC = q @ C_f
         y_new = (1.0 / (1.0 + np.exp(-o_raw))) * (qC / denom)
         y_new = y_new * perturb
-        yq = np.clip(np.round(y_new / y_scale + y_zp), -128, 127)
+        yq = np.clip(_c_roundf(y_new / y_scale + y_zp), -128, 127)
         out_computed[t] = y_scale * (yq - y_zp)
         out_q[t] = yq.astype(np.int64)
     state = {"state": C_f.flatten().copy(), "n": n_f.copy(), "m": m_state.copy()}
@@ -1074,6 +1131,40 @@ def build_cases():
     slstm_cases.append(head0)
     slstm_cases.append(head1)
 
+    # --- a large stabilizer that MOVES ------------------------------------
+    #
+    # Test3 and MTest3 are the only cases with |m| above 10, and both are T=1:
+    # they prove one large i_raw does not overflow and nothing about what m
+    # does next. Every case where m evolves has |m| below 8. StabS is the one
+    # that does both - i_raw 20, 30, -20 against f_raw -5, so log_sigmoid pulls
+    # m down about 5 per step while max() pulls it up to each new i_raw, and m
+    # runs 20 -> 30 -> 24.99. The falling step is the one where the forget
+    # branch owns m_new, f_gate is 1, and i_gate underflows to exp(-45). Its
+    # INT8 state is quantized in that regime too, at 0.031 of error against a
+    # 0.2 bound.
+    #
+    # Be clear about what this is not. Five mutations of the stabilizer - drop
+    # the max, forget log_sigmoid(f_raw), pin m to i_raw, forbid m from
+    # falling, and replace exp(-m) with a constant - are each caught by eight
+    # to thirteen of the cases already here, StabS among them but never alone.
+    # The gap it fills is a regime, not a defect the table was missing.
+    W_stab = torch.tensor([
+        [20.0, 0.0], [20.0, 0.0],     # i_raw = 20 * x0
+        [0.0, -5.0], [0.0, -5.0],     # f_raw = -5 * x1
+        [0.0, 0.7],  [0.0, -0.7],     # z_raw
+        [0.4, 0.0],  [-0.4, 0.0],     # o_raw
+    ])
+    x_stab = torch.tensor([[[1.0, 1.0], [1.5, 1.0], [-1.0, 1.0]]])
+    output, y, c, n, m = run_slstm(W_stab, torch.zeros(8, 2), torch.zeros(8),
+                                   x_stab)
+    slstm_cases.append(dict(
+        name="StabS", comment="m rises then falls over three timesteps",
+        note="i_raw 20 -> 30 -> -20 against f_raw -5: m 20 -> 30 -> 24.99",
+        B=1, T=3, I=2, H=2,
+        W=W_stab, R=torch.zeros(8, 2), b=torch.zeros(8), input=x_stab,
+        y=y, c=c, n=n, m=m, output=output))
+
+
     # Every INT8 bound and floor is derived here rather than hand-picked per
     # case: two code reviews established that a case-wide constant cannot keep
     # every channel's ratio below 1.0 when a case spans three orders of
@@ -1125,6 +1216,21 @@ def _emit_case(f, tc, state_key, has_R):
     f.write(f"inline const float k{n}_expected_m[] = {{{fmt(tc['m'])}}};\n")
     if tc["output"] is not None:
         f.write(f"inline const float k{n}_expected_output[] = {{{fmt(tc['output'])}}};\n")
+    # The INT8 codes the kernel must emit, bit for bit. The replica computes
+    # them anyway for the tolerance floors; asserting them is what turns a
+    # sub-LSB divergence between this file and the kernel into a failure
+    # instead of something the dequantized bounds absorb.
+    cell = "s" if state_key == "c" else "m"
+    q = _trace(tc, cell)[4]
+    oq = ", ".join(str(int(v)) for v in np.asarray(q["output"]).flatten())
+    f.write(f"inline const int8_t k{n}_expected_output_q[] = {{{oq}}};\n")
+    # The INT16 exit state, on the same argument. It is what reaches the 153
+    # elements whose dequantized bound is XLSTM_STATE_TOL_UNASSERTABLE: those
+    # have no bound that is both non-vacuous and free of false failures, and
+    # an integer comparison needs neither.
+    for key, name in (("c" if cell == "s" else "C", "state_q"), ("n", "n_q")):
+        vals = ", ".join(str(int(v)) for v in np.asarray(q[key]).flatten())
+        f.write(f"inline const int16_t k{n}_expected_{name}[] = {{{vals}}};\n")
     if "tol_s8_per_channel" in tc:
         vals = ", ".join(f"{v:.8f}f" for v in tc["tol_s8_per_channel"])
         f.write(f"inline const float k{n}_tol_s8_per_channel[] = {{{vals}}};\n")
@@ -1162,6 +1268,19 @@ CASE_STRUCT = """typedef struct {
     const float* expected_n;
     const float* expected_m;
     const float* expected_output; /* [T*H], NULL if not stored */
+    const int8_t* expected_output_q; /* [T*H] for sLSTM, [T*DV] for mLSTM: the
+                                      * INT8 codes generate_reference.py's replica
+                                      * produces. Asserted bit-exactly, so a kernel
+                                      * or calibration change that moves a code by
+                                      * one LSB fails here rather than hiding under
+                                      * the dequantized per-channel bounds. */
+    /* The INT16 exit state as integers, same argument as expected_output_q and
+     * the same replica. state_q is [H] for sLSTM c and [DQ*DV] for mLSTM C, n_q
+     * is [H] or [DQ]. These are what cover the elements whose per-element bound
+     * is XLSTM_STATE_TOL_UNASSERTABLE. m has no entry here: it stays float32 in
+     * the kernel, so there is no integer to compare. */
+    const int16_t* expected_state_q;
+    const int16_t* expected_n_q;
     float tol_f32;
     float tol_s8;                 /* max(tol_s8_per_channel); printed alongside the
                                     * measured error in TestS8QuantizationBound /
@@ -1255,6 +1374,8 @@ def _emit_table(f, cases, table_name, state_key, has_R):
             f'{_cfloat(tc.get("gate_soft_cap", 0.0))}, '
             f'k{src}_W, {R}, k{src}_b, k{n}_input, k{n}_expected_y, {state}, '
             f'k{n}_expected_n, k{n}_expected_m, {out}, '
+            f'k{n}_expected_output_q, k{n}_expected_state_q, '
+            f'k{n}_expected_n_q, '
             f'{_cfloat(tc.get("tol_f32", 1e-5))}, '
             f'{_cfloat(tc.get("tol_s8", 0.10))}, '
             f'{per_channel}, {floor}, {st_tol}, {n_tol}, {m_tol}, '
@@ -1319,6 +1440,7 @@ def generate(f):
         " */\n\n"
         "#ifndef REFERENCE_DATA_H_\n"
         "#define REFERENCE_DATA_H_\n\n"
+        "#include <stdint.h>\n"
         "#include <stddef.h>\n\n"
         "/* Must equal kStateHeadroom in slstm_s8_test.cc/mlstm_s8_test.cc -\n"
         " * both files static_assert against this. See GENERATOR_HEADROOM in\n"
@@ -1368,13 +1490,16 @@ def _s8_json_block(tc, cell):
     quantized, so their integration tests are handed quantized inputs here
     rather than calibrating their own. That keeps four harnesses free of
     quantizer code and removes the one way they could disagree with the C
-    kernel without either being wrong (numpy's round-half-to-even against C's
-    roundf on an exact .5 tie).
+    kernel without either being wrong: a quantizer of their own would have to
+    reproduce float32 scales and C rounding to land on the same integers (see
+    the comment above _c_roundf for the case that showed what it costs not to).
 
-    expected_*_q are the replica's integers, which are the kernel's: measured
-    over every case here they agree exactly on output, y, c/C and n, and on m
-    to within float32 rounding, so a harness asserts raw integers and needs no
-    tolerance. tol_per_channel rides along for the weaker but more meaningful
+    expected_*_q are the replica's integers, which are the kernel's, so a
+    harness asserts raw integers and needs no tolerance. expected_output_q is
+    the one the unit suites also pin, bit-exactly, on every case here
+    (ExpectOutputCodes); y, c/C and n agree exactly as measured, and m to
+    within float32 rounding, but only the adapter suites assert them.
+    tol_per_channel rides along for the weaker but more meaningful
     claim - dequantized output within the calibrated per-channel bound of the
     f32 golden - against the same bounds the unit suites use."""
     H, T, I = tc["H"], tc["T"], tc["I"]
@@ -1391,13 +1516,13 @@ def _s8_json_block(tc, cell):
     else:
         blk = {"expected_C_q": _to_ints(q["C"])}
 
-    wx = cal["W_scale"] * cal["x_scale"]
+    wx = float(_F32(cal["W_scale"]) * _F32(cal["x_scale"]))
     blk.update(cal)
     blk.update({
         "b_scale": wx,
         "x_q": _to_ints(_qs8(x, cal["x_scale"], cal["x_zero_point"])),
         "W_q": _to_ints(_qs8(W.reshape(-1), cal["W_scale"], 0)),
-        "b_q": _to_ints(np.round(b / wx)),
+        "b_q": _to_ints(_qs32(b, wx)),
         "expected_output_q": _to_ints(q["output"]),
         "expected_y_q": _to_ints(q["y"]),
         "expected_n_q": _to_ints(q["n"]),

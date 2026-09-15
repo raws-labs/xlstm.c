@@ -18,8 +18,9 @@ make test-docker-espdl # ESP-DL integration test (runs on an emulated ESP32-S3)
 `make test` is fast (seconds). Docker integration tests are slower and require
 Docker. On every push to `main` and every pull request CI runs `check-refs` and
 `check-tools`; `make test`, `test-ref` and `test-approx` under gcc and clang;
-the perf gate; and `test-neon`, `test-cortexm`, `test-esp` and `test-helium`
-under emulation. The Docker integration tests are run locally, not in CI.
+the perf gate; `test-neon`, `test-cortexm`, `test-esp` and `test-helium`
+under emulation; and the mutation battery on the host pair. The Docker
+integration tests are run locally, not in CI.
 
 ## Workflow
 
@@ -49,6 +50,31 @@ This regenerates both `test/reference_data.h` (C tests) and
 `test/reference_data.json` (Python/Docker tests) from the NX-AI/xlstm
 reference implementation.
 
+Part of what it regenerates is the INT8 output codes and the INT16 exit state,
+which the INT8 suites compare as integers rather than through a bound. Those
+integers are where the generator has to be bit-identical to the kernel rather
+than merely close, so its quantization is float32 throughout, like
+`src/xlstm_quant.c` and unlike the float64 the rest of the replica uses. Nothing
+there may move to float64 for convenience: a scale rounded differently sends a
+value on a .5 boundary to a different integer, and no tolerance can absorb a
+branch.
+
+The integer comparisons are also what covers what a bound cannot reach. An
+element whose golden is exactly zero, or whose honest measured error already
+spans its own dynamic range, has no bound that is both non-vacuous and free of
+false failures; 153 of 5456 exit-state elements are in that position, 118 of
+them in `SweepM64`'s C matrix, and 5 of 269 output channels sit inside their own
+binding bound. An integer comparison does not ask how large an element is, so it
+applies to all of them unchanged. `m` is the one state that keeps no integer,
+because it stays float32 in the kernel.
+
+Two of those five output channels stay unasserted and always will: `SweepS64`
+ch[15] carries 0.37 of one INT8 code and `SweepM64` ch[63] carries 0.20, so
+zeroing either moves no integer. That is the INT8 grid of those cases, not a
+gap in the gate, and it is what the runners' `unasserted` note now reports.
+Closing it would mean a per-channel `y` scale, which is a change to the
+quantization contract rather than to a test.
+
 `make check-tools` matters here because the worked examples in `tools/`
 reproduce that file's calibration and shapes from its float tensors alone. If
 a quantization convention changes and they are not updated with it, they say
@@ -74,8 +100,10 @@ by CI on `cortexm`, which is the target it exists for; the arithmetic is plain
 C99 in the shared cell code with no SIMD contract behind it, so a fourth
 backend would run another instance of the same code rather than another code
 path. `test/gate_test.cc` is what actually asserts the accuracy, in ulp against
-a double reference - the golden suites quantize to INT8 and would pass whatever
-the approximation did. In the default build the same file asserts the opposite:
+a double reference - the golden suites quantize to INT8, and while they do
+compare the resulting codes as integers, an approximation has to be wrong by
+more than half a code before they see it. In the default build the same file
+asserts the opposite:
 that each wrapper is bit-identical to libm. Switching variant does not need a
 `clean` - an object file carries no record of which one built it, so the
 Makefile keeps a stamp named for the variant and makes every rule depend on
@@ -175,7 +203,8 @@ make perf-baseline     # re-record it, deliberately
 
 `make bench` prints wall-clock, which no shared runner reproduces closely
 enough to fail a build on. `make perf` counts retired instructions under
-callgrind instead, collection toggled on one kernel entry point at a time. It
+callgrind instead, collection toggled on one kernel entry point at a time, at
+H=16, 64 and 128. It
 covers both `XLSTM_GATES` builds, including the f32 kernels in both - the
 switch reaches all four kernels, so an f32 pair that came back equal would say
 it had stopped reaching them. The
@@ -202,6 +231,13 @@ Two limits, worth knowing before trusting a green run:
   smaller binary measured slower on three.
 - **Host backends only** (`ref`, `sse2`). `cortexm` and `esp` performance is a
   property of those cores and is measured on hardware.
+
+callgrind can simulate a data cache, and that was tried to close the first
+limit. It does not reproduce across machines: the miss counts move with the
+size of the environment block, and fixing that with `env -i` still left +4.23%
+and +4.96% between this machine and a CI runner at H=128, against a 2%
+tolerance, on a run where the instruction counts were +0.00% on every row. The
+note above the gate in the Makefile has the numbers.
 
 Counts are specific to the compiler that produced them, so the gate refuses to
 compare across a toolchain it did not record.
@@ -241,8 +277,9 @@ The harness that produced them is not part of this repository.
 ## Changing a tolerance, a bound, or the generator
 
 ```bash
-make mutants           # about a minute for the host pair, about two for all
-                       # six backends. Edits the working tree and restores it.
+make mutants           # 71 s for the host pair, 345 s for the five whose
+                       # toolchains were installed when that was measured.
+                       # Edits the working tree and restores it.
 ```
 
 Those changes fail by making a gate quietly stop failing, which a green
@@ -265,15 +302,18 @@ goldens turn out to be tight enough to see that - by 4.6e-05 against their own
 bound - so the suites fail first. That is luck rather than design, and it holds
 for that one body only.
 
-One mutation must **pass**: a 0.1% activation drift. That is the portability
-margin the INT8 bounds are derived with, so that a backend whose sigmoid and
-tanh are approximations rather than libm - a CMSIS-NN lookup table, say - is
-admitted rather than failed. Bounds tight enough to catch it would reject
-legitimate backends. The same drift at 0.2% must fail, which is what keeps the
-margin a margin rather than a hole.
+One mutation is about the **bounds not firing**: a 0.1% activation drift, which
+is the portability margin the INT8 bounds are derived with, so that a backend
+whose sigmoid and tanh are approximations rather than libm - a CMSIS-NN lookup
+table, say - is admitted rather than failed. Bounds tight enough to catch it
+would reject legitimate backends, so that mutation forbids every bound from
+firing. It still fails the run, because the INT8 output codes are also compared
+as integers and a 0.1% drift moves integers; both halves are recorded. The same
+drift at 0.2% must trip a bound, which is what keeps the margin a margin rather
+than a hole.
 
-Each mutation also records **which** assertion must catch it, and one caught by
-a different assertion fails the run as `WRONG CHECK`. Otherwise a check could
+Each mutation also records **which** assertion must catch it, and one whose own
+assertion never fires fails the run as `WRONG CHECK`. Otherwise a check could
 quietly stop firing while a neighbour still catches the mutation, and the
 battery would report green over a blind check - the very loosening it exists to
 detect. The recorded signatures say what actually catches what rather than what
@@ -282,11 +322,17 @@ exit-state checks, not by the per-channel output bound they were written for,
 because a corrupted channel feeds back through `c` and `n` before the output
 path sees it.
 
-It covers all six backends: 48 entries, including the loop tails, zero-point
+It covers all six backends: 50 entries, including the loop tails, zero-point
 folding, lane order and alignment instances only `neon`, `cortexm`, `esp` and
 `helium` compile. A mutation the running backend does not compile reports
 `n/a`, and a missing toolchain reports `NOT COVERED`; neither is an escape.
-Not in CI - it edits files in the working tree, which belongs in a run someone
-chose to start. It restores them on exit, on failure and on interrupt, and a
-run killed outright leaves `.mutants-backup/` for the next run to restore from.
-Run it locally, and say in the PR that you did.
+CI runs the host pair on every push and pull request. Those two carry every
+entry that exercises a tolerance, a bound or a state comparison, which is the
+part that has to be gated on each change; the cross entries exercise the
+fast-path counters, and the four emulated jobs already run those gates
+unmutated. Run all six locally when you touch a cross backend, and say in the
+PR that you did.
+
+The battery edits files in the working tree, which is why it is not part of
+`make test`. It restores them on exit, on failure and on interrupt, and a run
+killed outright leaves `.mutants-backup/` for the next run to restore from.

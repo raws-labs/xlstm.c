@@ -163,8 +163,13 @@ on Cortex-M7, M4F and M33 silicon.
 
 Those boards are where the performance figures come from too. INT8 sLSTM runs
 several times faster than f32 on the wider heads, and built with
-`XLSTM_GATES=approx` it matches or beats CMSIS-NN's INT8 LSTM on the M7 and M4F
-at equal multiply-accumulate count. Raw runs are in
+`XLSTM_GATES=approx` it matches or beats CMSIS-NN's INT8 LSTM at equal
+multiply-accumulate count on the M4F, and on the M7 in the condition these
+boards are measured in: data caches off. Turn the M7's data cache on and that
+reverses above a head width of 8, by 18% to 25% at 16 and 64 - CMSIS-NN's gates
+are table lookups, which a cache makes nearly free, and the approximate gates
+here are polynomials, which it cannot. The M4F has no core data cache, so its
+figures are unaffected. Raw runs are in
 [bench/results/](bench/results/), one file per board and gate build, and
 [CONTRIBUTING.md](CONTRIBUTING.md) describes the method and its limits.
 

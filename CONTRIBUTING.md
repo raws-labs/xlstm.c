@@ -259,6 +259,16 @@ it). Nothing needs the harness to read: each timing line carries its own
 `macs_per_call`, so a comparison can be checked for equal work, and the RP2350
 rows carry `exec_from`, so flash-bound rows cannot be mistaken for compute.
 
+All three Cortex-M boards run with the DATA side of their caches off, and every
+timing line says so in its own `dcache` field, read back from the register
+rather than assumed. That is the M7's L1 D-cache on the H753, the flash ART
+accelerator's data cache on the F446, and nothing at all on the RP2350, which
+has no data cache for SRAM. So these are uncached-data figures and a
+cross-board cycle comparison is not a comparison of the parts. It matters most
+on the M7, where enabling the D-cache is worth 2.66x overall and reverses the
+CMSIS-NN comparison above a head width of 8; on the F446 the ART data cache is
+worth 1.043x and changes nothing.
+
 Timings are the minimum over 17 samples of 8 calls. Repeat runs of one build
 move by about 1%, so results are quoted to two significant figures. The RP2350
 times off a 4 MHz counter, 250 ns a tick, which quantizes its smallest cases;

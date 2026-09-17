@@ -68,18 +68,6 @@ XG_ALL(matvec_s8);
 XG_ALL(rank1_f32);
 XG_ALL(vecmat_f32);
 
-/* The INT16 state pair is gated on sse2 alone, because sse2 alone has a vector
- * body for it. NEON here is armv7-a, whose float divide is vrecpe plus
- * Newton-Raphson rather than an IEEE divide, and xlstm_rank1_update_s16
- * requantizes with a divide that has to round exactly once. So the neon
- * backend defers both to xlstm_simd_scalar.h, and a gate against the scalar
- * body it literally calls would asserts nothing. */
-#if defined(XLSTM_GATE_SSE2)
-#define XLSTM_GATE_HAS_S16 1
-XG_ALL(rank1_s16);
-XG_ALL(vecmat_s16);
-#endif
-
 namespace {
 
 const int kMaxRows = 20;
@@ -111,11 +99,6 @@ alignas(16) float g_k[kMaxH + 4];
 alignas(16) float g_kv[kMaxH + 4];
 alignas(16) float g_vout[kMaxCols + 4];
 float g_vref[kMaxCols + 4];
-
-#ifdef XLSTM_GATE_HAS_S16
-alignas(16) int16_t g_Cq[kMaxH * kMaxH + 8];
-int16_t g_Cqref[kMaxH * kMaxH];
-#endif
 
 /* Seed for out[], so the checks also cover the contract's accumulate
  * semantics (out[i] += row . v) rather than only the product. */
@@ -546,196 +529,6 @@ bool TestVecmat(void) {
     return ok;
 }
 
-#ifdef XLSTM_GATE_HAS_S16
-/* --- the INT16 state pair -------------------------------------------------
- *
- * These two are the INT8 mLSTM's whole O(rows*cols) cost, and until the
- * contract grew to reach them mlstm_step_s8 spelled both inline, so no
- * backend could touch either. They are gated harder than their f32 twins
- * rather than more softly, for two reasons.
- *
- * First, rank1_s16 ends in a REQUANTIZATION, so a lane that is one ulp out in
- * float does not stay one ulp out: it crosses a rounding boundary and lands a
- * whole integer code away, or it does not, depending on the input. Equality on
- * the int16 output is therefore the only check that means anything, and it is
- * also the check the cells themselves make (test/mlstm_s8_test.cc compares
- * exit state as integer codes).
- *
- * Second, the rounding itself is open-coded per lane. xlstm_round_clamp_i32
- * clamps with the scalar ternaries' NaN behaviour, truncates, and adds back
- * (int32_t)(d + d) - round-half-away-from-zero, spelled without a call. A
- * vector body has to reproduce all of that including the operand order of the
- * min and max, because MINPS returns its second operand on NaN and the
- * ternary returns the bound. The seeds below therefore drive C to both int16
- * extremes and put values on exact .5 boundaries.
- */
-bool CheckRank1S16(int rows, int cols, int coff, int koff, int voff,
-                   float f_gate, float i_gate, float scale, float cell_clip,
-                   unsigned long want_vec, unsigned long want_tail) {
-    int16_t* C = g_Cq + coff;
-    const float* k = g_k + koff;
-    const float* v = g_kv + voff;
-    const unsigned long v0 = XG(rank1_s16, vector);
-    const unsigned long s0 = XG(rank1_s16, scalar);
-    const unsigned long t0 = XG(rank1_s16, tail);
-    char shape[96];
-    bool ok = true;
-
-    /* Both extremes, and a stride that is coprime with any vector width. */
-    for (int i = 0; i < rows * cols; ++i) {
-        int code = ((i * 4099) % 65536) - 32768;
-        C[i] = g_Cqref[i] = (int16_t)code;
-    }
-    xlstm_rank1_update_s16(C, f_gate, i_gate, k, v, scale, cell_clip, rows,
-                           cols);
-    xlstm_scalar_rank1_update_s16(g_Cqref, f_gate, i_gate, k, v, scale,
-                                  cell_clip, rows, cols);
-
-    std::snprintf(shape, sizeof shape, "%dx%d C+%d k+%d v+%d clip=%g", rows,
-                  cols, coff, koff, voff, (double)cell_clip);
-    ok &= CheckSplit("rank1_s16", shape,
-                     XG(rank1_s16, vector) - v0,
-                     XG(rank1_s16, scalar) - s0,
-                     XG(rank1_s16, tail) - t0, want_vec, want_tail);
-
-    for (int i = 0; i < rows * cols; ++i) {
-        if (C[i] != g_Cqref[i]) {
-            std::printf("  FAIL rank1_s16 %s C[%d] (row %d col %d): got %d, "
-                        "reference %d. One code apart is not a rounding "
-                        "tolerance - it is a lane that took the other side of "
-                        "a half-way boundary, a clamp whose operands are the "
-                        "wrong way round, or a reciprocal where the scalar "
-                        "body divides.\n",
-                        shape, i, i / cols, i % cols, (int)C[i],
-                        (int)g_Cqref[i]);
-            ok = false;
-            break;
-        }
-    }
-    return ok;
-}
-
-bool TestRank1S16(void) {
-    for (int i = 0; i < kMaxH + 4; ++i) {
-        g_k[i] = 0.5f - (float)((i * 41) % 83) / 82.0f;
-        g_kv[i] = (float)((i * 59) % 61) / 30.0f - 1.0f;
-    }
-
-    /* Counter rules are keyed on cols, the vectorized direction, exactly as
-     * for rank1_f32. The vector body is 8 wide here and not 4: one 128-bit
-     * int16 load feeds two float passes. */
-    static const struct { int rows, cols; unsigned long vec, tail; } kCases[] =
-        {
-            {8, 0, 0, 0}, {0, 8, 0, 0},
-            {8, 1, 0, 1}, {8, 4, 0, 1}, {8, 7, 0, 1},
-            {8, 8, 1, 0}, {8, 16, 1, 0}, {8, 64, 1, 0}, {8, 128, 1, 0},
-            {1, 8, 1, 0}, {3, 8, 1, 0},
-            {8, 9, 1, 1}, {8, 15, 1, 1}, {8, 17, 1, 1}, {8, 31, 1, 1},
-            {17, 17, 1, 1}, {8, 127, 1, 1},
-        };
-    const int kCaseCount = (int)(sizeof kCases / sizeof kCases[0]);
-    bool ok = true;
-
-    /* scale spans four decades, because it is the divisor: the requantized
-     * code, and therefore which side of a half-way boundary a lane lands on,
-     * moves with it. cell_clip 0 is the path every shipped caller takes; the
-     * positive one is the second loop. */
-    static const float kScales[] = {1.0f / 64.0f, 0.00123f, 0.5f};
-    static const float kClips[] = {0.0f, 3.0f};
-
-    for (int s = 0; s < kCaseCount; ++s) {
-        for (int sc = 0; sc < 3; ++sc) {
-            for (int cl = 0; cl < 2; ++cl) {
-                for (int coff = 0; coff < 8; ++coff) {
-                    ok &= CheckRank1S16(kCases[s].rows, kCases[s].cols, coff,
-                                        1, 2, 0.75f, 1.5f, kScales[sc],
-                                        kClips[cl], kCases[s].vec,
-                                        kCases[s].tail);
-                }
-            }
-        }
-    }
-    std::printf("  %d shapes x 3 scales x 2 clip modes x 8 alignments, all "
-                "bit-exact against xlstm_scalar_rank1_update_s16\n",
-                kCaseCount);
-    return ok;
-}
-
-bool CheckVecmatS16(int rows, int cols, int moff, int qoff, int ooff,
-                    float scale, unsigned long want_vec,
-                    unsigned long want_tail) {
-    const int16_t* M = g_Cq + moff;
-    const float* q = g_v + qoff;
-    float* out = g_vout + ooff;
-    const unsigned long v0 = XG(vecmat_s16, vector);
-    const unsigned long s0 = XG(vecmat_s16, scalar);
-    const unsigned long t0 = XG(vecmat_s16, tail);
-    char shape[96];
-    bool ok = true;
-
-    for (int j = 0; j < cols; ++j) out[j] = g_vref[j] = OutSeed(j);
-    xlstm_vecmat_s16(q, M, out, scale, rows, cols);
-    xlstm_scalar_vecmat_s16(q, M, g_vref, scale, rows, cols);
-
-    std::snprintf(shape, sizeof shape, "rows=%d cols=%d M+%d q+%d out+%d s=%g",
-                  rows, cols, moff, qoff, ooff, (double)scale);
-    ok &= CheckSplit("vecmat_s16", shape,
-                     XG(vecmat_s16, vector) - v0,
-                     XG(vecmat_s16, scalar) - s0,
-                     XG(vecmat_s16, tail) - t0, want_vec, want_tail);
-
-    for (int j = 0; j < cols; ++j) {
-        if (out[j] != g_vref[j]) {
-            std::printf("  FAIL vecmat_s16 %s out[%d]: got %.9g, reference "
-                        "%.9g (diff %.2e). Each lane keeps its own out[j] and "
-                        "runs ascending i, so this is exact; a difference is "
-                        "the dequantize folded into q, which reassociates.\n",
-                        shape, j, (double)out[j], (double)g_vref[j],
-                        (double)std::fabs(out[j] - g_vref[j]));
-            ok = false;
-            break;
-        }
-    }
-    return ok;
-}
-
-bool TestVecmatS16(void) {
-    for (int i = 0; i < kMaxH * kMaxH; ++i)
-        g_Cq[i] = (int16_t)(((i * 4099) % 65536) - 32768);
-    for (int i = kMaxH * kMaxH; i < kMaxH * kMaxH + 8; ++i)
-        g_Cq[i] = (int16_t)i;
-    SeedFloats();
-
-    static const struct { int rows, cols; unsigned long vec, tail; } kCases[] =
-        {
-            {8, 0, 0, 0}, {0, 8, 0, 0},
-            {8, 1, 0, 1}, {8, 4, 0, 1}, {8, 7, 0, 1},
-            {8, 8, 1, 0}, {8, 16, 1, 0}, {8, 64, 1, 0}, {8, 128, 1, 0},
-            {1, 8, 1, 0}, {3, 8, 1, 0},
-            {8, 9, 1, 1}, {8, 15, 1, 1}, {8, 17, 1, 1}, {8, 31, 1, 1},
-            {17, 17, 1, 1}, {8, 127, 1, 1},
-        };
-    const int kCaseCount = (int)(sizeof kCases / sizeof kCases[0]);
-    static const float kScales[] = {1.0f / 64.0f, 0.00123f};
-    bool ok = true;
-
-    for (int s = 0; s < kCaseCount; ++s) {
-        for (int sc = 0; sc < 2; ++sc) {
-            for (int moff = 0; moff < 8; ++moff) {
-                for (int qoff = 0; qoff < 4; ++qoff) {
-                    ok &= CheckVecmatS16(kCases[s].rows, kCases[s].cols, moff,
-                                         qoff, 1, kScales[sc], kCases[s].vec,
-                                         kCases[s].tail);
-                }
-            }
-        }
-    }
-    std::printf("  %d shapes x 2 scales x 32 alignment pairings, all "
-                "bit-exact against xlstm_scalar_vecmat_s16\n", kCaseCount);
-    return ok;
-}
-#endif /* XLSTM_GATE_HAS_S16 */
-
 bool Run(const char* name, bool (*fn)(void)) {
     std::printf("[ RUN      ] " XLSTM_GATE_NAME " %s\n", name);
     if (fn()) {
@@ -770,10 +563,6 @@ int main(void) {
         if (!Run("fast path (matvec int8)", TestMatvecS8)) rc = 1;
         if (!Run("fast path (rank-1 update)", TestRank1)) rc = 1;
         if (!Run("fast path (vecmat)", TestVecmat)) rc = 1;
-#ifdef XLSTM_GATE_HAS_S16
-        if (!Run("fast path (rank-1 update, int16)", TestRank1S16)) rc = 1;
-        if (!Run("fast path (vecmat, int16)", TestVecmatS16)) rc = 1;
-#endif
 
         /* Reported, not asserted - the assertions are the four checks above.
          * This is here so a reader of a green log can see in one line that
@@ -793,16 +582,6 @@ int main(void) {
                     XG(rank1_f32, scalar),
                     XG(vecmat_f32, vector), XG(vecmat_f32, tail),
                     XG(vecmat_f32, scalar));
-#ifdef XLSTM_GATE_HAS_S16
-        std::printf("XLSTM_" XLSTM_GATE_UNAME "_FASTPATH_S16: "
-                    "rank1_s16 %lu vector (%lu with a scalar tail) / %lu "
-                    "scalar, vecmat_s16 %lu vector (%lu with a scalar tail) / "
-                    "%lu scalar.\n",
-                    XG(rank1_s16, vector), XG(rank1_s16, tail),
-                    XG(rank1_s16, scalar),
-                    XG(vecmat_s16, vector), XG(vecmat_s16, tail),
-                    XG(vecmat_s16, scalar));
-#endif
 
         /* A backend that never entered a vector body at all would otherwise
          * leave all four checks trivially satisfied only if their tables also
@@ -812,12 +591,7 @@ int main(void) {
         if (XG(matvec_f32, vector) == 0ul || XG(matvec_s8, vector) == 0ul ||
             XG(rank1_f32, vector) == 0ul || XG(vecmat_f32, vector) == 0ul ||
             XG(matvec_f32, tail) == 0ul || XG(matvec_s8, tail) == 0ul ||
-            XG(rank1_f32, tail) == 0ul || XG(vecmat_f32, tail) == 0ul
-#ifdef XLSTM_GATE_HAS_S16
-            || XG(rank1_s16, vector) == 0ul || XG(vecmat_s16, vector) == 0ul
-            || XG(rank1_s16, tail) == 0ul || XG(vecmat_s16, tail) == 0ul
-#endif
-        ) {
+            XG(rank1_f32, tail) == 0ul || XG(vecmat_f32, tail) == 0ul) {
             std::printf("FATAL: a vector body, or a scalar remainder, never "
                         "ran at all. Every kernel in this backend must reach "
                         "both on this gate's own shapes.\n");

@@ -46,7 +46,7 @@ void mlstm_step_s8(
     int DV = v_size;
     int I = input_size;
     int total = 2 * DQ + 2 * DV + 2;
-    int i, j;
+    int i, j, r, c;
 
     float wx_scale = params->W_scale * params->x_quant.scale;
     int32_t x_zp = params->x_quant.zero_point;
@@ -99,30 +99,34 @@ void mlstm_step_s8(
     float f_gate = xlstm_gate_expf(log_f_plus_m - m_new);
     float i_gate = xlstm_gate_expf(i_raw - m_new);
 
-    /* 5. Update C: dequant -> float update -> requant.
-     *
-     * The loop moved behind the backend contract. It was the only O(DQ*DV)
-     * work in either INT8 cell that no backend could reach, so selecting a
-     * backend changed the f32 step and left this one instruction for
-     * instruction identical. The arithmetic and the requantization rounding
-     * are unchanged; xlstm_simd_scalar.h holds the body ref runs and the
-     * definition of bit-exactness for the rest.
-     *
-     * THE DIVIDE INSIDE IT STAYS, deliberately. Hoisting 1/scale out and
-     * multiplying would remove a vdiv per element - the most expensive
-     * instruction in the loop on Cortex-M4 - but x * (1/s) rounds twice where
-     * x / s rounds once, so the two are not the same function. Measured over
-     * 4M random (x, s) pairs drawn from the scale range these kernels
-     * calibrate to: 25.9% of quotients differ before rounding and 1 in ~7,400
-     * still differs after the INT16 round, i.e. a one-LSB state error. The
-     * gate happens not to contain such a pair (0 of its 15,154 state
-     * requantizations move), which is exactly why it is not evidence of
-     * equivalence. Measured and rejected - do not "optimize" this without
-     * redoing that measurement. On x86-64 it is worth 1 to 5%: callgrind puts
-     * it at 2.5% of the loop's instructions, and a reciprocal-hoist probe
-     * measured 0.84s against 0.85s minimum user time over twelve runs. */
-    xlstm_rank1_update_s16(C, f_gate, i_gate, k, v, params->C_quant.scale,
-                           params->cell_clip, DQ, DV);
+    /* 5. Update C: dequant -> float update -> requant */
+    for (r = 0; r < DQ; ++r) {
+        for (c = 0; c < DV; ++c) {
+            float C_prev = (float)C[r * DV + c] * params->C_quant.scale;
+            float C_new = f_gate * C_prev + i_gate * k[r] * v[c];
+
+            if (params->cell_clip > 0.0f) {
+                C_new = xlstm_maxf(-params->cell_clip,
+                                   xlstm_minf(params->cell_clip, C_new));
+            }
+
+            /* The divide stays, deliberately. Hoisting 1/scale out of this
+             * loop and multiplying would remove a vdiv per element - the most
+             * expensive instruction in the loop on Cortex-M4 - but x * (1/s)
+             * rounds twice where x / s rounds once, so the two are not the
+             * same function. Measured over 4M random (x, s) pairs drawn from
+             * the scale range these kernels calibrate to: 25.9% of quotients
+             * differ before rounding and 1 in ~7,400 still differs after the
+             * INT16 round, i.e. a one-LSB state error. The gate happens not
+             * to contain such a pair (0 of its 15,154 state requantizations
+             * move), which is exactly why it is not evidence of equivalence.
+             * Measured and rejected - do not "optimize" this without redoing
+             * that measurement. */
+            float C_q = C_new / params->C_quant.scale;
+            C[r * DV + c] = (int16_t)xlstm_round_clamp_i32(C_q, -32768.0f,
+                                                           32767.0f);
+        }
+    }
 
     /* 6. Update n: dequant -> float update -> requant */
     for (i = 0; i < DQ; ++i) {
@@ -144,20 +148,15 @@ void mlstm_step_s8(
     }
     float denom = xlstm_maxf(fabsf(qn), xlstm_gate_expf(-m_new)) + 1e-6f;
 
-    /* q^T C through the backend, so the readout walks C by contiguous rows.
-     * Spelled inline it indexed C[i * DV + j] with j fixed in the inner loop,
-     * which is a stride of DV int16 per step. One running accumulator per j,
-     * summed in ascending i, is the order it had. */
-    float qC[XLSTM_MAX_HIDDEN];
     for (j = 0; j < DV; ++j) {
-        qC[j] = 0.0f;
-    }
-    xlstm_vecmat_s16(q, C, qC, params->C_quant.scale, DQ, DV);
-
-    for (j = 0; j < DV; ++j) {
+        float qC_j = 0.0f;
+        for (i = 0; i < DQ; ++i) {
+            float C_f = (float)C[i * DV + j] * params->C_quant.scale;
+            qC_j += q[i] * C_f;
+        }
         float y_new = params->skip_output_gate
-                          ? (qC[j] / denom)
-                          : xlstm_gate_sigmoidf(o_raw[j]) * (qC[j] / denom);
+                          ? (qC_j / denom)
+                          : xlstm_gate_sigmoidf(o_raw[j]) * (qC_j / denom);
 
         /* Requantize output to INT8 */
         float y_q = y_new / params->y_quant.scale + (float)params->y_quant.zero_point;

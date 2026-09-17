@@ -59,32 +59,6 @@ void xlstm_rank1_update_f32(float* C, float f_gate, float i_gate,
 void xlstm_vecmat_f32(const float* q, const float* M,
                       float* out, int rows, int cols);
 
-/* The two above, for an INT16 cell matrix held on a symmetric scale.
- *
- * They exist because the INT8 mLSTM's O(rows*cols) state work was the only
- * part of either cell that no backend could reach: mlstm_step_s8 spelled both
- * loops inline, so selecting a backend changed the f32 step and left the INT8
- * step instruction for instruction identical. Measured at rows = cols = 64,
- * callgrind Ir, 200 steps, ref against sse2: the f32 step went 35.88M to
- * 11.84M while the INT8 step body stayed at 33,153,800 on both.
- *
- * Each dequantizes with `(float)C[i] * scale`, works in float, and the update
- * requantizes with `x / scale` and round-half-away-from-zero. The divide is
- * not a reciprocal multiply: see the note in src/mlstm_s8.c.
- *
- * cell_clip <= 0 disables clipping. The two spellings are separate loops
- * rather than a test per element, so the unclipped path - the one every
- * existing caller takes - is exactly the arithmetic it was. */
-void xlstm_rank1_update_s16(int16_t* C, float f_gate, float i_gate,
-                            const float* k, const float* v, float scale,
-                            float cell_clip, int rows, int cols);
-
-/* out[j] += sum_i q[i] * ((float)M[i*cols+j] * scale). Caller pre-fills out.
- * The sum over i runs in ascending order, one running accumulator per j, which
- * is the accumulation order mlstm_step_s8 had when it spelled this inline. */
-void xlstm_vecmat_s16(const float* q, const int16_t* M, float* out,
-                      float scale, int rows, int cols);
-
 /* Returns the name of the active SIMD backend. */
 const char* xlstm_simd_backend(void);
 

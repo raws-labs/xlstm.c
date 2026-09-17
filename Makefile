@@ -908,8 +908,30 @@ check-refs:
 			git ls-files -z | xargs -0 grep -n "$$ref" 2>/dev/null | head -3; \
 			fail=1; }; \
 	done; \
+	want=$$(sha256sum .github/toolchain.Dockerfile test/perf_baseline.txt \
+	        | sha256sum | cut -c1-12); \
+	got=$$(grep -oE 'xlstm-c-toolchain:[0-9a-f]+' \
+	       .github/workflows/ci.yml | sort -u); \
+	if [ "$$got" != "xlstm-c-toolchain:$$want" ]; then \
+		echo "check-refs: ci.yml pins '$$got' but the toolchain Dockerfile"; \
+		echo "  and perf baseline hash to '$$want'. Every cross job would"; \
+		echo "  run in the previous image. Push the new one, then point"; \
+		echo "  every container line at it."; \
+		fail=1; \
+	fi; \
+	stray=$$(awk '/^  refs:/{j=1;next} j && /^  [a-z]/{exit} j' \
+	         .github/workflows/ci.yml \
+	         | grep -E '^[[:space:]]+run:' \
+	         | grep -vE 'run:[[:space:]]+make '); \
+	if [ -n "$$stray" ]; then \
+		echo "check-refs: the refs job runs something other than a make target:"; \
+		echo "$$stray"; \
+		echo "  A step spelled only in ci.yml is a check this command cannot"; \
+		echo "  reproduce, so a green run here would stop meaning a green run"; \
+		echo "  there. Put the check in a make target and call that."; \
+		fail=1; \
+	fi; \
 	if [ $$fail -ne 0 ]; then \
-		echo "State the fact inline instead of citing a file that is not in the repository."; \
 		exit 1; \
 	fi; \
 	echo "check-refs: OK"

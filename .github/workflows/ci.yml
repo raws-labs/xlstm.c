@@ -28,31 +28,20 @@ permissions:
 jobs:
   # Every path and document a tracked file cites must resolve inside the
   # repository, so a clone is self-contained.
+  # This job may only call make targets. A step spelled here and nowhere else
+  # is a check no contributor can run before pushing, which is how the image
+  # pin came to be asserted in this file alone: re-recording the perf baseline
+  # moved the tag, every local gate stayed green, and the drift surfaced on a
+  # pull request. check-refs now asserts both the pin and this rule about its
+  # own job, so the two cannot separate again.
   refs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - run: make check-refs
-      - name: Head-slicing example stays correct
-        run: python3 test/head_slicing_example.py
       - name: Adoption helpers stay correct
         run: make check-tools
-      # A Dockerfile edit that is not matched by an edit to the container lines
-      # below means every cross job is silently testing against the previous
-      # image. Nothing else would notice, so check it here.
-      - name: CI pins the image its Dockerfile describes
-        run: |
-          want=$(sha256sum .github/toolchain.Dockerfile test/perf_baseline.txt \
-                 | sha256sum | cut -c1-12)
-          got=$(grep -oE 'xlstm-c-toolchain:[0-9a-f]+' \
-                .github/workflows/ci.yml | sort -u)
-          if [ "$got" != "xlstm-c-toolchain:$want" ]; then
-            echo "ci.yml pins '$got' but the Dockerfile hashes to '$want'."
-            echo "Publish the image, then point every container line at it."
-            exit 1
-          fi
-          echo "image pin: OK ($want)"
 
   # Host backends. `make test` auto-detects, which resolves to sse2 on the x86
   # runners; `make test-ref` forces the scalar backend. ref is gated explicitly

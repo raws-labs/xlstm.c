@@ -22,6 +22,12 @@ the perf gate; `test-neon`, `test-cortexm`, `test-esp` and `test-helium`
 under emulation; and the mutation battery on the host pair. The Docker
 integration tests are run locally, not in CI.
 
+Those two commands are the whole of the job that runs them, and `check-refs`
+asserts that as a property of the workflow file: a step that CI runs and you
+cannot is rejected there. So a green `make check-refs` locally is a green refs
+job, including the toolchain image pin, which moves whenever the perf baseline
+is re-recorded.
+
 ## Workflow
 
 - This repository has no `develop` branch: open pull requests against `main`.

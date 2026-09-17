@@ -78,11 +78,7 @@ typedef struct {
  *
  * qk_size and v_size must not exceed XLSTM_MAX_HIDDEN (xlstm_simd.h, 256 by
  * default), which sizes stack temporaries inside the kernel. A larger width
- * overruns them; nothing checks it. At the default they cost 5280 bytes of
- * frame here against 1184 in mlstm_step_f32, measured with gcc -O2
- * -fstack-usage: an int32 accumulator of 4*XLSTM_MAX_HIDDEN+2 and a float
- * readout vector of XLSTM_MAX_HIDDEN. Both scale with the constant, so a
- * caller that knows its widths should set it down rather than budget for 256.
+ * overruns them; nothing checks it.
  *
  * params is required and must not be NULL: it carries the quantization
  * scales, which have no default. This differs from mlstm_step_f32, whose

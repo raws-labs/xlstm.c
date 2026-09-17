@@ -16,9 +16,6 @@
  * ===========================================================================*/
 
 #include "xlstm_simd.h"
-
-#include "xlstm_simd_scalar.h"
-
 #include <emmintrin.h> /* SSE2 */
 
 /* Horizontal sum of 4 floats in an __m128. */
@@ -63,12 +60,6 @@ unsigned long xlstm_sse2_rank1_f32_tail = 0;
 unsigned long xlstm_sse2_vecmat_f32_vector = 0;
 unsigned long xlstm_sse2_vecmat_f32_scalar = 0;
 unsigned long xlstm_sse2_vecmat_f32_tail = 0;
-unsigned long xlstm_sse2_rank1_s16_vector = 0;
-unsigned long xlstm_sse2_rank1_s16_scalar = 0;
-unsigned long xlstm_sse2_rank1_s16_tail = 0;
-unsigned long xlstm_sse2_vecmat_s16_vector = 0;
-unsigned long xlstm_sse2_vecmat_s16_scalar = 0;
-unsigned long xlstm_sse2_vecmat_s16_tail = 0;
 #define XLSTM_SSE2_FLAGS int seen_vec_ = 0, seen_tail_ = 0
 #define XLSTM_SSE2_SEEN(vec, tail)                                    \
     ((void)(seen_vec_ |= (vec) != 0, seen_tail_ |= (tail) != 0))
@@ -217,113 +208,6 @@ void xlstm_vecmat_f32(const float* q, const float* M,
         }
     }
     XLSTM_SSE2_COUNT(vecmat_f32);
-}
-
-/* Sign-extend the low four int16 lanes to int32, then to float. */
-static inline __m128 cvt_s16_lo_ps(__m128i x)
-{
-    return _mm_cvtepi32_ps(_mm_srai_epi32(_mm_unpacklo_epi16(x, x), 16));
-}
-
-static inline __m128 cvt_s16_hi_ps(__m128i x)
-{
-    return _mm_cvtepi32_ps(_mm_srai_epi32(_mm_unpackhi_epi16(x, x), 16));
-}
-
-/* xlstm_round_clamp_i32's else-branch, four at a time.
- *
- * min/max order matters and is the scalar order, not the convenient one:
- * `v = (v <= hi) ? v : hi` sends NaN to hi, and MINPS returns its SECOND
- * operand when either is NaN, so the clamp is _mm_min_ps(v, hi) and not the
- * reverse. Equal inputs give the same number either way. */
-static inline __m128i round_clamp_ps(__m128 v, __m128 lo, __m128 hi)
-{
-    v = _mm_min_ps(v, hi);
-    v = _mm_max_ps(v, lo);
-
-    __m128i t = _mm_cvttps_epi32(v);
-    __m128 d = _mm_sub_ps(v, _mm_cvtepi32_ps(t));
-    return _mm_add_epi32(t, _mm_cvttps_epi32(_mm_add_ps(d, d)));
-}
-
-void xlstm_rank1_update_s16(int16_t* C, float f_gate, float i_gate,
-                            const float* k, const float* v, float scale,
-                            float cell_clip, int rows, int cols)
-{
-    int r, c;
-    int cols8 = cols & ~7;
-    __m128 vf = _mm_set1_ps(f_gate);
-    __m128 vs = _mm_set1_ps(scale);
-    __m128 vlo = _mm_set1_ps(-32768.0f);
-    __m128 vhi = _mm_set1_ps(32767.0f);
-    __m128 vclo = _mm_set1_ps(-cell_clip);
-    __m128 vchi = _mm_set1_ps(cell_clip);
-    int clip = cell_clip > 0.0f;
-    XLSTM_SSE2_FLAGS;
-
-    for (r = 0; r < rows; ++r) {
-        __m128 vik = _mm_set1_ps(i_gate * k[r]);
-        int16_t* Crow = C + r * cols;
-
-        for (c = 0; c < cols8; c += 8) {
-            __m128i cv = _mm_loadu_si128((const __m128i*)(Crow + c));
-            __m128 c0 = _mm_add_ps(_mm_mul_ps(vf, _mm_mul_ps(cvt_s16_lo_ps(cv), vs)),
-                                   _mm_mul_ps(vik, _mm_loadu_ps(v + c)));
-            __m128 c1 = _mm_add_ps(_mm_mul_ps(vf, _mm_mul_ps(cvt_s16_hi_ps(cv), vs)),
-                                   _mm_mul_ps(vik, _mm_loadu_ps(v + c + 4)));
-            if (clip) {
-                c0 = _mm_max_ps(_mm_min_ps(c0, vchi), vclo);
-                c1 = _mm_max_ps(_mm_min_ps(c1, vchi), vclo);
-            }
-            _mm_storeu_si128((__m128i*)(Crow + c),
-                             _mm_packs_epi32(
-                                 round_clamp_ps(_mm_div_ps(c0, vs), vlo, vhi),
-                                 round_clamp_ps(_mm_div_ps(c1, vs), vlo, vhi)));
-        }
-        /* c has advanced iff a vector pass ran; short of cols is remainder. */
-        XLSTM_SSE2_SEEN(c > 0, c < cols);
-
-        for (; c < cols; ++c) {
-            float C_new = f_gate * ((float)Crow[c] * scale) + i_gate * k[r] * v[c];
-            if (clip) {
-                C_new = xlstm_maxf(-cell_clip, xlstm_minf(cell_clip, C_new));
-            }
-            Crow[c] = (int16_t)xlstm_round_clamp_i32(C_new / scale,
-                                                    -32768.0f, 32767.0f);
-        }
-    }
-    XLSTM_SSE2_COUNT(rank1_s16);
-}
-
-void xlstm_vecmat_s16(const float* q, const int16_t* M, float* out,
-                      float scale, int rows, int cols)
-{
-    int i, j;
-    int cols8 = cols & ~7;
-    __m128 vs = _mm_set1_ps(scale);
-    XLSTM_SSE2_FLAGS;
-
-    for (i = 0; i < rows; ++i) {
-        __m128 vq = _mm_set1_ps(q[i]);
-        const int16_t* Mrow = M + i * cols;
-
-        for (j = 0; j < cols8; j += 8) {
-            __m128i mv = _mm_loadu_si128((const __m128i*)(Mrow + j));
-            __m128 o0 = _mm_loadu_ps(out + j);
-            __m128 o1 = _mm_loadu_ps(out + j + 4);
-            o0 = _mm_add_ps(o0, _mm_mul_ps(vq, _mm_mul_ps(cvt_s16_lo_ps(mv), vs)));
-            o1 = _mm_add_ps(o1, _mm_mul_ps(vq, _mm_mul_ps(cvt_s16_hi_ps(mv), vs)));
-            _mm_storeu_ps(out + j, o0);
-            _mm_storeu_ps(out + j + 4, o1);
-        }
-        /* j has advanced iff a vector pass ran; short of cols is remainder. */
-        XLSTM_SSE2_SEEN(j > 0, j < cols);
-
-        for (; j < cols; ++j) {
-            out[j] += q[i] * ((float)Mrow[j] * scale);
-        }
-    }
-    XLSTM_SSE2_COUNT(vecmat_s16);
 }
 
 const char* xlstm_simd_backend(void)

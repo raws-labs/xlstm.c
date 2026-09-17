@@ -520,6 +520,20 @@ void xlstm_vecmat_f32(const float* q, const float* M,
 
 #endif /* XLSTM_HL_HAVE_FP */
 
+void xlstm_rank1_update_s16(int16_t* C, float f_gate, float i_gate,
+                            const float* k, const float* v, float scale,
+                            float cell_clip, int rows, int cols)
+{
+    xlstm_scalar_rank1_update_s16(C, f_gate, i_gate, k, v, scale, cell_clip,
+                                  rows, cols);
+}
+
+void xlstm_vecmat_s16(const float* q, const int16_t* M, float* out,
+                      float scale, int rows, int cols)
+{
+    xlstm_scalar_vecmat_s16(q, M, out, scale, rows, cols);
+}
+
 const char* xlstm_simd_backend(void)
 {
     return "helium";

@@ -89,10 +89,15 @@ CROSS_TOOLS = {
 
 SY = "        float y_new = o_gate * (c_new / xlstm_maxf(n_new, 1e-6f));"
 MY = ("        float y_new = params->skip_output_gate\n"
-      "                          ? (qC_j / denom)\n"
-      "                          : xlstm_gate_sigmoidf(o_raw[j]) * (qC_j / denom);")
+      "                          ? (qC[j] / denom)\n"
+      "                          : xlstm_gate_sigmoidf(o_raw[j]) * (qC[j] / denom);")
 SCQ = "        float c_q = c_new / params->c_quant.scale;"
-MCQ = "            float C_q = C_new / params->C_quant.scale;"
+MCQ = ("                float C_new = f_gate * ((float)Crow[c] * scale)"
+       " + ik_r * v[c];\n"
+       "                Crow[c] = (int16_t)xlstm_round_clamp_i32("
+       "C_new / scale,\n"
+       "                                                        -32768.0f,"
+       " 32767.0f);")
 NQ = "        float n_q = n_new / params->n_quant.scale;"
 YQ = ("        float y_q = y_new / params->y_quant.scale"
       " + (float)params->y_quant.zero_point;")
@@ -124,10 +129,19 @@ SSE_TAIL_S8 = """        for (; j < cols; ++j) {
 # computes the whole row - so nothing but the counters can see it.
 SSE_VEC_F32 = """        for (j = 0; j < cols4; j += 4) {
             __m128 m = _mm_loadu_ps(row + j);"""
-SSE_VEC_S8 = "        for (j = 0; j < cols8; j += 8) {"
+SSE_VEC_S8 = """        for (j = 0; j < cols8; j += 8) {
+            /* Load 8 bytes, sign-extend to 16-bit */"""
 SSE_VEC_RANK1 = "        for (c = 0; c < cols4; c += 4) {"
 SSE_VEC_VECMAT = """        for (j = 0; j < cols4; j += 4) {
             __m128 mv = _mm_loadu_ps(Mrow + j);"""
+SSE_VEC_RANK1_S16 = """        for (c = 0; c < cols8; c += 8) {
+            __m128i cv = _mm_loadu_si128((const __m128i*)(Crow + c));"""
+SSE_VEC_VECMAT_S16 = """        for (j = 0; j < cols8; j += 8) {
+            __m128i mv = _mm_loadu_si128((const __m128i*)(Mrow + j));"""
+SSE_STORE_S16 = """            _mm_storeu_si128((__m128i*)(Crow + c),
+                             _mm_packs_epi32(
+                                 round_clamp_ps(_mm_div_ps(c0, vs), vlo, vhi),
+                                 round_clamp_ps(_mm_div_ps(c1, vs), vlo, vhi)));"""
 
 # neon: one tail per kernel, the vector zero point, and the lane pairing.
 NE_TAIL_F32 = """        float s = vaddvq_f32(acc);
@@ -343,7 +357,12 @@ MUTANTS = [
     ("C1", "state requantization drift 1.05x", "fail", sfloor("n"), HOST,
      [(S8, SCQ, SCQ.replace("c_new /", "1.05f * c_new /")),
       (S8, NQ, NQ.replace("n_new /", "1.05f * n_new /")),
-      (M8, MCQ, MCQ.replace("C_new /", "1.05f * C_new /")),
+      (SCALAR, MCQ, MCQ.replace("C_new / scale", "1.05f * C_new / scale")),
+      (SSE2, SSE_STORE_S16,
+       SSE_STORE_S16.replace("_mm_div_ps(c0, vs)",
+                             "_mm_div_ps(_mm_mul_ps(_mm_set1_ps(1.05f), c0), vs)")
+                    .replace("_mm_div_ps(c1, vs)",
+                             "_mm_div_ps(_mm_mul_ps(_mm_set1_ps(1.05f), c1), vs)")),
       (M8, NQ, NQ.replace("n_new /", "1.05f * n_new /"))]),
     ("D1", "n requantized with the c/C scale", "fail", elem("n"), HOST,
      [(S8, NQ, NQ.replace("n_quant", "c_quant")),
@@ -391,6 +410,18 @@ MUTANTS = [
     ("S3", "sse2 rank-1 update never enters its vector body", "fail",
      vecpath("rank1_f32"), ("sse2",),
      [(SSE2, SSE_VEC_RANK1, SSE_VEC_RANK1.replace("c < cols4", "c < 0"))]),
+    # S3b and S4b are the INT16 state pair's twins. They matter more than
+    # their f32 siblings, not less: falling back to the scalar body produces
+    # byte-identical output, so the counter split in test/simd_gate.cc is the
+    # only thing in the tree that can see either one.
+    ("S3b", "sse2 INT16 rank-1 update never enters its vector body", "fail",
+     vecpath("rank1_s16"), ("sse2",),
+     [(SSE2, SSE_VEC_RANK1_S16,
+       SSE_VEC_RANK1_S16.replace("c < cols8", "c < 0"))]),
+    ("S4b", "sse2 INT16 vecmat never enters its vector body", "fail",
+     vecpath("vecmat_s16"), ("sse2",),
+     [(SSE2, SSE_VEC_VECMAT_S16,
+       SSE_VEC_VECMAT_S16.replace("j < cols8", "j < 0"))]),
     ("S4", "sse2 vecmat never enters its vector body", "fail",
      vecpath("vecmat_f32"), ("sse2",),
      [(SSE2, SSE_VEC_VECMAT, SSE_VEC_VECMAT.replace("j < cols4", "j < 0"))]),
@@ -408,9 +439,23 @@ MUTANTS = [
     # with ExpectStateCodes removed and this same mutation applied, the whole
     # suite goes green.
     ("G1", "mLSTM SweepM64 unbounded C element zeroed", "fail",
-     r"FAIL C_q\[\d+\]: expected -?\d+, got -?\d+$", HOST,
-     [(M8, MCQ, MCQ + "\n            if (DQ == 64 && r * DV + c == 23)"
-                     " C_q = 0.0f;")]),
+     r"FAIL C_q\[\d+\]: expected -?\d+, got -?\d+$", ("ref",),
+     [(SCALAR, MCQ,
+       MCQ.replace("Crow[c] = (int16_t)xlstm_round_clamp_i32(C_new / scale,",
+                   "if (rows == 64 && r * cols + c == 23) C_new = 0.0f;\n"
+                   "                Crow[c] = (int16_t)xlstm_round_clamp_i32("
+                   "C_new / scale,"))]),
+
+    # G1b is G1 on the vector path. At rows=64 element 23 is lane 3 of the
+    # c1 half of the c=16 pass, so the mask zeroes that one element and no
+    # other - the same single unbounded element G1 reaches through the scalar
+    # body. Scoped to sse2 because it edits sse2's own body.
+    ("G1b", "mLSTM SweepM64 unbounded C element zeroed, vector path", "fail",
+     r"FAIL C_q\[\d+\]: expected -?\d+, got -?\d+$", ("sse2",),
+     [(SSE2, SSE_STORE_S16,
+       "            if (rows == 64 && r == 0 && c == 16)\n"
+       "                c1 = _mm_and_ps(c1, _mm_castsi128_ps("
+       "_mm_set_epi32(0, -1, -1, -1)));\n" + SSE_STORE_S16)]),
 
     # G2 is G1's output-side twin, and pins what the vacuity note in the s8
     # runners now claims. Test1 ch[0] is one of the channels whose largest

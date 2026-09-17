@@ -15,7 +15,7 @@
  * The scalar C99 kernels, as a single text.
  *
  * Not a translation unit: included by xlstm_simd_ref.c, which is nothing
- * but these four plus a name, and by any backend that accelerates some of
+ * but these six plus a name, and by any backend that accelerates some of
  * the contract and defers the rest. A partial backend that copied these
  * bodies instead would be a second reference free to drift from the first;
  * sharing the text means a fix lands in every backend that defers to it.
@@ -27,6 +27,8 @@
 
 #ifndef XLSTM_SIMD_SCALAR_INC_
 #define XLSTM_SIMD_SCALAR_INC_
+
+#include "xlstm_util.h"
 
 #include <stdint.h>
 
@@ -79,6 +81,56 @@ static inline void xlstm_scalar_vecmat_f32(const float* q, const float* M,
         float qi = q[i];
         for (j = 0; j < cols; ++j) {
             out[j] += qi * M[i * cols + j];
+        }
+    }
+}
+
+/* The INT16 state pair. Both were loop bodies inside mlstm_step_s8 before the
+ * contract grew to reach them, and both are written to be the same arithmetic
+ * in the same order, because test/mlstm_s8_test.cc compares the exit state and
+ * the output as integer codes, not as dequantized floats. */
+
+static inline void xlstm_scalar_rank1_update_s16(int16_t* C, float f_gate,
+                                                 float i_gate, const float* k,
+                                                 const float* v, float scale,
+                                                 float cell_clip, int rows,
+                                                 int cols)
+{
+    int r, c;
+    if (cell_clip > 0.0f) {
+        for (r = 0; r < rows; ++r) {
+            float ik_r = i_gate * k[r];
+            int16_t* Crow = C + r * cols;
+            for (c = 0; c < cols; ++c) {
+                float C_new = f_gate * ((float)Crow[c] * scale) + ik_r * v[c];
+                C_new = xlstm_maxf(-cell_clip, xlstm_minf(cell_clip, C_new));
+                Crow[c] = (int16_t)xlstm_round_clamp_i32(C_new / scale,
+                                                        -32768.0f, 32767.0f);
+            }
+        }
+    } else {
+        for (r = 0; r < rows; ++r) {
+            float ik_r = i_gate * k[r];
+            int16_t* Crow = C + r * cols;
+            for (c = 0; c < cols; ++c) {
+                float C_new = f_gate * ((float)Crow[c] * scale) + ik_r * v[c];
+                Crow[c] = (int16_t)xlstm_round_clamp_i32(C_new / scale,
+                                                        -32768.0f, 32767.0f);
+            }
+        }
+    }
+}
+
+static inline void xlstm_scalar_vecmat_s16(const float* q, const int16_t* M,
+                                           float* out, float scale, int rows,
+                                           int cols)
+{
+    int i, j;
+    for (i = 0; i < rows; ++i) {
+        float qi = q[i];
+        const int16_t* Mrow = M + i * cols;
+        for (j = 0; j < cols; ++j) {
+            out[j] += qi * ((float)Mrow[j] * scale);
         }
     }
 }
